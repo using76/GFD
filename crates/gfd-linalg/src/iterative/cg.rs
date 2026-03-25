@@ -7,27 +7,39 @@ use crate::traits::LinearSolverTrait;
 /// Conjugate Gradient solver.
 ///
 /// Solves A * x = b where A is symmetric positive-definite.
+/// Reuses workspace vectors across solve calls for the same system size.
 #[derive(Debug, Clone)]
 pub struct CG {
     /// Convergence tolerance for the relative residual norm ||r||/||b||.
     pub tol: f64,
     /// Maximum number of iterations.
     pub max_iter: usize,
+    ws_n: usize,
+    ws_r: Vec<f64>,
+    ws_ax: Vec<f64>,
+    ws_p: Vec<f64>,
+    ws_ap: Vec<f64>,
 }
 
 impl CG {
     /// Creates a new CG solver with the given tolerance and maximum iterations.
     pub fn new(tol: f64, max_iter: usize) -> Self {
-        Self { tol, max_iter }
+        Self { tol, max_iter, ws_n: 0, ws_r: Vec::new(), ws_ax: Vec::new(), ws_p: Vec::new(), ws_ap: Vec::new() }
+    }
+
+    fn ensure_workspace(&mut self, n: usize) {
+        if self.ws_n == n { return; }
+        self.ws_r = vec![0.0; n];
+        self.ws_ax = vec![0.0; n];
+        self.ws_p = vec![0.0; n];
+        self.ws_ap = vec![0.0; n];
+        self.ws_n = n;
     }
 }
 
 impl Default for CG {
     fn default() -> Self {
-        Self {
-            tol: 1e-6,
-            max_iter: 1000,
-        }
+        Self::new(1e-6, 1000)
     }
 }
 
@@ -83,21 +95,21 @@ impl LinearSolverTrait for CG {
             });
         }
 
-        // r = b - A * x
-        let mut r = vec![0.0; n];
-        let mut ax = vec![0.0; n];
-        a.spmv(x, &mut ax)?;
+        self.ensure_workspace(n);
+        let r = &mut self.ws_r;
+        let ax = &mut self.ws_ax;
+        let p = &mut self.ws_p;
+        let ap = &mut self.ws_ap;
+
+        // r = b - A * x, p = r, compute rTr (fused)
+        a.spmv(x, ax)?;
+        let mut r_dot_r = 0.0;
         for i in 0..n {
-            r[i] = b[i] - ax[i];
+            let ri = b[i] - ax[i];
+            r[i] = ri;
+            p[i] = ri;
+            r_dot_r += ri * ri;
         }
-
-        // p = r
-        let mut p = r.clone();
-
-        // rTr = r^T * r
-        let mut r_dot_r = dot(&r, &r);
-
-        let mut ap = vec![0.0; n];
 
         for iter in 0..self.max_iter {
             // Check convergence.
@@ -111,7 +123,7 @@ impl LinearSolverTrait for CG {
             }
 
             // ap = A * p
-            a.spmv(&p, &mut ap)?;
+            a.spmv(&p, ap)?;
 
             // alpha = rTr / (p^T * A * p)
             let p_dot_ap = dot(&p, &ap);

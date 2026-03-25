@@ -64,6 +64,8 @@ pub struct SimpleSolver {
     cached_internal_geom: Vec<(usize, usize, usize, f64, f64)>,
     /// Cached per-boundary-face: (face_idx, owner, D_coeff).
     cached_boundary_geom: Vec<(usize, usize, f64)>,
+    /// Reusable CG solver for pressure correction (workspace persists).
+    cg_solver: CG,
 }
 
 impl SimpleSolver {
@@ -86,6 +88,7 @@ impl SimpleSolver {
             cached_num_faces: 0,
             cached_internal_geom: Vec::new(),
             cached_boundary_geom: Vec::new(),
+            cg_solver: CG::new(1e-3, 1000),
         }
     }
 
@@ -373,7 +376,7 @@ impl SimpleSolver {
     ///
     /// where rA_f = interpolated(V / a_P) to face.
     fn solve_pressure_correction(
-        &self,
+        &mut self,
         state: &FluidState,
         mesh: &UnstructuredMesh,
         boundary_pressure: &HashMap<String, f64>,
@@ -475,9 +478,8 @@ impl SimpleSolver {
             apply_dirichlet(&mut system, 0, 0.0);
         }
 
-        // Solve pressure correction (SPD system -- use CG directly)
-        let mut cg_solver = CG::new(1e-3, 1000);
-        let stats = cg_solver
+        // Solve pressure correction (SPD system -- use cached CG solver)
+        let stats = self.cg_solver
             .solve(&system.a, &system.b, &mut system.x)
             .map_err(|e| FluidError::SolverFailed(format!("{:?}", e)))?;
 
