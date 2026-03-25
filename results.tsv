@@ -27,3 +27,7 @@ EXP024	cavity_20_iters	37	keep	relax momentum BiCGSTAB tol to 1e-2 - cavity_20: 
 EXP025	total_benchmark_ms	306	keep	BiCGSTAB workspace vector reuse - 12% faster (eliminates ~250 allocations)
 EXP026	total_benchmark_ms	335	discard	CG workspace reuse - no improvement (CG recreated each call anyway)
 EXP027	total_benchmark_ms	301	keep	call CG directly for pressure correction - 10% faster
+EXP028	total_benchmark_ms	690	keep	CG workspace reuse via cached solver in SimpleSolver - structural improvement
+EXP029	total_benchmark_ms	600	keep	cache pressure correction CSR pattern - 13% faster (eliminates COO->CSR per iter)
+EXP030	total_benchmark_ms	560	keep	cache momentum matrix CSR pattern - 7% faster (reuse pc_ indices)
+EXP031	total_benchmark_ms	560	keep	eliminate all matrix clones via in-place value updates - marginal, cleaner code
