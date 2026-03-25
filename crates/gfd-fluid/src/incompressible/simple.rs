@@ -66,6 +66,15 @@ pub struct SimpleSolver {
     cached_boundary_geom: Vec<(usize, usize, f64)>,
     /// Reusable CG solver for pressure correction (workspace persists).
     cg_solver: CG,
+    /// Cached pressure correction CSR pattern (row_ptr, col_idx).
+    /// Values array is updated in-place each SIMPLE iteration.
+    pc_cached: bool,
+    pc_row_ptr: Vec<usize>,
+    pc_col_idx: Vec<usize>,
+    /// Mapping: for each internal face, the CSR index for (owner→neigh) and (neigh→owner).
+    pc_face_csr_idx: Vec<(usize, usize)>,
+    /// Mapping: CSR index for diagonal entry of each cell.
+    pc_diag_csr_idx: Vec<usize>,
 }
 
 impl SimpleSolver {
@@ -89,6 +98,11 @@ impl SimpleSolver {
             cached_internal_geom: Vec::new(),
             cached_boundary_geom: Vec::new(),
             cg_solver: CG::new(1e-3, 1000),
+            pc_cached: false,
+            pc_row_ptr: Vec::new(),
+            pc_col_idx: Vec::new(),
+            pc_face_csr_idx: Vec::new(),
+            pc_diag_csr_idx: Vec::new(),
         }
     }
 
@@ -382,50 +396,50 @@ impl SimpleSolver {
         boundary_pressure: &HashMap<String, f64>,
     ) -> Result<Vec<f64>> {
         let n = mesh.num_cells();
-        let mut a_p_pc = vec![0.0; n];
-        let mut sources_pc = vec![0.0; n];
-
-        let n_internal = self.cached_internal_geom.len();
-        let nnz_estimate = n + 2 * n_internal;
-        let mut assembler = Assembler::with_nnz_estimate(n, nnz_estimate);
-
         let vel_vals = state.velocity.values();
         let rho_half = 0.5 * self.density;
 
-        // Internal faces: use cached geometry (distance and D precomputed)
-        for &(fi, owner, neigh, dist, _d) in &self.cached_internal_geom {
-            let face = &mesh.faces[fi];
+        // First call: build CSR pattern via Assembler and cache it
+        if !self.pc_cached {
+            self.build_pressure_correction_pattern(n, mesh, boundary_pressure)?;
+        }
 
-            // rA_f = 0.5 * (V_O / aP_O + V_N / aP_N)
+        // Fast path: update CSR values in-place using cached pattern
+        let nnz = self.pc_col_idx.len();
+        let mut values = vec![0.0; nnz];
+        let mut sources_pc = vec![0.0; n];
+
+        // Internal faces: compute coefficients and mass flux
+        for (face_idx, &(fi, owner, neigh, dist, _d)) in self.cached_internal_geom.iter().enumerate() {
+            let face = &mesh.faces[fi];
             let ra_o = mesh.cells[owner].volume / self.a_p_momentum[owner];
             let ra_n = mesh.cells[neigh].volume / self.a_p_momentum[neigh];
             let ra_f = 0.5 * (ra_o + ra_n);
-
-            // Pressure correction coefficient (using cached distance)
             let coeff = self.density * ra_f * face.area / dist;
 
-            a_p_pc[owner] += coeff;
-            a_p_pc[neigh] += coeff;
-            assembler.add_neighbor(owner, neigh, coeff);
-            assembler.add_neighbor(neigh, owner, coeff);
+            // Update off-diagonal entries
+            let (idx_on, idx_no) = self.pc_face_csr_idx[face_idx];
+            values[idx_on] = -coeff;
+            values[idx_no] = -coeff;
+            // Accumulate diagonal
+            values[self.pc_diag_csr_idx[owner]] += coeff;
+            values[self.pc_diag_csr_idx[neigh]] += coeff;
 
-            // RHS: mass imbalance (using cached vel_vals)
+            // RHS: mass imbalance
             let vo = vel_vals[owner];
             let vn = vel_vals[neigh];
             let mass_flux = rho_half * face.area
                 * ((vo[0] + vn[0]) * face.normal[0]
                  + (vo[1] + vn[1]) * face.normal[1]
                  + (vo[2] + vn[2]) * face.normal[2]);
-
             sources_pc[owner] -= mass_flux;
             sources_pc[neigh] += mass_flux;
         }
 
-        // Boundary faces
+        // Boundary faces: RHS contribution only
         for &(fi, owner, _d) in &self.cached_boundary_geom {
             let face = &mesh.faces[fi];
             let patch_name = self.get_face_patch(face.id);
-
             if let Some(pname) = patch_name {
                 if boundary_pressure.contains_key(pname) {
                     let vel_o = vel_vals[owner];
@@ -450,14 +464,11 @@ impl SimpleSolver {
             }
         }
 
-        // Add diagonals and sources to assembler
-        for i in 0..n {
-            assembler.add_diagonal(i, a_p_pc[i]);
-            assembler.add_source(i, sources_pc[i]);
-        }
-        let mut system = assembler
-            .finalize()
-            .map_err(|e| FluidError::PressureCorrectionFailed(e.to_string()))?;
+        // Build system using cached pattern
+        let a = gfd_core::SparseMatrix::new(
+            n, n, self.pc_row_ptr.clone(), self.pc_col_idx.clone(), values,
+        ).map_err(|e| FluidError::PressureCorrectionFailed(format!("{:?}", e)))?;
+        let mut system = gfd_core::LinearSystem::new(a, sources_pc);
 
         // Apply Dirichlet p' = 0 for outlet patches
         for patch in &mesh.boundary_patches {
@@ -469,8 +480,7 @@ impl SimpleSolver {
             }
         }
 
-        // If no pressure BC was set (e.g., fully enclosed domain),
-        // fix one cell to zero to make the system non-singular
+        // No pressure BC → fix cell 0
         let has_pressure_bc = boundary_pressure
             .keys()
             .any(|k| mesh.boundary_patch(k).is_some());
@@ -495,6 +505,85 @@ impl SimpleSolver {
         }
 
         Ok(system.x)
+    }
+
+    /// Build the CSR pattern for the pressure correction matrix.
+    /// Called once on the first SIMPLE iteration; cached for subsequent iterations.
+    fn build_pressure_correction_pattern(
+        &mut self,
+        n: usize,
+        mesh: &UnstructuredMesh,
+        boundary_pressure: &HashMap<String, f64>,
+    ) -> Result<()> {
+        // Use Assembler to build the pattern with dummy values
+        let n_internal = self.cached_internal_geom.len();
+        let nnz_estimate = n + 2 * n_internal;
+        let mut assembler = Assembler::with_nnz_estimate(n, nnz_estimate);
+
+        for &(_fi, owner, neigh, _dist, _d) in &self.cached_internal_geom {
+            assembler.add_neighbor(owner, neigh, 1.0);
+            assembler.add_neighbor(neigh, owner, 1.0);
+        }
+        for i in 0..n {
+            assembler.add_diagonal(i, 1.0);
+            assembler.add_source(i, 0.0);
+        }
+
+        let system = assembler
+            .finalize()
+            .map_err(|e| FluidError::PressureCorrectionFailed(e.to_string()))?;
+
+        // Cache the CSR pattern
+        self.pc_row_ptr = system.a.row_ptr.clone();
+        self.pc_col_idx = system.a.col_idx.clone();
+
+        // Build diagonal index mapping
+        self.pc_diag_csr_idx = vec![0; n];
+        for i in 0..n {
+            let start = self.pc_row_ptr[i];
+            let end = self.pc_row_ptr[i + 1];
+            for idx in start..end {
+                if self.pc_col_idx[idx] == i {
+                    self.pc_diag_csr_idx[i] = idx;
+                    break;
+                }
+            }
+        }
+
+        // Build face-to-CSR-index mapping for off-diagonal entries
+        self.pc_face_csr_idx = Vec::with_capacity(n_internal);
+        for &(_fi, owner, neigh, _dist, _d) in &self.cached_internal_geom {
+            // Find CSR index for (owner, neigh) entry
+            let idx_on = {
+                let start = self.pc_row_ptr[owner];
+                let end = self.pc_row_ptr[owner + 1];
+                let mut found = start;
+                for idx in start..end {
+                    if self.pc_col_idx[idx] == neigh {
+                        found = idx;
+                        break;
+                    }
+                }
+                found
+            };
+            // Find CSR index for (neigh, owner) entry
+            let idx_no = {
+                let start = self.pc_row_ptr[neigh];
+                let end = self.pc_row_ptr[neigh + 1];
+                let mut found = start;
+                for idx in start..end {
+                    if self.pc_col_idx[idx] == owner {
+                        found = idx;
+                        break;
+                    }
+                }
+                found
+            };
+            self.pc_face_csr_idx.push((idx_on, idx_no));
+        }
+
+        self.pc_cached = true;
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
