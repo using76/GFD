@@ -1,0 +1,94 @@
+{
+  "setup": {
+    "general": {
+      "name": "30x10_pipe",
+      "dimension": 2,
+      "mesh_file": "",
+      "mesh_format": "generated"
+    },
+    "models": {
+      "flow": "incompressible",
+      "turbulence": "none",
+      "energy": false,
+      "radiation": "none",
+      "solid": "none",
+      "species": "none"
+    },
+    "materials": [
+      {
+        "name": "mat",
+        "material_type": "fluid",
+        "properties": {
+          "density": 1.0,
+          "viscosity": 0.1
+        }
+      }
+    ],
+    "boundary_conditions": [
+      {
+        "patch": "xmin",
+        "type": "velocity_inlet",
+        "parameters": {
+          "vx": 1.0,
+          "vy": 0.0,
+          "vz": 0.0
+        }
+      },
+      {
+        "patch": "xmax",
+        "type": "pressure_outlet",
+        "parameters": {
+          "pressure": 0.0
+        }
+      },
+      {
+        "patch": "ymin",
+        "type": "wall",
+        "parameters": {}
+      },
+      {
+        "patch": "ymax",
+        "type": "wall",
+        "parameters": {}
+      }
+    ],
+    "initial_conditions": {
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "pressure": 0
+    }
+  },
+  "solver": {
+    "pv_coupling": "SIMPLE",
+    "convection_scheme": "upwind",
+    "relaxation": {
+      "velocity": 0.3,
+      "pressure": 0.2,
+      "turbulence": 0.7,
+      "energy": 0.9
+    },
+    "linear_solver": {
+      "solver_type": "bicgstab",
+      "max_iterations": 1000,
+      "tolerance": 1e-06,
+      "preconditioner": "jacobi"
+    }
+  },
+  "run": {
+    "simulation_type": "steady",
+    "max_iterations": 2000,
+    "tolerance": 0.0003
+  },
+  "results": {
+    "output_dir": "results/pipe_flow",
+    "format": "vtk",
+    "write_interval": 100,
+    "fields": [
+      "velocity",
+      "pressure"
+    ]
+  }
+}

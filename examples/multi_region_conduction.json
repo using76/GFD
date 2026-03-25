@@ -1,0 +1,76 @@
+{
+  "setup": {
+    "general": {
+      "name": "20x10_multireg",
+      "dimension": 2,
+      "mesh_file": "",
+      "mesh_format": "generated"
+    },
+    "models": {
+      "flow": "none",
+      "turbulence": "none",
+      "energy": true,
+      "radiation": "none",
+      "solid": "none",
+      "species": "none"
+    },
+    "materials": [
+      {
+        "name": "mat",
+        "material_type": "solid",
+        "properties": {
+          "conductivity": 100.0
+        }
+      }
+    ],
+    "boundary_conditions": [
+      {
+        "patch": "xmin",
+        "type": "fixed_temperature",
+        "parameters": {
+          "temperature": 1000
+        }
+      },
+      {
+        "patch": "xmax",
+        "type": "fixed_temperature",
+        "parameters": {
+          "temperature": 300
+        }
+      }
+    ],
+    "initial_conditions": {
+      "temperature": 500
+    }
+  },
+  "solver": {
+    "pv_coupling": "SIMPLE",
+    "convection_scheme": "upwind",
+    "relaxation": {
+      "velocity": 0.5,
+      "pressure": 0.3,
+      "turbulence": 0.7,
+      "energy": 0.9
+    },
+    "linear_solver": {
+      "solver_type": "bicgstab",
+      "max_iterations": 1000,
+      "tolerance": 1e-06,
+      "preconditioner": "jacobi"
+    }
+  },
+  "run": {
+    "simulation_type": "steady",
+    "max_iterations": 1,
+    "tolerance": 1e-06
+  },
+  "results": {
+    "output_dir": "results/multi_region_conduction",
+    "format": "vtk",
+    "write_interval": 100,
+    "fields": [
+      "velocity",
+      "pressure"
+    ]
+  }
+}

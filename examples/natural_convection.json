@@ -1,0 +1,94 @@
+{
+  "setup": {
+    "general": {
+      "name": "20x20_buoyancy_cavity",
+      "dimension": 2,
+      "mesh_file": "",
+      "mesh_format": "generated"
+    },
+    "models": {
+      "flow": "incompressible",
+      "turbulence": "none",
+      "energy": true,
+      "radiation": "none",
+      "solid": "none",
+      "species": "none"
+    },
+    "materials": [
+      {
+        "name": "mat",
+        "material_type": "fluid",
+        "properties": {
+          "density": 1.0,
+          "viscosity": 0.01,
+          "conductivity": 0.1
+        }
+      }
+    ],
+    "boundary_conditions": [
+      {
+        "patch": "ymax",
+        "type": "wall",
+        "parameters": {
+          "vx": 0.5,
+          "vy": 0.0,
+          "vz": 0.0
+        }
+      },
+      {
+        "patch": "ymin",
+        "type": "wall",
+        "parameters": {}
+      },
+      {
+        "patch": "xmin",
+        "type": "wall",
+        "parameters": {}
+      },
+      {
+        "patch": "xmax",
+        "type": "wall",
+        "parameters": {}
+      }
+    ],
+    "initial_conditions": {
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "pressure": 0,
+      "temperature": 350.0
+    }
+  },
+  "solver": {
+    "pv_coupling": "SIMPLE",
+    "convection_scheme": "upwind",
+    "relaxation": {
+      "velocity": 0.5,
+      "pressure": 0.3,
+      "turbulence": 0.7,
+      "energy": 0.9
+    },
+    "linear_solver": {
+      "solver_type": "bicgstab",
+      "max_iterations": 1000,
+      "tolerance": 1e-06,
+      "preconditioner": "jacobi"
+    }
+  },
+  "run": {
+    "simulation_type": "steady",
+    "max_iterations": 500,
+    "tolerance": 0.0001
+  },
+  "results": {
+    "output_dir": "results/natural_convection",
+    "format": "vtk",
+    "write_interval": 100,
+    "fields": [
+      "velocity",
+      "pressure"
+    ]
+  }
+}

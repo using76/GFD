@@ -140,17 +140,21 @@ fn run_simulation(config_path: &PathBuf, threads: Option<usize>, gpu: bool) -> R
     // 4. Determine physics and run
     let has_flow = config.setup.models.flow == "incompressible";
     let has_energy = config.setup.models.energy;
+    let has_solid = config.setup.models.solid == "linear_elastic"
+        || config.setup.models.solid == "hyperelastic";
 
     if gpu {
         tracing::info!("GPU acceleration enabled for linear solves");
     }
 
-    if has_energy && !has_flow {
+    if has_solid {
+        run_solid_mechanics(&config, &mesh)?;
+    } else if has_energy && !has_flow {
         run_heat_conduction(&config, &mesh)?;
     } else if has_flow {
         run_fluid_flow(&config, &mesh, has_energy, gpu)?;
     } else {
-        anyhow::bail!("No physics model enabled. Set models.flow or models.energy in config.");
+        anyhow::bail!("No physics model enabled. Set models.flow, models.energy, or models.solid in config.");
     }
 
     Ok(())
@@ -340,6 +344,17 @@ fn run_fluid_flow(
         }
     }
 
+    // Auto-add unlisted boundary patches as no-slip walls (e.g., zmin/zmax for 2D meshes)
+    for patch in &mesh.boundary_patches {
+        let name = &patch.name;
+        if !boundary_velocities.contains_key(name)
+            && !boundary_pressure.contains_key(name)
+            && !wall_patches.contains(name)
+        {
+            wall_patches.push(name.clone());
+        }
+    }
+
     // Initialize state
     let n = mesh.num_cells();
     let init_vel = config
@@ -365,6 +380,13 @@ fn run_fluid_flow(
     solver.alpha_u = config.solver.relaxation.velocity;
     solver.alpha_p = config.solver.relaxation.pressure;
     solver.use_gpu = gpu;
+
+    // Store BCs in solver for pressure correction (required for inlet mass flux)
+    solver.set_boundary_conditions(
+        boundary_velocities.clone(),
+        boundary_pressure.clone(),
+        wall_patches.clone(),
+    );
 
     // Iteration loop
     let max_iter = config.run.max_iterations;
@@ -395,6 +417,73 @@ fn run_fluid_flow(
 
     // Write output
     write_results(config, mesh, &state.pressure, Some(&state.velocity))?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Solid mechanics solver (FEM)
+// ---------------------------------------------------------------------------
+
+fn run_solid_mechanics(
+    config: &SimulationConfig,
+    mesh: &gfd_core::mesh::unstructured::UnstructuredMesh,
+) -> Result<()> {
+    use gfd_solid::elastic::LinearElasticSolver;
+    use gfd_solid::SolidState;
+
+    let youngs_modulus = config
+        .setup
+        .materials
+        .first()
+        .and_then(|m| m.properties.get("youngs_modulus").copied())
+        .unwrap_or(200e9);
+    let poisson_ratio = config
+        .setup
+        .materials
+        .first()
+        .and_then(|m| m.properties.get("poisson_ratio").copied())
+        .unwrap_or(0.3);
+
+    tracing::info!(E = youngs_modulus, nu = poisson_ratio, "Solid mechanics setup");
+
+    let solver = LinearElasticSolver::new(youngs_modulus, poisson_ratio);
+
+    let mut fixed_patches: Vec<String> = Vec::new();
+    let mut force_patches: HashMap<String, [f64; 3]> = HashMap::new();
+
+    for bc in &config.setup.boundary_conditions {
+        match bc.bc_type.as_str() {
+            "fixed" | "clamped" => {
+                fixed_patches.push(bc.patch.clone());
+            }
+            "force" | "traction" => {
+                let fx = bc.parameters.get("fx").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let fy = bc.parameters.get("fy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let fz = bc.parameters.get("fz").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                force_patches.insert(bc.patch.clone(), [fx, fy, fz]);
+            }
+            _ => {}
+        }
+    }
+
+    let n = mesh.num_cells();
+    let mut state = SolidState {
+        displacement: VectorField::from_vec("displacement", vec![[0.0; 3]; n]),
+        stress: gfd_core::field::TensorField::zeros("stress", n),
+        strain: gfd_core::field::TensorField::zeros("strain", n),
+    };
+
+    let body_force = [0.0, 0.0, 0.0];
+    let max_disp = solver
+        .solve(&mut state, mesh, body_force, &fixed_patches, &force_patches)
+        .map_err(|e| anyhow::anyhow!("Solid solver failed: {:?}", e))?;
+
+    tracing::info!(max_displacement = max_disp, "Solid mechanics solved");
+
+    write_results(config, mesh, &ScalarField::from_vec("displacement_magnitude",
+        state.displacement.values().iter().map(|d| (d[0]*d[0]+d[1]*d[1]+d[2]*d[2]).sqrt()).collect()),
+        Some(&state.displacement))?;
 
     Ok(())
 }
