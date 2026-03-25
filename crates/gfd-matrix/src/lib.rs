@@ -51,6 +51,6 @@ pub type Result<T> = std::result::Result<T, MatrixError>;
 
 pub use sparse::CooMatrix;
 pub use assembler::Assembler;
-pub use block::{BlockMatrix, BlockAssembler};
+pub use block::{BlockMatrix, BlockAssembler, BlockLinearSystem};
 pub use boundary::{apply_dirichlet, apply_neumann};
 pub use diagnostics::{DiagnosticReport, check_diagonal_dominance, find_zero_pivots};

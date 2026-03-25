@@ -81,17 +81,51 @@ impl VdbGrid {
     }
 }
 
-/// Writes one or more VDB grids to a file.
-pub fn write_vdb(_path: &str, _grids: &[VdbGrid]) -> Result<()> {
-    // OpenVDB file format is complex; return error for now.
-    Err(VdbError::IoError(
-        "VDB file writing is not yet implemented. Use gfd-io VTK export instead.".to_string(),
-    ))
+/// Writes one or more VDB grids to a file in the simplified GFD-VDB binary format.
+pub fn write_vdb(path: &str, grids: &[VdbGrid]) -> Result<()> {
+    let bytes = io::write_to_bytes(grids)?;
+    std::fs::write(path, bytes).map_err(|e| {
+        VdbError::IoError(format!("Failed to write VDB file '{}': {}", path, e))
+    })
 }
 
-/// Reads VDB grids from a file.
-pub fn read_vdb(_path: &str) -> Result<Vec<VdbGrid>> {
-    Err(VdbError::IoError(
-        "VDB file reading is not yet implemented.".to_string(),
-    ))
+/// Reads VDB grids from a file in the simplified GFD-VDB binary format.
+pub fn read_vdb(path: &str) -> Result<Vec<VdbGrid>> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        VdbError::IoError(format!("Failed to read VDB file '{}': {}", path, e))
+    })?;
+    io::read_from_bytes(&bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_roundtrip() {
+        let tmp_dir = std::env::temp_dir();
+        let path = tmp_dir.join("gfd_vdb_test_roundtrip.vdb");
+        let path_str = path.to_str().unwrap();
+
+        let mut grid = VdbGrid::with_data("pressure", vec![1.0, 2.0, 3.0, 4.0]);
+        grid.set_metadata("solver", "gfd");
+
+        write_vdb(path_str, &[grid.clone()]).unwrap();
+        let read_back = read_vdb(path_str).unwrap();
+
+        assert_eq!(read_back.len(), 1);
+        assert_eq!(read_back[0].name, "pressure");
+        assert_eq!(read_back[0].data, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(read_back[0].metadata.get("solver").unwrap(), "gfd");
+        assert_eq!(read_back[0].transform, grid.transform);
+
+        // Clean up
+        let _ = std::fs::remove_file(path_str);
+    }
+
+    #[test]
+    fn read_nonexistent_file() {
+        let result = read_vdb("/tmp/gfd_vdb_nonexistent_12345.vdb");
+        assert!(result.is_err());
+    }
 }
