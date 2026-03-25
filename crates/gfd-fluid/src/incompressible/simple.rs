@@ -234,70 +234,79 @@ impl SimpleSolver {
             }
         }
 
-        // We will store the diagonal from the last component (they are similar for
-        // uniform density/viscosity on the same mesh). For correctness we average.
-        let mut a_p_sum = vec![0.0; n];
+        // The momentum matrix A is the SAME for all 3 velocity components
+        // (diffusion + convection coefficients are component-independent).
+        // Build the matrix once and reuse for all 3 solves.
 
         // Precise NNZ estimate: n diagonals + 2 off-diagonals per internal face
         let n_internal = internal_faces.len();
         let nnz_estimate = n + 2 * n_internal;
 
+        // --- Build a_p (diagonal) and the matrix (off-diagonals) once ---
         let mut a_p = vec![0.0; n];
+        let mut assembler = Assembler::with_nnz_estimate(n, nnz_estimate);
+
+        for iface in &internal_faces {
+            let f_pos = f64::max(iface.f_flux, 0.0);
+            let f_neg = f64::max(-iface.f_flux, 0.0);
+            a_p[iface.owner] += iface.d + f_pos;
+            a_p[iface.neigh] += iface.d + f_neg;
+            assembler.add_neighbor(iface.owner, iface.neigh, iface.d + f_neg);
+            assembler.add_neighbor(iface.neigh, iface.owner, iface.d + f_pos);
+        }
+
+        for bface in &boundary_faces {
+            if bface.bc_vel.is_some() {
+                a_p[bface.owner] += bface.d + f64::max(bface.f_flux_bc, 0.0);
+            } else if bface.is_wall {
+                a_p[bface.owner] += bface.d;
+            }
+        }
+
+        // Apply under-relaxation to diagonal (same for all components)
+        let a_p_unrelaxed: Vec<f64> = a_p.clone();
+        let ur_factor = (1.0 - self.alpha_u) / self.alpha_u;
+        for i in 0..n {
+            a_p[i] /= self.alpha_u;
+            assembler.add_diagonal(i, a_p[i]);
+            // sources will be added per-component via a separate pass
+            assembler.add_source(i, 0.0);
+        }
+
+        // Build CSR matrix once (the matrix template)
+        let template_system = assembler
+            .finalize()
+            .map_err(|e| FluidError::PressureCorrectionFailed(e.to_string()))?;
+
+        // Store for pressure correction (a_p is the same for all components)
+        self.a_p_momentum = a_p.clone();
+
         let mut sources = vec![0.0; n];
 
+        // --- Solve each velocity component using the shared matrix ---
         for comp in 0..3 {
-            a_p.fill(0.0);
             sources.fill(0.0);
-            let mut assembler = Assembler::with_nnz_estimate(n, nnz_estimate);
 
-            // --- Internal faces: add off-diagonal directly to assembler ---
-            for iface in &internal_faces {
-                let f_pos = f64::max(iface.f_flux, 0.0);
-                let f_neg = f64::max(-iface.f_flux, 0.0);
-                a_p[iface.owner] += iface.d + f_pos;
-                a_p[iface.neigh] += iface.d + f_neg;
-                assembler.add_neighbor(iface.owner, iface.neigh, iface.d + f_neg);
-                assembler.add_neighbor(iface.neigh, iface.owner, iface.d + f_pos);
-            }
-
-            // --- Boundary faces ---
+            // Boundary face sources (component-dependent)
             for bface in &boundary_faces {
                 if let Some(ref bv) = bface.bc_vel {
-                    a_p[bface.owner] += bface.d + f64::max(bface.f_flux_bc, 0.0);
                     sources[bface.owner] += (bface.d + f64::max(-bface.f_flux_bc, 0.0)) * bv[comp];
-                } else if bface.is_wall {
-                    a_p[bface.owner] += bface.d;
                 }
             }
 
-            // --- Pressure gradient source ---
-            for i in 0..n {
-                let gp = grad_p.values()[i];
-                sources[i] -= gp[comp] * mesh.cells[i].volume;
-            }
-
-            // --- Under-relaxation ---
+            // Pressure gradient source
             let vel_values = state.velocity.values();
             for i in 0..n {
-                let a_p_orig = a_p[i];
-                a_p[i] /= self.alpha_u;
-                sources[i] +=
-                    (1.0 - self.alpha_u) / self.alpha_u * a_p_orig * vel_values[i][comp];
+                sources[i] -= grad_p.values()[i][comp] * mesh.cells[i].volume;
+                // Under-relaxation source
+                sources[i] += ur_factor * a_p_unrelaxed[i] * vel_values[i][comp];
             }
 
-            // Accumulate diagonal for pressure correction
-            for i in 0..n {
-                a_p_sum[i] += a_p[i];
-            }
-
-            // --- Add diagonals and sources to assembler, then finalize ---
-            for i in 0..n {
-                assembler.add_diagonal(i, a_p[i]);
-                assembler.add_source(i, sources[i]);
-            }
-            let mut system = assembler
-                .finalize()
-                .map_err(|e| FluidError::PressureCorrectionFailed(e.to_string()))?;
+            // Build system: reuse matrix, set component-specific RHS
+            let mut system = gfd_core::LinearSystem::new(
+                template_system.a.clone(),
+                sources.clone(),
+            );
 
             // Use current velocity as initial guess
             for i in 0..n {
@@ -312,9 +321,6 @@ impl SimpleSolver {
                 vel_mut[i][comp] = system.x[i];
             }
         }
-
-        // Store the averaged diagonal for pressure correction
-        self.a_p_momentum = a_p_sum.iter().map(|v| v / 3.0).collect();
 
         Ok(())
     }
