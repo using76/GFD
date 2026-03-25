@@ -66,6 +66,8 @@ pub struct SimpleSolver {
     cached_boundary_geom: Vec<(usize, usize, f64)>,
     /// Cached cell volumes (flat array for fast access).
     cached_volumes: Vec<f64>,
+    /// Cached face.area * face.normal (normal_area) for all faces.
+    cached_normal_area: Vec<[f64; 3]>,
     /// Reusable CG solver for pressure correction (workspace persists).
     cg_solver: CG,
     /// Cached momentum CSR matrix (values updated in-place each iteration).
@@ -108,6 +110,7 @@ impl SimpleSolver {
             cached_internal_geom: Vec::new(),
             cached_boundary_geom: Vec::new(),
             cached_volumes: Vec::new(),
+            cached_normal_area: Vec::new(),
             cg_solver: CG::new(1e-3, 1000),
             mom_matrix: None,
             pc_matrix: None,
@@ -160,8 +163,11 @@ impl SimpleSolver {
         }
         self.cached_num_faces = num_faces;
 
-        // Cache cell volumes into flat array
+        // Cache cell volumes and face normal*area products
         self.cached_volumes = mesh.cells.iter().map(|c| c.volume).collect();
+        self.cached_normal_area = mesh.faces.iter()
+            .map(|f| [f.area * f.normal[0], f.area * f.normal[1], f.area * f.normal[2]])
+            .collect();
 
         // Cache geometric data (distances and diffusion coefficients)
         self.cached_internal_geom.clear();
@@ -281,15 +287,15 @@ impl SimpleSolver {
         mom_mat.values.fill(0.0);
         self.ws_a_p.fill(0.0);
 
-        // Internal faces: compute D+F coefficients
+        // Internal faces: compute D+F coefficients using cached normal*area
         for (face_idx, &(fi, owner, neigh, _dist, d)) in self.cached_internal_geom.iter().enumerate() {
-            let face = &mesh.faces[fi];
+            let na = self.cached_normal_area[fi];
             let vo = vel_vals[owner];
             let vn = vel_vals[neigh];
-            let f_flux = rho_half * face.area
-                * ((vo[0] + vn[0]) * face.normal[0]
-                 + (vo[1] + vn[1]) * face.normal[1]
-                 + (vo[2] + vn[2]) * face.normal[2]);
+            let f_flux = rho_half
+                * ((vo[0] + vn[0]) * na[0]
+                 + (vo[1] + vn[1]) * na[1]
+                 + (vo[2] + vn[2]) * na[2]);
             let f_pos = f64::max(f_flux, 0.0);
             let f_neg = f64::max(-f_flux, 0.0);
             self.ws_a_p[owner] += d + f_pos;
@@ -440,13 +446,14 @@ impl SimpleSolver {
             pc_mat.values[self.pc_diag_csr_idx[owner]] += coeff;
             pc_mat.values[self.pc_diag_csr_idx[neigh]] += coeff;
 
-            // RHS: mass imbalance
+            // RHS: mass imbalance (using cached normal*area)
+            let na = self.cached_normal_area[fi];
             let vo = vel_vals[owner];
             let vn = vel_vals[neigh];
-            let mass_flux = rho_half * face.area
-                * ((vo[0] + vn[0]) * face.normal[0]
-                 + (vo[1] + vn[1]) * face.normal[1]
-                 + (vo[2] + vn[2]) * face.normal[2]);
+            let mass_flux = rho_half
+                * ((vo[0] + vn[0]) * na[0]
+                 + (vo[1] + vn[1]) * na[1]
+                 + (vo[2] + vn[2]) * na[2]);
             sources_pc[owner] -= mass_flux;
             sources_pc[neigh] += mass_flux;
         }
@@ -626,26 +633,27 @@ impl SimpleSolver {
     ) -> Result<()> {
         let n = mesh.num_cells();
 
-        // Inline Green-Gauss gradient of p_prime (avoids ScalarField copy)
+        // Inline Green-Gauss gradient of p_prime using cached normal*area
         let mut grad_pp = vec![[0.0_f64; 3]; n];
-        for face in &mesh.faces {
+        for (fi, face) in mesh.faces.iter().enumerate() {
             let owner = face.owner_cell;
+            let na = self.cached_normal_area[fi];
             if let Some(neighbor) = face.neighbor_cell {
                 let phi_f = 0.5 * (p_prime[owner] + p_prime[neighbor]);
-                let na0 = phi_f * face.area * face.normal[0];
-                let na1 = phi_f * face.area * face.normal[1];
-                let na2 = phi_f * face.area * face.normal[2];
-                grad_pp[owner][0] += na0;
-                grad_pp[owner][1] += na1;
-                grad_pp[owner][2] += na2;
-                grad_pp[neighbor][0] -= na0;
-                grad_pp[neighbor][1] -= na1;
-                grad_pp[neighbor][2] -= na2;
+                let c0 = phi_f * na[0];
+                let c1 = phi_f * na[1];
+                let c2 = phi_f * na[2];
+                grad_pp[owner][0] += c0;
+                grad_pp[owner][1] += c1;
+                grad_pp[owner][2] += c2;
+                grad_pp[neighbor][0] -= c0;
+                grad_pp[neighbor][1] -= c1;
+                grad_pp[neighbor][2] -= c2;
             } else {
                 let phi_f = p_prime[owner];
-                grad_pp[owner][0] += phi_f * face.area * face.normal[0];
-                grad_pp[owner][1] += phi_f * face.area * face.normal[1];
-                grad_pp[owner][2] += phi_f * face.area * face.normal[2];
+                grad_pp[owner][0] += phi_f * na[0];
+                grad_pp[owner][1] += phi_f * na[1];
+                grad_pp[owner][2] += phi_f * na[2];
             }
         }
 
@@ -690,18 +698,17 @@ impl SimpleSolver {
         let vel_vals = state.velocity.values();
         let rho_half = 0.5 * self.density;
 
-        for face in &mesh.faces {
+        for (fi, face) in mesh.faces.iter().enumerate() {
             let owner = face.owner_cell;
 
             if let Some(neigh) = face.neighbor_cell {
-                // Internal face: compute mass flux directly
+                let na = self.cached_normal_area[fi];
                 let vo = vel_vals[owner];
                 let vn = vel_vals[neigh];
-                let na = face.area;
-                let mass_flux = rho_half * na
-                    * ((vo[0] + vn[0]) * face.normal[0]
-                     + (vo[1] + vn[1]) * face.normal[1]
-                     + (vo[2] + vn[2]) * face.normal[2]);
+                let mass_flux = rho_half
+                    * ((vo[0] + vn[0]) * na[0]
+                     + (vo[1] + vn[1]) * na[1]
+                     + (vo[2] + vn[2]) * na[2]);
 
                 mass_imbalance[owner] += mass_flux;
                 mass_imbalance[neigh] -= mass_flux;
