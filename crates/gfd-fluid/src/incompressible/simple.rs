@@ -59,6 +59,11 @@ pub struct SimpleSolver {
     patch_names: Vec<String>,
     /// Number of faces for which the cache was built.
     cached_num_faces: usize,
+    /// Cached per-internal-face: (face_idx, owner, neighbor, distance, D_coeff).
+    /// Built once on first call; reused across SIMPLE iterations.
+    cached_internal_geom: Vec<(usize, usize, usize, f64, f64)>,
+    /// Cached per-boundary-face: (face_idx, owner, D_coeff).
+    cached_boundary_geom: Vec<(usize, usize, f64)>,
 }
 
 impl SimpleSolver {
@@ -79,6 +84,8 @@ impl SimpleSolver {
             face_patch_cache: Vec::new(),
             patch_names: Vec::new(),
             cached_num_faces: 0,
+            cached_internal_geom: Vec::new(),
+            cached_boundary_geom: Vec::new(),
         }
     }
 
@@ -119,6 +126,33 @@ impl SimpleSolver {
             }
         }
         self.cached_num_faces = num_faces;
+
+        // Cache geometric data (distances and diffusion coefficients)
+        self.cached_internal_geom.clear();
+        self.cached_boundary_geom.clear();
+        for (fi, face) in mesh.faces.iter().enumerate() {
+            let owner = face.owner_cell;
+            if let Some(neigh) = face.neighbor_cell {
+                let co = mesh.cells[owner].center;
+                let cn = mesh.cells[neigh].center;
+                let dx = cn[0] - co[0];
+                let dy = cn[1] - co[1];
+                let dz = cn[2] - co[2];
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                let d = compute_diffusive_coefficient(self.viscosity, face.area, dist);
+                self.cached_internal_geom.push((fi, owner, neigh, dist, d));
+            } else {
+                let co = mesh.cells[owner].center;
+                let fc = face.center;
+                let dx = fc[0] - co[0];
+                let dy = fc[1] - co[1];
+                let dz = fc[2] - co[2];
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                let dist = if dist < 1e-30 { 1e-30 } else { dist };
+                let d = compute_diffusive_coefficient(self.viscosity, face.area, dist);
+                self.cached_boundary_geom.push((fi, owner, d));
+            }
+        }
     }
 
     /// Get the patch name for a face from cache.
@@ -184,54 +218,44 @@ impl SimpleSolver {
             .compute(&state.pressure, mesh)
             .map_err(|e| FluidError::CoreError(e))?;
 
-        // --- Pre-compute face coefficients (geometry-only, independent of comp) ---
-        // Internal face data: (face_idx, owner, neighbor, D, F)
+        // Use cached geometry (distances and D coefficients computed once per mesh)
+        // Build convective flux (velocity-dependent) and boundary face data
         struct InternalFace { owner: usize, neigh: usize, d: f64, f_flux: f64 }
-        // Boundary face data
-        struct BoundaryFace { owner: usize, d: f64, patch: Option<String>, bc_vel: Option<[f64; 3]>, f_flux_bc: f64, is_wall: bool }
+        struct BoundaryFace { owner: usize, d: f64, bc_vel: Option<[f64; 3]>, f_flux_bc: f64, is_wall: bool }
 
-        let mut internal_faces: Vec<InternalFace> = Vec::with_capacity(mesh.faces.len());
-        let mut boundary_faces: Vec<BoundaryFace> = Vec::new();
+        let rho_half = 0.5 * self.density;
+        let vel_vals = state.velocity.values();
+        let mut internal_faces: Vec<InternalFace> = Vec::with_capacity(self.cached_internal_geom.len());
+        for &(fi, owner, neigh, _dist, d) in &self.cached_internal_geom {
+            let face = &mesh.faces[fi];
+            let vo = vel_vals[owner];
+            let vn = vel_vals[neigh];
+            let f_flux = rho_half * face.area
+                * ((vo[0] + vn[0]) * face.normal[0]
+                 + (vo[1] + vn[1]) * face.normal[1]
+                 + (vo[2] + vn[2]) * face.normal[2]);
+            internal_faces.push(InternalFace { owner, neigh, d, f_flux });
+        }
 
-        for face in &mesh.faces {
-            let owner = face.owner_cell;
-            if let Some(neigh) = face.neighbor_cell {
-                let vel_o = state.velocity.values()[owner];
-                let vel_n = state.velocity.values()[neigh];
-                let u_f = [
-                    0.5 * (vel_o[0] + vel_n[0]),
-                    0.5 * (vel_o[1] + vel_n[1]),
-                    0.5 * (vel_o[2] + vel_n[2]),
-                ];
-                let f_flux = self.density
-                    * (u_f[0] * face.normal[0] + u_f[1] * face.normal[1] + u_f[2] * face.normal[2])
-                    * face.area;
-                let dist = distance(&mesh.cells[owner].center, &mesh.cells[neigh].center);
-                let d = compute_diffusive_coefficient(self.viscosity, face.area, dist);
-                internal_faces.push(InternalFace { owner, neigh, d, f_flux });
-            } else {
-                let dist_to_face = {
-                    let d = distance(&mesh.cells[owner].center, &face.center);
-                    if d < 1e-30 { 1e-30 } else { d }
-                };
-                let d = compute_diffusive_coefficient(self.viscosity, face.area, dist_to_face);
-                let patch = self.get_face_patch(face.id).map(|s| s.to_string());
-                let (bc_vel, f_flux_bc, is_wall) = if let Some(ref pname) = patch {
-                    if let Some(bv) = boundary_velocities.get(pname.as_str()) {
-                        let ff = self.density
-                            * (bv[0]*face.normal[0] + bv[1]*face.normal[1] + bv[2]*face.normal[2])
-                            * face.area;
-                        (Some(*bv), ff, false)
-                    } else if wall_patches.iter().any(|w| w == pname) {
-                        (None, 0.0, true)
-                    } else {
-                        (None, 0.0, false)
-                    }
+        let mut boundary_faces: Vec<BoundaryFace> = Vec::with_capacity(self.cached_boundary_geom.len());
+        for &(_fi, owner, d) in &self.cached_boundary_geom {
+            let face = &mesh.faces[_fi];
+            let patch = self.get_face_patch(face.id);
+            let (bc_vel, f_flux_bc, is_wall) = if let Some(pname) = patch {
+                if let Some(bv) = boundary_velocities.get(pname) {
+                    let ff = self.density
+                        * (bv[0]*face.normal[0] + bv[1]*face.normal[1] + bv[2]*face.normal[2])
+                        * face.area;
+                    (Some(*bv), ff, false)
+                } else if wall_patches.iter().any(|w| w == pname) {
+                    (None, 0.0, true)
                 } else {
                     (None, 0.0, false)
-                };
-                boundary_faces.push(BoundaryFace { owner, d, patch, bc_vel, f_flux_bc, is_wall });
-            }
+                }
+            } else {
+                (None, 0.0, false)
+            };
+            boundary_faces.push(BoundaryFace { owner, d, bc_vel, f_flux_bc, is_wall });
         }
 
         // The momentum matrix A is the SAME for all 3 velocity components
@@ -356,82 +380,66 @@ impl SimpleSolver {
         let mut a_p_pc = vec![0.0; n];
         let mut sources_pc = vec![0.0; n];
 
-        // Count internal faces for NNZ estimate
-        let n_internal = mesh.faces.iter().filter(|f| f.neighbor_cell.is_some()).count();
+        let n_internal = self.cached_internal_geom.len();
         let nnz_estimate = n + 2 * n_internal;
         let mut assembler = Assembler::with_nnz_estimate(n, nnz_estimate);
 
-        // NOTE: Rhie-Chow correction tested (EXP007) but destabilized convergence.
-        // Using simple linear interpolation for face velocities instead.
+        let vel_vals = state.velocity.values();
+        let rho_half = 0.5 * self.density;
 
-        for face in &mesh.faces {
-            let owner = face.owner_cell;
+        // Internal faces: use cached geometry (distance and D precomputed)
+        for &(fi, owner, neigh, dist, _d) in &self.cached_internal_geom {
+            let face = &mesh.faces[fi];
 
-            if let Some(neigh) = face.neighbor_cell {
-                // Internal face
-                let center_o = mesh.cells[owner].center;
-                let center_n = mesh.cells[neigh].center;
-                let dist = distance(&center_o, &center_n);
+            // rA_f = 0.5 * (V_O / aP_O + V_N / aP_N)
+            let ra_o = mesh.cells[owner].volume / self.a_p_momentum[owner];
+            let ra_n = mesh.cells[neigh].volume / self.a_p_momentum[neigh];
+            let ra_f = 0.5 * (ra_o + ra_n);
 
-                // rA_f = 0.5 * (V_O / aP_O + V_N / aP_N)
-                let ra_o = mesh.cells[owner].volume / self.a_p_momentum[owner];
-                let ra_n = mesh.cells[neigh].volume / self.a_p_momentum[neigh];
-                let ra_f = 0.5 * (ra_o + ra_n);
+            // Pressure correction coefficient (using cached distance)
+            let coeff = self.density * ra_f * face.area / dist;
 
-                // Pressure correction coefficient
-                let coeff = self.density * ra_f * face.area / dist;
+            a_p_pc[owner] += coeff;
+            a_p_pc[neigh] += coeff;
+            assembler.add_neighbor(owner, neigh, coeff);
+            assembler.add_neighbor(neigh, owner, coeff);
 
-                a_p_pc[owner] += coeff;
-                a_p_pc[neigh] += coeff;
-                // Add off-diagonal directly to assembler (no intermediate Vec<Vec<>>)
-                assembler.add_neighbor(owner, neigh, coeff);
-                assembler.add_neighbor(neigh, owner, coeff);
+            // RHS: mass imbalance (using cached vel_vals)
+            let vo = vel_vals[owner];
+            let vn = vel_vals[neigh];
+            let mass_flux = rho_half * face.area
+                * ((vo[0] + vn[0]) * face.normal[0]
+                 + (vo[1] + vn[1]) * face.normal[1]
+                 + (vo[2] + vn[2]) * face.normal[2]);
 
-                // RHS: mass imbalance through face
-                let vel_o = state.velocity.values()[owner];
-                let vel_n = state.velocity.values()[neigh];
-                let u_f = [
-                    0.5 * (vel_o[0] + vel_n[0]),
-                    0.5 * (vel_o[1] + vel_n[1]),
-                    0.5 * (vel_o[2] + vel_n[2]),
-                ];
+            sources_pc[owner] -= mass_flux;
+            sources_pc[neigh] += mass_flux;
+        }
 
-                let mass_flux = self.density
-                    * (u_f[0] * face.normal[0]
-                        + u_f[1] * face.normal[1]
-                        + u_f[2] * face.normal[2])
-                    * face.area;
+        // Boundary faces
+        for &(fi, owner, _d) in &self.cached_boundary_geom {
+            let face = &mesh.faces[fi];
+            let patch_name = self.get_face_patch(face.id);
 
-                sources_pc[owner] -= mass_flux;
-                sources_pc[neigh] += mass_flux;
-            } else {
-                // Boundary face
-                let patch_name = self.get_face_patch(face.id);
-
-                if let Some(pname) = patch_name {
-                    if boundary_pressure.contains_key(pname) {
-                        // Outlet with fixed pressure: p' = 0 (Dirichlet)
-                        let vel_o = state.velocity.values()[owner];
+            if let Some(pname) = patch_name {
+                if boundary_pressure.contains_key(pname) {
+                    let vel_o = vel_vals[owner];
+                    let mass_flux = self.density
+                        * (vel_o[0] * face.normal[0]
+                            + vel_o[1] * face.normal[1]
+                            + vel_o[2] * face.normal[2])
+                        * face.area;
+                    sources_pc[owner] -= mass_flux;
+                } else if self.boundary_velocities.contains_key(pname)
+                    || self.wall_patches.iter().any(|w| w == pname)
+                {
+                    if let Some(bc_vel) = self.boundary_velocities.get(pname) {
                         let mass_flux = self.density
-                            * (vel_o[0] * face.normal[0]
-                                + vel_o[1] * face.normal[1]
-                                + vel_o[2] * face.normal[2])
+                            * (bc_vel[0] * face.normal[0]
+                                + bc_vel[1] * face.normal[1]
+                                + bc_vel[2] * face.normal[2])
                             * face.area;
                         sources_pc[owner] -= mass_flux;
-                    } else if self.boundary_velocities.contains_key(pname)
-                        || self.wall_patches.iter().any(|w| w == pname)
-                    {
-                        // Inlet or wall: known velocity, compute the boundary mass flux
-                        if let Some(bc_vel) = self.boundary_velocities.get(pname) {
-                            // Inlet: use prescribed velocity
-                            let mass_flux = self.density
-                                * (bc_vel[0] * face.normal[0]
-                                    + bc_vel[1] * face.normal[1]
-                                    + bc_vel[2] * face.normal[2])
-                                * face.area;
-                            sources_pc[owner] -= mass_flux;
-                        }
-                        // Wall: zero velocity, zero mass flux -> no contribution
                     }
                 }
             }
