@@ -71,6 +71,12 @@ gfd-expression  = { path = "crates/gfd-expression" }
 gfd-linalg      = { path = "crates/gfd-linalg" }
 gfd-parallel    = { path = "crates/gfd-parallel" }
 gfd-vdb         = { path = "crates/gfd-vdb" }
+gfd-source      = { path = "crates/gfd-source" }
+gfd-turbulence  = { path = "crates/gfd-turbulence" }
+gfd-matrix      = { path = "crates/gfd-matrix" }
+gfd-discretize  = { path = "crates/gfd-discretize" }
+gfd-boundary    = { path = "crates/gfd-boundary" }
+gfd-material    = { path = "crates/gfd-material" }
 gfd-postprocess = { path = "crates/gfd-postprocess" }
 gfd-gpu         = { path = "crates/gfd-gpu", optional = true }
 
