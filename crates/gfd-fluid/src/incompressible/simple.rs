@@ -195,7 +195,7 @@ impl SimpleSolver {
         self.ensure_face_patch_cache(mesh);
 
         // 1. Solve momentum equations for all 3 components
-        self.solve_momentum(state, mesh, boundary_velocities, wall_patches)?;
+        self.solve_momentum(state, mesh, boundary_velocities, boundary_pressure, wall_patches)?;
 
         // 2. Solve pressure correction equation
         let p_prime =
@@ -225,6 +225,7 @@ impl SimpleSolver {
         state: &mut FluidState,
         mesh: &UnstructuredMesh,
         boundary_velocities: &HashMap<String, [f64; 3]>,
+        boundary_pressure: &HashMap<String, f64>,
         wall_patches: &[String],
     ) -> Result<()> {
         let n = mesh.num_cells();
@@ -235,15 +236,22 @@ impl SimpleSolver {
             .compute(&state.pressure, mesh)
             .map_err(|e| FluidError::CoreError(e))?;
 
-        // Use cached geometry (distances and D coefficients computed once per mesh)
-        // Build convective flux (velocity-dependent) and boundary face data
-        struct InternalFace { owner: usize, neigh: usize, d: f64, f_flux: f64 }
-        struct BoundaryFace { owner: usize, d: f64, bc_vel: Option<[f64; 3]>, f_flux_bc: f64, is_wall: bool }
+        // Ensure CSR pattern is cached (shared between momentum and pressure correction)
+        if !self.pc_cached {
+            // Build pattern via Assembler with dummy values
+            self.build_pressure_correction_pattern(n, mesh, boundary_pressure)?;
+        }
 
         let rho_half = 0.5 * self.density;
         let vel_vals = state.velocity.values();
-        let mut internal_faces: Vec<InternalFace> = Vec::with_capacity(self.cached_internal_geom.len());
-        for &(fi, owner, neigh, _dist, d) in &self.cached_internal_geom {
+
+        // Build momentum matrix values directly into cached CSR pattern
+        let nnz = self.pc_col_idx.len();
+        let mut mat_values = vec![0.0; nnz];
+        let mut a_p = vec![0.0; n];
+
+        // Internal faces: compute D+F coefficients
+        for (face_idx, &(fi, owner, neigh, _dist, d)) in self.cached_internal_geom.iter().enumerate() {
             let face = &mesh.faces[fi];
             let vo = vel_vals[owner];
             let vn = vel_vals[neigh];
@@ -251,9 +259,17 @@ impl SimpleSolver {
                 * ((vo[0] + vn[0]) * face.normal[0]
                  + (vo[1] + vn[1]) * face.normal[1]
                  + (vo[2] + vn[2]) * face.normal[2]);
-            internal_faces.push(InternalFace { owner, neigh, d, f_flux });
+            let f_pos = f64::max(f_flux, 0.0);
+            let f_neg = f64::max(-f_flux, 0.0);
+            a_p[owner] += d + f_pos;
+            a_p[neigh] += d + f_neg;
+            let (idx_on, idx_no) = self.pc_face_csr_idx[face_idx];
+            mat_values[idx_on] = -(d + f_neg);
+            mat_values[idx_no] = -(d + f_pos);
         }
 
+        // Boundary faces: diagonal contribution + precompute BC data
+        struct BoundaryFace { owner: usize, d: f64, bc_vel: Option<[f64; 3]>, f_flux_bc: f64, is_wall: bool }
         let mut boundary_faces: Vec<BoundaryFace> = Vec::with_capacity(self.cached_boundary_geom.len());
         for &(_fi, owner, d) in &self.cached_boundary_geom {
             let face = &mesh.faces[_fi];
@@ -272,52 +288,26 @@ impl SimpleSolver {
             } else {
                 (None, 0.0, false)
             };
+            if bc_vel.is_some() {
+                a_p[owner] += d + f64::max(f_flux_bc, 0.0);
+            } else if is_wall {
+                a_p[owner] += d;
+            }
             boundary_faces.push(BoundaryFace { owner, d, bc_vel, f_flux_bc, is_wall });
         }
 
-        // The momentum matrix A is the SAME for all 3 velocity components
-        // (diffusion + convection coefficients are component-independent).
-        // Build the matrix once and reuse for all 3 solves.
-
-        // Precise NNZ estimate: n diagonals + 2 off-diagonals per internal face
-        let n_internal = internal_faces.len();
-        let nnz_estimate = n + 2 * n_internal;
-
-        // --- Build a_p (diagonal) and the matrix (off-diagonals) once ---
-        let mut a_p = vec![0.0; n];
-        let mut assembler = Assembler::with_nnz_estimate(n, nnz_estimate);
-
-        for iface in &internal_faces {
-            let f_pos = f64::max(iface.f_flux, 0.0);
-            let f_neg = f64::max(-iface.f_flux, 0.0);
-            a_p[iface.owner] += iface.d + f_pos;
-            a_p[iface.neigh] += iface.d + f_neg;
-            assembler.add_neighbor(iface.owner, iface.neigh, iface.d + f_neg);
-            assembler.add_neighbor(iface.neigh, iface.owner, iface.d + f_pos);
-        }
-
-        for bface in &boundary_faces {
-            if bface.bc_vel.is_some() {
-                a_p[bface.owner] += bface.d + f64::max(bface.f_flux_bc, 0.0);
-            } else if bface.is_wall {
-                a_p[bface.owner] += bface.d;
-            }
-        }
-
-        // Apply under-relaxation to diagonal (same for all components)
+        // Apply under-relaxation and set diagonal
         let a_p_unrelaxed: Vec<f64> = a_p.clone();
         let ur_factor = (1.0 - self.alpha_u) / self.alpha_u;
         for i in 0..n {
             a_p[i] /= self.alpha_u;
-            assembler.add_diagonal(i, a_p[i]);
-            // sources will be added per-component via a separate pass
-            assembler.add_source(i, 0.0);
+            mat_values[self.pc_diag_csr_idx[i]] = a_p[i];
         }
 
-        // Build CSR matrix once (the matrix template)
-        let template_system = assembler
-            .finalize()
-            .map_err(|e| FluidError::PressureCorrectionFailed(e.to_string()))?;
+        // Build CSR matrix from cached pattern + computed values
+        let template_a = gfd_core::SparseMatrix::new(
+            n, n, self.pc_row_ptr.clone(), self.pc_col_idx.clone(), mat_values,
+        ).map_err(|e| FluidError::PressureCorrectionFailed(format!("{:?}", e)))?;
 
         // Store for pressure correction (a_p is the same for all components)
         self.a_p_momentum = a_p.clone();
@@ -366,7 +356,7 @@ impl SimpleSolver {
             }
 
             solver_bicgstab
-                .solve(&template_system.a, &sources, &mut x_buf)
+                .solve(&template_a, &sources, &mut x_buf)
                 .map_err(|e| FluidError::SolverFailed(format!("{:?}", e)))?;
 
             // Update velocity component
