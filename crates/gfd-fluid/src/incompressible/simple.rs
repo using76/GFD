@@ -307,7 +307,9 @@ impl SimpleSolver {
 
         let mut sources = vec![0.0; n];
         let mut x_buf = vec![0.0; n];
-        let mut solver_bicgstab = BiCGSTAB::new(1e-3, 1000);
+        // Momentum tolerance can be looser than pressure since SIMPLE outer
+        // loop provides iterative correction. 1e-2 is sufficient.
+        let mut solver_bicgstab = BiCGSTAB::new(1e-2, 1000);
 
         // Precompute which boundary faces have non-zero velocity per component
         let mut active_comps = [false; 3];
