@@ -660,13 +660,16 @@ fn solve_linear_system(
     }
 
     // ---- CPU path ----
+    // Use relaxed tolerance (1e-3) for inner linear solves within SIMPLE/PISO.
+    // The outer pressure-velocity coupling loop provides additional correction,
+    // so high inner precision is unnecessary and wastes iterations.
     if symmetric {
-        let mut solver = CG::new(1e-6, 1000);
+        let mut solver = CG::new(1e-3, 1000);
         solver
             .solve(&system.a, &system.b, &mut system.x)
             .map_err(|e| FluidError::SolverFailed(format!("{:?}", e)))
     } else {
-        let mut solver = BiCGSTAB::new(1e-6, 1000);
+        let mut solver = BiCGSTAB::new(1e-3, 1000);
         solver
             .solve(&system.a, &system.b, &mut system.x)
             .map_err(|e| FluidError::SolverFailed(format!("{:?}", e)))
