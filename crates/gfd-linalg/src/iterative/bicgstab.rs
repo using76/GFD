@@ -123,7 +123,9 @@ impl LinearSolverTrait for BiCGSTAB {
 
             // p = r + beta * (p - omega * v)
             for i in 0..n {
-                p[i] = r[i] + beta * (p[i] - omega * v[i]);
+                unsafe {
+                    *p.get_unchecked_mut(i) = *r.get_unchecked(i) + beta * (*p.get_unchecked(i) - omega * *v.get_unchecked(i));
+                }
             }
 
             // v = A * p
@@ -140,7 +142,9 @@ impl LinearSolverTrait for BiCGSTAB {
 
             // s = r - alpha * v
             for i in 0..n {
-                s[i] = r[i] - alpha * v[i];
+                unsafe {
+                    *s.get_unchecked_mut(i) = *r.get_unchecked(i) - alpha * *v.get_unchecked(i);
+                }
             }
 
             // Check if s is small enough (early termination).
@@ -160,23 +164,29 @@ impl LinearSolverTrait for BiCGSTAB {
             // t = A * s
             a.spmv(&s, &mut t)?;
 
-            // omega = (t^T s) / (t^T t)
-            let t_dot_t = dot(&t, &t);
-            if t_dot_t.abs() < 1e-300 {
+            // Fused: compute (t^T s), (t^T t) in one pass
+            let mut ts = 0.0;
+            let mut tt = 0.0;
+            for i in 0..n {
+                unsafe {
+                    let ti = *t.get_unchecked(i);
+                    ts += ti * *s.get_unchecked(i);
+                    tt += ti * ti;
+                }
+            }
+            if tt.abs() < 1e-300 {
                 return Err(LinalgError::SingularMatrix(
                     "BiCGSTAB breakdown: t^T t is zero".to_string(),
                 ));
             }
-            omega = dot(&t, &s) / t_dot_t;
+            omega = ts / tt;
 
-            // x = x + alpha * p + omega * s
+            // Fused: x += alpha*p + omega*s, r = s - omega*t
             for i in 0..n {
-                x[i] += alpha * p[i] + omega * s[i];
-            }
-
-            // r = s - omega * t
-            for i in 0..n {
-                r[i] = s[i] - omega * t[i];
+                unsafe {
+                    *x.get_unchecked_mut(i) += alpha * *p.get_unchecked(i) + omega * *s.get_unchecked(i);
+                    *r.get_unchecked_mut(i) = *s.get_unchecked(i) - omega * *t.get_unchecked(i);
+                }
             }
 
             if omega.abs() < 1e-300 {
