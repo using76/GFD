@@ -10,3 +10,13 @@ EXP007	cavity_20_iters	500	discard	Rhie-Chow face velocity - destabilized conver
 EXP008	cavity_100_time_ms	838	discard	p-prime warm start initial guess - 33% slower
 EXP009	total_benchmark_ms	855	keep	precise NNZ estimate for Assembler COO - marginal, cleaner code
 EXP010	total_benchmark_ms	888	keep	fused CG update loop (x,r,rTr in one pass) + unsafe - marginal
+EXP011	total_benchmark_ms	630	keep	cache face_patch_map (Vec vs HashMap) + pressure correction direct assembler (no Vec<Vec<>>) - 30% faster
+EXP012	total_benchmark_ms	578	keep	fuse BiCGSTAB vector loops (t·s+t·t, x+r update) + unsafe access - 8% faster
+EXP013	total_benchmark_ms	615	keep	reuse a_p/sources vectors + inline p_prime gradient - marginal
+EXP014	total_benchmark_ms	395	keep	relax inner linear solver tolerance 1e-6 to 1e-3 - 36% faster, same outer iters
+EXP015	heat_source_error	2.57e-13	keep	second-order boundary correction for thermal source - 1.25e-3 to 2.57e-13 (10 orders of magnitude!)
+EXP016	total_benchmark_ms	365	keep	build momentum matrix once, reuse for 3 components - 8% faster (saves 2 COO->CSR per iter)
+EXP017	total_benchmark_ms	322	keep	Green-Gauss gradient precompute phi_f*area + unroll dim loop - 12% faster
+EXP018	total_benchmark_ms	322	keep	simplify velocity correction (cancel V/V) + residual face loop - marginal, cleaner code
+EXP019	total_benchmark_ms	365	discard	SpMV 4-way unrolling - SLOWER (row nnz=5-7 too short for unrolling benefit)
+EXP020	total_benchmark_ms	350	keep	skip trivial z-momentum component for 2D cases - 3% faster
