@@ -32,7 +32,6 @@ impl MeshReader for StlReader {
         use gfd_core::mesh::node::Node;
         use gfd_core::mesh::face::Face;
         use gfd_core::mesh::cell::Cell;
-        use std::io::Read;
         use std::collections::HashMap;
 
         let data = std::fs::read(path).map_err(|e| {

@@ -22,7 +22,6 @@ const SIGMA_EPS: f64 = 1.3;
 /// Standard k-omega SST model constants.
 const ALPHA_OMEGA: f64 = 5.0 / 9.0;
 const BETA_OMEGA: f64 = 0.075;
-const SIGMA_K_OMEGA: f64 = 2.0;
 const SIGMA_OMEGA: f64 = 2.0;
 
 /// Minimum values for turbulence variables (to avoid division by zero).

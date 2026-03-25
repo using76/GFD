@@ -2,9 +2,9 @@
 active: true
 iteration: 1
 session_id: 
-max_iterations: 20
+max_iterations: 50
 completion_promise: null
-started_at: "2026-03-25T01:48:09Z"
+started_at: "2026-03-25T10:09:37Z"
 ---
 
-autoresearch 를 활용해서 프로젝트를 끝까지 진행해줘
+autoresearch로 계속해서 프로젝트 마감해줘

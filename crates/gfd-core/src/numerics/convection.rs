@@ -16,7 +16,7 @@ pub fn compute_convective_flux(
 ) -> Result<ScalarField> {
     let num_cells = mesh.num_cells();
     let phi_vals = phi.values();
-    let vel_vals = velocity.values();
+    let _vel_vals = velocity.values();
 
     // First compute face fluxes
     let face_fluxes = compute_face_fluxes(velocity, mesh)?;

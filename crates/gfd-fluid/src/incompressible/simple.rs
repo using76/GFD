@@ -2,16 +2,12 @@
 
 use std::collections::HashMap;
 
-use gfd_core::gradient::{GreenGaussCellBasedGradient, GradientComputer};
-use gfd_core::linalg::LinearSystem;
-use gfd_core::{ScalarField, SolverStats, UnstructuredMesh};
+use gfd_core::UnstructuredMesh;
 use gfd_discretize::fvm::diffusion::compute_diffusive_coefficient;
 use gfd_linalg::iterative::bicgstab::BiCGSTAB;
 use gfd_linalg::iterative::cg::CG;
 use gfd_linalg::traits::LinearSolverTrait;
 use gfd_matrix::assembler::Assembler;
-use gfd_matrix::boundary::apply_dirichlet;
-
 #[cfg(feature = "gpu")]
 use gfd_gpu::solver::{GpuLinearSolver, gpu_cg::GpuCG};
 #[cfg(feature = "gpu")]
@@ -46,7 +42,7 @@ pub struct SimpleSolver {
     /// Stored diagonal coefficients from the momentum equation (used in pressure correction).
     a_p_momentum: Vec<f64>,
     /// Previous pressure correction (used as initial guess for next SIMPLE iteration).
-    prev_p_prime: Vec<f64>,
+    _prev_p_prime: Vec<f64>,
     /// Boundary velocities: patch name -> [u, v, w].
     boundary_velocities: HashMap<String, [f64; 3]>,
     /// Boundary pressures: patch name -> pressure value.
@@ -100,7 +96,7 @@ impl SimpleSolver {
             viscosity,
             use_gpu: false,
             a_p_momentum: Vec::new(),
-            prev_p_prime: Vec::new(),
+            _prev_p_prime: Vec::new(),
             boundary_velocities: HashMap::new(),
             boundary_pressure: HashMap::new(),
             wall_patches: Vec::new(),
@@ -332,7 +328,7 @@ impl SimpleSolver {
         }
 
         // Boundary faces: diagonal contribution + precompute BC data
-        struct BoundaryFace { owner: usize, d: f64, bc_vel: Option<[f64; 3]>, f_flux_bc: f64, is_wall: bool }
+        struct BoundaryFace { owner: usize, d: f64, bc_vel: Option<[f64; 3]>, f_flux_bc: f64, _is_wall: bool }
         let mut boundary_faces: Vec<BoundaryFace> = Vec::with_capacity(self.cached_boundary_geom.len());
         for &(_fi, owner, d) in &self.cached_boundary_geom {
             let face = &mesh.faces[_fi];
@@ -356,7 +352,7 @@ impl SimpleSolver {
             } else if is_wall {
                 self.ws_a_p[owner] += d;
             }
-            boundary_faces.push(BoundaryFace { owner, d, bc_vel, f_flux_bc, is_wall });
+            boundary_faces.push(BoundaryFace { owner, d, bc_vel, f_flux_bc, _is_wall: is_wall });
         }
 
         // Apply under-relaxation: store unrelaxed diagonal in a_p_momentum,
@@ -568,8 +564,8 @@ impl SimpleSolver {
     fn build_pressure_correction_pattern(
         &mut self,
         n: usize,
-        mesh: &UnstructuredMesh,
-        boundary_pressure: &HashMap<String, f64>,
+        _mesh: &UnstructuredMesh,
+        _boundary_pressure: &HashMap<String, f64>,
     ) -> Result<()> {
         // Use Assembler to build the pattern with dummy values
         let n_internal = self.cached_internal_geom.len();
@@ -789,96 +785,6 @@ impl PressureVelocityCoupling for SimpleSolver {
         let wp = self.wall_patches.clone();
         self.solve_step_with_bcs(state, mesh, &bv, &bp, &wp)
     }
-}
-
-// ---------------------------------------------------------------------------
-// GPU / CPU linear-solve abstraction
-// ---------------------------------------------------------------------------
-
-/// Solve a linear system using either GPU or CPU, depending on `use_gpu`.
-///
-/// When `symmetric` is true the CPU path uses CG (Conjugate Gradient);
-/// otherwise it uses BiCGSTAB.  The GPU path always uses `GpuCG` (the
-/// gfd-gpu crate currently only exposes CG).
-///
-/// If `use_gpu` is `true` but the `gpu` feature is not compiled in, the
-/// function logs a warning and falls back to the CPU solver automatically.
-fn solve_linear_system(
-    system: &mut LinearSystem,
-    use_gpu: bool,
-    symmetric: bool,
-) -> Result<SolverStats> {
-    // ---- GPU path (only available when the `gpu` feature is enabled) ----
-    #[cfg(feature = "gpu")]
-    if use_gpu {
-        let device = gfd_gpu::device::select_device(0)
-            .map_err(|e| FluidError::SolverFailed(format!("GPU device selection: {:?}", e)))?;
-        let gpu_a = GpuSparseMatrix::from_cpu(&system.a, &device)
-            .map_err(|e| FluidError::SolverFailed(format!("GPU matrix upload: {:?}", e)))?;
-        let gpu_b = GpuVector::from_cpu(&system.b, &device)
-            .map_err(|e| FluidError::SolverFailed(format!("GPU RHS upload: {:?}", e)))?;
-        let mut gpu_x = GpuVector::from_cpu(&system.x, &device)
-            .map_err(|e| FluidError::SolverFailed(format!("GPU solution upload: {:?}", e)))?;
-        let mut gpu_solver = GpuCG::new(1e-6, 1000);
-        let stats = gpu_solver
-            .solve(&gpu_a, &gpu_b, &mut gpu_x)
-            .map_err(|e| FluidError::SolverFailed(format!("GPU solve: {:?}", e)))?;
-        gpu_x
-            .to_cpu(&mut system.x)
-            .map_err(|e| FluidError::SolverFailed(format!("GPU download: {:?}", e)))?;
-        return Ok(stats);
-    }
-
-    // If gpu feature is *not* compiled in but the caller asked for GPU,
-    // fall back gracefully with a warning.
-    #[cfg(not(feature = "gpu"))]
-    if use_gpu {
-        eprintln!("[gfd-fluid] WARNING: GPU requested but `gpu` feature not enabled -- using CPU solver");
-    }
-
-    // ---- CPU path ----
-    // Use relaxed tolerance (1e-3) for inner linear solves within SIMPLE/PISO.
-    // The outer pressure-velocity coupling loop provides additional correction,
-    // so high inner precision is unnecessary and wastes iterations.
-    if symmetric {
-        let mut solver = CG::new(1e-3, 1000);
-        solver
-            .solve(&system.a, &system.b, &mut system.x)
-            .map_err(|e| FluidError::SolverFailed(format!("{:?}", e)))
-    } else {
-        let mut solver = BiCGSTAB::new(1e-3, 1000);
-        solver
-            .solve(&system.a, &system.b, &mut system.x)
-            .map_err(|e| FluidError::SolverFailed(format!("{:?}", e)))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helper functions
-// ---------------------------------------------------------------------------
-
-/// Euclidean distance between two 3D points.
-fn distance(a: &[f64; 3], b: &[f64; 3]) -> f64 {
-    let dx = b[0] - a[0];
-    let dy = b[1] - a[1];
-    let dz = b[2] - a[2];
-    (dx * dx + dy * dy + dz * dz).sqrt()
-}
-
-/// Build a map from face_id to patch name for boundary faces.
-fn build_face_patch_map(mesh: &UnstructuredMesh) -> HashMap<usize, String> {
-    let mut map = HashMap::new();
-    for patch in &mesh.boundary_patches {
-        for &fid in &patch.face_ids {
-            map.insert(fid, patch.name.clone());
-        }
-    }
-    map
-}
-
-/// Helper to check if a boundary pressure map contains a key.
-fn boundary_pressure_map_contains(map: &HashMap<String, f64>, key: &str) -> bool {
-    map.contains_key(key)
 }
 
 // ---------------------------------------------------------------------------
