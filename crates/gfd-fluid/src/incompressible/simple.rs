@@ -475,15 +475,21 @@ impl SimpleSolver {
             apply_dirichlet(&mut system, 0, 0.0);
         }
 
-        // Solve pressure correction (SPD system -- use CG, with BiCGSTAB fallback)
-        let stats = solve_linear_system(&mut system, self.use_gpu, true)?;
+        // Solve pressure correction (SPD system -- use CG directly)
+        let mut cg_solver = CG::new(1e-3, 1000);
+        let stats = cg_solver
+            .solve(&system.a, &system.b, &mut system.x)
+            .map_err(|e| FluidError::SolverFailed(format!("{:?}", e)))?;
 
-        // If CG doesn't converge on CPU, fall back to BiCGSTAB
-        if !stats.converged && !self.use_gpu {
+        // If CG doesn't converge, fall back to BiCGSTAB
+        if !stats.converged {
             for xi in system.x.iter_mut() {
                 *xi = 0.0;
             }
-            solve_linear_system(&mut system, false, false)?;
+            let mut fallback = BiCGSTAB::new(1e-3, 1000);
+            fallback
+                .solve(&system.a, &system.b, &mut system.x)
+                .map_err(|e| FluidError::SolverFailed(format!("{:?}", e)))?;
         }
 
         Ok(system.x)
