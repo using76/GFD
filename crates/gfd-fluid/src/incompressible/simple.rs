@@ -64,6 +64,8 @@ pub struct SimpleSolver {
     cached_internal_geom: Vec<(usize, usize, usize, f64, f64)>,
     /// Cached per-boundary-face: (face_idx, owner, D_coeff).
     cached_boundary_geom: Vec<(usize, usize, f64)>,
+    /// Cached cell volumes (flat array for fast access).
+    cached_volumes: Vec<f64>,
     /// Reusable CG solver for pressure correction (workspace persists).
     cg_solver: CG,
     /// Cached momentum CSR matrix (values updated in-place each iteration).
@@ -105,6 +107,7 @@ impl SimpleSolver {
             cached_num_faces: 0,
             cached_internal_geom: Vec::new(),
             cached_boundary_geom: Vec::new(),
+            cached_volumes: Vec::new(),
             cg_solver: CG::new(1e-3, 1000),
             mom_matrix: None,
             pc_matrix: None,
@@ -156,6 +159,9 @@ impl SimpleSolver {
             }
         }
         self.cached_num_faces = num_faces;
+
+        // Cache cell volumes into flat array
+        self.cached_volumes = mesh.cells.iter().map(|c| c.volume).collect();
 
         // Cache geometric data (distances and diffusion coefficients)
         self.cached_internal_geom.clear();
@@ -363,7 +369,7 @@ impl SimpleSolver {
             }
 
             for i in 0..n {
-                sources[i] -= grad_p.values()[i][comp] * mesh.cells[i].volume;
+                sources[i] -= grad_p.values()[i][comp] * self.cached_volumes[i];
                 sources[i] += ur_factor * self.ws_a_p[i] * vel_values[i][comp];
                 x_buf[i] = vel_values[i][comp];
             }
@@ -423,8 +429,8 @@ impl SimpleSolver {
         // Internal faces: compute coefficients and mass flux
         for (face_idx, &(fi, owner, neigh, dist, _d)) in self.cached_internal_geom.iter().enumerate() {
             let face = &mesh.faces[fi];
-            let ra_o = mesh.cells[owner].volume / self.a_p_momentum[owner];
-            let ra_n = mesh.cells[neigh].volume / self.a_p_momentum[neigh];
+            let ra_o = self.cached_volumes[owner] / self.a_p_momentum[owner];
+            let ra_n = self.cached_volumes[neigh] / self.a_p_momentum[neigh];
             let ra_f = 0.5 * (ra_o + ra_n);
             let coeff = self.density * ra_f * face.area / dist;
 
