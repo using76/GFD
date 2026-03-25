@@ -42,28 +42,29 @@ impl GradientComputer for GreenGaussCellBasedGradient {
         let mut gradients = vec![[0.0_f64; 3]; num_cells];
 
         // Loop over all faces
-        for face_id in 0..mesh.num_faces() {
-            let face = &mesh.faces[face_id];
+        for face in &mesh.faces {
             let owner = face.owner_cell;
 
             if let Some(neighbor) = face.neighbor_cell {
                 // Internal face: φ_f = 0.5 * (φ_owner + φ_neighbor)
-                let phi_f = 0.5 * (values[owner] + values[neighbor]);
+                let phi_f_area = 0.5 * (values[owner] + values[neighbor]) * face.area;
 
-                // contribution = φ_f * area * normal (each component)
-                for dim in 0..3 {
-                    let contrib = phi_f * face.area * face.normal[dim];
-                    gradients[owner][dim] += contrib;
-                    gradients[neighbor][dim] -= contrib;
-                }
+                let c0 = phi_f_area * face.normal[0];
+                let c1 = phi_f_area * face.normal[1];
+                let c2 = phi_f_area * face.normal[2];
+                gradients[owner][0] += c0;
+                gradients[owner][1] += c1;
+                gradients[owner][2] += c2;
+                gradients[neighbor][0] -= c0;
+                gradients[neighbor][1] -= c1;
+                gradients[neighbor][2] -= c2;
             } else {
                 // Boundary face: φ_f = φ_owner (zero-gradient extrapolation)
-                let phi_f = values[owner];
+                let phi_f_area = values[owner] * face.area;
 
-                for dim in 0..3 {
-                    let contrib = phi_f * face.area * face.normal[dim];
-                    gradients[owner][dim] += contrib;
-                }
+                gradients[owner][0] += phi_f_area * face.normal[0];
+                gradients[owner][1] += phi_f_area * face.normal[1];
+                gradients[owner][2] += phi_f_area * face.normal[2];
             }
         }
 
