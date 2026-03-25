@@ -242,9 +242,12 @@ impl SimpleSolver {
         let n_internal = internal_faces.len();
         let nnz_estimate = n + 2 * n_internal;
 
+        let mut a_p = vec![0.0; n];
+        let mut sources = vec![0.0; n];
+
         for comp in 0..3 {
-            let mut a_p = vec![0.0; n];
-            let mut sources = vec![0.0; n];
+            a_p.fill(0.0);
+            sources.fill(0.0);
             let mut assembler = Assembler::with_nnz_estimate(n, nnz_estimate);
 
             // --- Internal faces: add off-diagonal directly to assembler ---
@@ -466,6 +469,8 @@ impl SimpleSolver {
     /// Correct velocity using pressure correction gradient.
     ///
     /// u_P = u*_P - (V_P / a_P) * grad(p')_P
+    ///
+    /// Computes Green-Gauss gradient of p' inline to avoid ScalarField allocation.
     fn correct_velocity(
         &self,
         state: &mut FluidState,
@@ -473,19 +478,37 @@ impl SimpleSolver {
         p_prime: &[f64],
     ) -> Result<()> {
         let n = mesh.num_cells();
-        let grad_computer = GreenGaussCellBasedGradient;
-        let p_prime_field = ScalarField::new("p_prime", p_prime.to_vec());
-        let grad_pp = grad_computer
-            .compute(&p_prime_field, mesh)
-            .map_err(|e| FluidError::CoreError(e))?;
+
+        // Inline Green-Gauss gradient of p_prime (avoids ScalarField copy)
+        let mut grad_pp = vec![[0.0_f64; 3]; n];
+        for face in &mesh.faces {
+            let owner = face.owner_cell;
+            if let Some(neighbor) = face.neighbor_cell {
+                let phi_f = 0.5 * (p_prime[owner] + p_prime[neighbor]);
+                let na0 = phi_f * face.area * face.normal[0];
+                let na1 = phi_f * face.area * face.normal[1];
+                let na2 = phi_f * face.area * face.normal[2];
+                grad_pp[owner][0] += na0;
+                grad_pp[owner][1] += na1;
+                grad_pp[owner][2] += na2;
+                grad_pp[neighbor][0] -= na0;
+                grad_pp[neighbor][1] -= na1;
+                grad_pp[neighbor][2] -= na2;
+            } else {
+                let phi_f = p_prime[owner];
+                grad_pp[owner][0] += phi_f * face.area * face.normal[0];
+                grad_pp[owner][1] += phi_f * face.area * face.normal[1];
+                grad_pp[owner][2] += phi_f * face.area * face.normal[2];
+            }
+        }
 
         let vel_mut = state.velocity.values_mut();
         for i in 0..n {
+            let inv_vol = 1.0 / mesh.cells[i].volume;
             let ra = mesh.cells[i].volume / self.a_p_momentum[i];
-            let gpp = grad_pp.values()[i];
-            vel_mut[i][0] -= ra * gpp[0];
-            vel_mut[i][1] -= ra * gpp[1];
-            vel_mut[i][2] -= ra * gpp[2];
+            vel_mut[i][0] -= ra * grad_pp[i][0] * inv_vol;
+            vel_mut[i][1] -= ra * grad_pp[i][1] * inv_vol;
+            vel_mut[i][2] -= ra * grad_pp[i][2] * inv_vol;
         }
 
         Ok(())
