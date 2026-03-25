@@ -7,27 +7,51 @@ use crate::traits::LinearSolverTrait;
 /// BiCGSTAB solver.
 ///
 /// Solves A * x = b for general (non-symmetric) sparse matrices.
+/// Reuses workspace vectors across calls for the same system size.
 #[derive(Debug, Clone)]
 pub struct BiCGSTAB {
     /// Convergence tolerance for the relative residual norm ||r||/||b||.
     pub tol: f64,
     /// Maximum number of iterations.
     pub max_iter: usize,
+    /// Cached workspace vectors (reused across solve calls).
+    ws_n: usize,
+    ws_r: Vec<f64>,
+    ws_ax: Vec<f64>,
+    ws_r_hat: Vec<f64>,
+    ws_v: Vec<f64>,
+    ws_p: Vec<f64>,
+    ws_s: Vec<f64>,
+    ws_t: Vec<f64>,
 }
 
 impl BiCGSTAB {
     /// Creates a new BiCGSTAB solver.
     pub fn new(tol: f64, max_iter: usize) -> Self {
-        Self { tol, max_iter }
+        Self {
+            tol, max_iter,
+            ws_n: 0, ws_r: Vec::new(), ws_ax: Vec::new(), ws_r_hat: Vec::new(),
+            ws_v: Vec::new(), ws_p: Vec::new(), ws_s: Vec::new(), ws_t: Vec::new(),
+        }
+    }
+
+    /// Ensure workspace is allocated for the given size.
+    fn ensure_workspace(&mut self, n: usize) {
+        if self.ws_n == n { return; }
+        self.ws_r = vec![0.0; n];
+        self.ws_ax = vec![0.0; n];
+        self.ws_r_hat = vec![0.0; n];
+        self.ws_v = vec![0.0; n];
+        self.ws_p = vec![0.0; n];
+        self.ws_s = vec![0.0; n];
+        self.ws_t = vec![0.0; n];
+        self.ws_n = n;
     }
 }
 
 impl Default for BiCGSTAB {
     fn default() -> Self {
-        Self {
-            tol: 1e-6,
-            max_iter: 1000,
-        }
+        Self::new(1e-6, 1000)
     }
 }
 
@@ -82,25 +106,32 @@ impl LinearSolverTrait for BiCGSTAB {
             });
         }
 
+        // Reuse workspace vectors (avoid per-call allocation)
+        self.ensure_workspace(n);
+        let r = &mut self.ws_r;
+        let ax = &mut self.ws_ax;
+        let r_hat = &mut self.ws_r_hat;
+        let v = &mut self.ws_v;
+        let p = &mut self.ws_p;
+        let s = &mut self.ws_s;
+        let t = &mut self.ws_t;
+
         // r = b - A * x
-        let mut r = vec![0.0; n];
-        let mut ax = vec![0.0; n];
-        a.spmv(x, &mut ax)?;
+        a.spmv(x, ax)?;
         for i in 0..n {
             r[i] = b[i] - ax[i];
         }
 
-        // r_hat = r (arbitrary choice, but r_hat^T r != 0 required)
-        let r_hat = r.clone();
+        // r_hat = r
+        r_hat.copy_from_slice(r);
 
         let mut rho = 1.0_f64;
         let mut alpha = 1.0_f64;
         let mut omega = 1.0_f64;
 
-        let mut v = vec![0.0; n];
-        let mut p = vec![0.0; n];
-        let mut s = vec![0.0; n];
-        let mut t = vec![0.0; n];
+        // Reset iteration vectors
+        v.iter_mut().for_each(|x| *x = 0.0);
+        p.iter_mut().for_each(|x| *x = 0.0);
 
         for iter in 0..self.max_iter {
             let res_norm = norm2(&r);
@@ -129,7 +160,7 @@ impl LinearSolverTrait for BiCGSTAB {
             }
 
             // v = A * p
-            a.spmv(&p, &mut v)?;
+            a.spmv(&p, v)?;
 
             // alpha = rho_new / (r_hat^T * v)
             let r_hat_dot_v = dot(&r_hat, &v);
@@ -162,7 +193,7 @@ impl LinearSolverTrait for BiCGSTAB {
             }
 
             // t = A * s
-            a.spmv(&s, &mut t)?;
+            a.spmv(&s, t)?;
 
             // Fused: compute (t^T s), (t^T t) in one pass
             let mut ts = 0.0;
