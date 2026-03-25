@@ -100,6 +100,15 @@ impl ConductionSolver {
 
                         a_p[owner] += d;
                         sources[owner] += d * t_bc;
+
+                        // Second-order boundary correction for source term.
+                        // The one-sided gradient (T_bc - T_P)/dist has truncation
+                        // error ~T''*dist/2. For steady conduction, T'' = -S/k.
+                        // Correcting the flux error: Δq = k * A * (-S/k) * dist / 2
+                        // Subtract from source to compensate.
+                        if source.abs() > 0.0 {
+                            sources[owner] -= source * face.area * dist / 2.0;
+                        }
                     }
                     // else: zero gradient (Neumann with zero flux) — do nothing.
                 }
