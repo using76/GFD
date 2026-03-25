@@ -1,0 +1,14 @@
+[package]
+name = "gfd-solid"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gfd-core = { path = "../gfd-core" }
+gfd-discretize = { path = "../gfd-discretize" }
+gfd-matrix = { path = "../gfd-matrix" }
+gfd-linalg = { path = "../gfd-linalg" }
+gfd-material = { path = "../gfd-material" }
+gfd-boundary = { path = "../gfd-boundary" }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }

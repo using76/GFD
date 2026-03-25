@@ -1,0 +1,11 @@
+[package]
+name = "gfd-source"
+version = "0.1.0"
+edition = "2021"
+description = "Source term SDK for the GFD solver framework"
+
+[dependencies]
+gfd-core = { path = "../gfd-core" }
+gfd-expression = { path = "../gfd-expression" }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }

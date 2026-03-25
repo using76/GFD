@@ -1,0 +1,70 @@
+{
+  "setup": {
+    "general": {
+      "name": "20x1_heat_conduction",
+      "dimension": 2,
+      "mesh_file": "",
+      "mesh_format": "generated"
+    },
+    "models": {
+      "flow": "none",
+      "turbulence": "none",
+      "energy": true,
+      "radiation": "none",
+      "solid": "none",
+      "species": "none"
+    },
+    "materials": [
+      {
+        "name": "solid_material",
+        "material_type": "solid",
+        "properties": {
+          "conductivity": 1.0,
+          "heat_source": 0.0
+        }
+      }
+    ],
+    "boundary_conditions": [
+      {
+        "patch": "xmin",
+        "type": "fixed_temperature",
+        "parameters": { "temperature": 100.0 }
+      },
+      {
+        "patch": "xmax",
+        "type": "fixed_temperature",
+        "parameters": { "temperature": 200.0 }
+      }
+    ],
+    "initial_conditions": {
+      "temperature": 150.0
+    }
+  },
+  "solver": {
+    "pv_coupling": "SIMPLE",
+    "convection_scheme": "upwind",
+    "relaxation": {
+      "velocity": 0.7,
+      "pressure": 0.3,
+      "turbulence": 0.7,
+      "energy": 0.9
+    },
+    "linear_solver": {
+      "solver_type": "cg",
+      "max_iterations": 5000,
+      "tolerance": 1e-10,
+      "preconditioner": "jacobi"
+    }
+  },
+  "run": {
+    "simulation_type": "steady",
+    "max_iterations": 1,
+    "tolerance": 1e-6
+  },
+  "results": {
+    "output_dir": "results",
+    "format": "vtk",
+    "write_interval": 1,
+    "fields": ["temperature"]
+  }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "gfd-gpu"
+version = "0.1.0"
+edition = "2021"
+description = "GPU acceleration layer for GFD solver"
+
+[features]
+default = []
+cuda = ["dep:cudarc"]
+amgx = ["cuda"]
+
+[dependencies]
+gfd-core = { path = "../gfd-core" }
+thiserror = "2"
+tracing = "0.1"
+cudarc = { version = "0.12", features = ["driver", "cublas"], optional = true }

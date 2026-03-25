@@ -1,0 +1,83 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gfd-core",
+    "crates/gfd-expression",
+    "crates/gfd-discretize",
+    "crates/gfd-matrix",
+    "crates/gfd-linalg",
+    "crates/gfd-turbulence",
+    "crates/gfd-material",
+    "crates/gfd-boundary",
+    "crates/gfd-source",
+    "crates/gfd-coupling",
+    "crates/gfd-postprocess",
+    "crates/gfd-fluid",
+    "crates/gfd-thermal",
+    "crates/gfd-solid",
+    "crates/gfd-io",
+    "crates/gfd-parallel",
+    "crates/gfd-vdb",
+    "crates/gfd-gpu",
+]
+
+[package]
+name = "gfd"
+version = "0.1.0"
+edition = "2021"
+description = "Generalized Finite Difference multi-physics solver"
+
+[[bin]]
+name = "gfd"
+path = "src/main.rs"
+
+[[bin]]
+name = "gfd-benchmark"
+path = "benches/gfd_benchmark.rs"
+
+[features]
+default = []
+gpu = ["gfd-gpu/cuda"]
+gpu-amgx = ["gpu", "gfd-gpu/amgx"]
+
+# ---------------------------------------------------------------------------
+# Shared dependency versions (consumed via `dep.workspace = true` in crates)
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+nalgebra      = "0.33"
+nalgebra-sparse = "0.10"
+rayon        = "1"
+tracing      = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap         = { version = "4", features = ["derive"] }
+anyhow       = "1"
+thiserror    = "2"
+approx       = "0.5"
+
+# ---------------------------------------------------------------------------
+# Root binary dependencies
+# ---------------------------------------------------------------------------
+[dependencies]
+# Local workspace crates
+gfd-core        = { path = "crates/gfd-core" }
+gfd-fluid       = { path = "crates/gfd-fluid" }
+gfd-thermal     = { path = "crates/gfd-thermal" }
+gfd-solid       = { path = "crates/gfd-solid" }
+gfd-coupling    = { path = "crates/gfd-coupling" }
+gfd-io          = { path = "crates/gfd-io" }
+gfd-expression  = { path = "crates/gfd-expression" }
+gfd-linalg      = { path = "crates/gfd-linalg" }
+gfd-parallel    = { path = "crates/gfd-parallel" }
+gfd-vdb         = { path = "crates/gfd-vdb" }
+gfd-postprocess = { path = "crates/gfd-postprocess" }
+gfd-gpu         = { path = "crates/gfd-gpu", optional = true }
+
+# External (from workspace)
+clap              = { workspace = true }
+anyhow            = { workspace = true }
+tracing           = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }

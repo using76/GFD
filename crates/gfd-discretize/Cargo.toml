@@ -1,0 +1,10 @@
+[package]
+name = "gfd-discretize"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gfd-core = { path = "../gfd-core" }
+gfd-expression = { path = "../gfd-expression" }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }

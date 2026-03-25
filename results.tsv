@@ -1,0 +1,12 @@
+commit	metric	value	status	description
+BASELIN	cavity_50_iters	26	keep	baseline - first order upwind, Jacobi preconditioner, SIMPLE
+EXP001	cavity_50_iters	26	discard	ILU(0) preconditioner - same iters but 16% slower due to setup cost
+EXP002	cavity_100_time_ms	949	keep	pre-compute face D and F coefficients outside comp loop - 3.7% faster
+EXP004	total_benchmark_ms	1157	keep	counting sort COO-to-CSR + insertion sort per row - 5.5% faster total
+EXP005	cavity_100_time_ms	778	keep	unsafe unchecked SpMV inner loop - 13.7% faster on cavity_100
+EXP006	cavity_100_time_ms	776	keep	4-way unrolled dot product in CG and BiCGSTAB - marginal 0.3%
+EXP007	cavity_20_iters	500	discard	Rhie-Chow face velocity interpolation - destabilized convergence completely
+EXP007	cavity_20_iters	500	discard	Rhie-Chow face velocity - destabilized convergence
+EXP008	cavity_100_time_ms	838	discard	p-prime warm start initial guess - 33% slower
+EXP009	total_benchmark_ms	855	keep	precise NNZ estimate for Assembler COO - marginal, cleaner code
+EXP010	total_benchmark_ms	888	keep	fused CG update loop (x,r,rTr in one pass) + unsafe - marginal

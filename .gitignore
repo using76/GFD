@@ -1,0 +1,22 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Executables
+*.exe
+*.pdb
+
+# Environment and IDE
+.env
+.vscode/
+.idea/
+
+# Editor swap files
+*.swp
+*.swo
+
+# Simulation output
+results/
+*.vdb
+*.vtu
+*.vtk

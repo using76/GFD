@@ -1,0 +1,21 @@
+[package]
+name = "gfd-fluid"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+gpu = ["dep:gfd-gpu"]
+
+[dependencies]
+gfd-core = { path = "../gfd-core" }
+gfd-expression = { path = "../gfd-expression" }
+gfd-discretize = { path = "../gfd-discretize" }
+gfd-matrix = { path = "../gfd-matrix" }
+gfd-linalg = { path = "../gfd-linalg" }
+gfd-turbulence = { path = "../gfd-turbulence" }
+gfd-boundary = { path = "../gfd-boundary" }
+gfd-source = { path = "../gfd-source" }
+gfd-gpu = { path = "../gfd-gpu", optional = true }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
