@@ -20,3 +20,9 @@ EXP017	total_benchmark_ms	322	keep	Green-Gauss gradient precompute phi_f*area + 
 EXP018	total_benchmark_ms	322	keep	simplify velocity correction (cancel V/V) + residual face loop - marginal, cleaner code
 EXP019	total_benchmark_ms	365	discard	SpMV 4-way unrolling - SLOWER (row nnz=5-7 too short for unrolling benefit)
 EXP020	total_benchmark_ms	350	keep	skip trivial z-momentum component for 2D cases - 3% faster
+EXP021	total_benchmark_ms	348	keep	avoid SparseMatrix clone in momentum solve - marginal
+EXP022	total_benchmark_ms	348	keep	reuse x_buf and BiCGSTAB solver across components - marginal
+EXP023	total_benchmark_ms	347	keep	cache face geometry across SIMPLE iterations - marginal
+EXP024	cavity_20_iters	37	keep	relax momentum BiCGSTAB tol to 1e-2 - cavity_20: 40->37, cavity_50: 26->25
+EXP025	total_benchmark_ms	306	keep	BiCGSTAB workspace vector reuse - 12% faster (eliminates ~250 allocations)
+EXP026	total_benchmark_ms	335	discard	CG workspace reuse - no improvement (CG recreated each call anyway)
