@@ -510,11 +510,11 @@ impl SimpleSolver {
 
         let vel_mut = state.velocity.values_mut();
         for i in 0..n {
-            let inv_vol = 1.0 / mesh.cells[i].volume;
-            let ra = mesh.cells[i].volume / self.a_p_momentum[i];
-            vel_mut[i][0] -= ra * grad_pp[i][0] * inv_vol;
-            vel_mut[i][1] -= ra * grad_pp[i][1] * inv_vol;
-            vel_mut[i][2] -= ra * grad_pp[i][2] * inv_vol;
+            // ra * inv_vol = (V / a_P) * (1 / V) = 1 / a_P
+            let inv_ap = 1.0 / self.a_p_momentum[i];
+            vel_mut[i][0] -= inv_ap * grad_pp[i][0];
+            vel_mut[i][1] -= inv_ap * grad_pp[i][1];
+            vel_mut[i][2] -= inv_ap * grad_pp[i][2];
         }
 
         Ok(())
@@ -546,24 +546,21 @@ impl SimpleSolver {
     ) -> f64 {
         let n = mesh.num_cells();
         let mut mass_imbalance = vec![0.0; n];
+        let vel_vals = state.velocity.values();
+        let rho_half = 0.5 * self.density;
 
         for face in &mesh.faces {
             let owner = face.owner_cell;
 
             if let Some(neigh) = face.neighbor_cell {
-                // Internal face
-                let vel_o = state.velocity.values()[owner];
-                let vel_n = state.velocity.values()[neigh];
-                let u_f = [
-                    0.5 * (vel_o[0] + vel_n[0]),
-                    0.5 * (vel_o[1] + vel_n[1]),
-                    0.5 * (vel_o[2] + vel_n[2]),
-                ];
-                let mass_flux = self.density
-                    * (u_f[0] * face.normal[0]
-                        + u_f[1] * face.normal[1]
-                        + u_f[2] * face.normal[2])
-                    * face.area;
+                // Internal face: compute mass flux directly
+                let vo = vel_vals[owner];
+                let vn = vel_vals[neigh];
+                let na = face.area;
+                let mass_flux = rho_half * na
+                    * ((vo[0] + vn[0]) * face.normal[0]
+                     + (vo[1] + vn[1]) * face.normal[1]
+                     + (vo[2] + vn[2]) * face.normal[2]);
 
                 mass_imbalance[owner] += mass_flux;
                 mass_imbalance[neigh] -= mass_flux;
