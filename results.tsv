@@ -36,3 +36,4 @@ EXP033	total_benchmark_ms	260	keep	cache face normal*area products for all face 
 EXP034	total_benchmark_ms	320	discard	residual loop via cached geom - no improvement
 EXP035	total_benchmark_ms	280	keep	inline pressure gradient in solve_momentum - 10% faster (eliminates VectorField alloc)
 EXP036	total_benchmark_ms	275	keep	precompute boundary face BC data - 11% faster (eliminates string comparisons per iter)
+EXP037	total_benchmark_ms	260	keep	cache face areas in flat array - 5% faster (avoid Face struct access in pressure correction)
