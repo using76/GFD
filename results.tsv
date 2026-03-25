@@ -31,3 +31,5 @@ EXP028	total_benchmark_ms	690	keep	CG workspace reuse via cached solver in Simpl
 EXP029	total_benchmark_ms	600	keep	cache pressure correction CSR pattern - 13% faster (eliminates COO->CSR per iter)
 EXP030	total_benchmark_ms	560	keep	cache momentum matrix CSR pattern - 7% faster (reuse pc_ indices)
 EXP031	total_benchmark_ms	560	keep	eliminate all matrix clones via in-place value updates - marginal, cleaner code
+EXP032	total_benchmark_ms	560	keep	cache cell volumes in flat array - marginal
+EXP033	total_benchmark_ms	260	keep	cache face normal*area products for all face loops - 13% faster (better cache locality)
