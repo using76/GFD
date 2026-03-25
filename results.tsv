@@ -26,3 +26,4 @@ EXP023	total_benchmark_ms	347	keep	cache face geometry across SIMPLE iterations 
 EXP024	cavity_20_iters	37	keep	relax momentum BiCGSTAB tol to 1e-2 - cavity_20: 40->37, cavity_50: 26->25
 EXP025	total_benchmark_ms	306	keep	BiCGSTAB workspace vector reuse - 12% faster (eliminates ~250 allocations)
 EXP026	total_benchmark_ms	335	discard	CG workspace reuse - no improvement (CG recreated each call anyway)
+EXP027	total_benchmark_ms	301	keep	call CG directly for pressure correction - 10% faster
