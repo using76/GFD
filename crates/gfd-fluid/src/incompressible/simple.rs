@@ -64,6 +64,9 @@ pub struct SimpleSolver {
     cached_volumes: Vec<f64>,
     /// Cached face.area * face.normal (normal_area) for all faces.
     cached_normal_area: Vec<[f64; 3]>,
+    /// Precomputed boundary face momentum data: (owner, D, bc_vel, f_flux_bc, is_wall).
+    _cached_bc_faces: Vec<(usize, f64, Option<[f64; 3]>, f64, bool)>,
+    _cached_bc_faces_built: bool,
     /// Reusable CG solver for pressure correction (workspace persists).
     cg_solver: CG,
     /// Cached momentum CSR matrix (values updated in-place each iteration).
@@ -107,6 +110,8 @@ impl SimpleSolver {
             cached_boundary_geom: Vec::new(),
             cached_volumes: Vec::new(),
             cached_normal_area: Vec::new(),
+            _cached_bc_faces: Vec::new(),
+            _cached_bc_faces_built: false,
             cg_solver: CG::new(1e-3, 1000),
             mom_matrix: None,
             pc_matrix: None,
@@ -327,32 +332,36 @@ impl SimpleSolver {
             mom_mat.values[idx_no] = -(d + f_pos);
         }
 
-        // Boundary faces: diagonal contribution + precompute BC data
-        struct BoundaryFace { owner: usize, d: f64, bc_vel: Option<[f64; 3]>, f_flux_bc: f64, _is_wall: bool }
-        let mut boundary_faces: Vec<BoundaryFace> = Vec::with_capacity(self.cached_boundary_geom.len());
-        for &(_fi, owner, d) in &self.cached_boundary_geom {
-            let face = &mesh.faces[_fi];
-            let patch = self.get_face_patch(face.id);
-            let (bc_vel, f_flux_bc, is_wall) = if let Some(pname) = patch {
-                if let Some(bv) = boundary_velocities.get(pname) {
-                    let ff = self.density
-                        * (bv[0]*face.normal[0] + bv[1]*face.normal[1] + bv[2]*face.normal[2])
-                        * face.area;
-                    (Some(*bv), ff, false)
-                } else if wall_patches.iter().any(|w| w == pname) {
-                    (None, 0.0, true)
+        // Build boundary face data once, cache across SIMPLE iterations
+        if !self._cached_bc_faces_built {
+            self._cached_bc_faces.clear();
+            for &(fi, owner, d) in &self.cached_boundary_geom {
+                let na = self.cached_normal_area[fi];
+                let patch = self.get_face_patch(fi);
+                let (bc_vel, f_flux_bc, is_wall) = if let Some(pname) = patch {
+                    if let Some(bv) = boundary_velocities.get(pname) {
+                        let ff = self.density * (bv[0]*na[0] + bv[1]*na[1] + bv[2]*na[2]);
+                        (Some(*bv), ff, false)
+                    } else if wall_patches.iter().any(|w| w == pname) {
+                        (None, 0.0, true)
+                    } else {
+                        (None, 0.0, false)
+                    }
                 } else {
                     (None, 0.0, false)
-                }
-            } else {
-                (None, 0.0, false)
-            };
+                };
+                self._cached_bc_faces.push((owner, d, bc_vel, f_flux_bc, is_wall));
+            }
+            self._cached_bc_faces_built = true;
+        }
+
+        // Apply boundary contributions to diagonal
+        for &(owner, d, ref bc_vel, f_flux_bc, is_wall) in &self._cached_bc_faces {
             if bc_vel.is_some() {
                 self.ws_a_p[owner] += d + f64::max(f_flux_bc, 0.0);
             } else if is_wall {
                 self.ws_a_p[owner] += d;
             }
-            boundary_faces.push(BoundaryFace { owner, d, bc_vel, f_flux_bc, _is_wall: is_wall });
         }
 
         // Apply under-relaxation: store unrelaxed diagonal in a_p_momentum,
@@ -370,11 +379,9 @@ impl SimpleSolver {
 
         // Precompute which boundary faces have non-zero velocity per component
         let mut active_comps = [false; 3];
-        for bface in &boundary_faces {
-            if let Some(ref bv) = bface.bc_vel {
-                for c in 0..3 {
-                    if bv[c].abs() > 0.0 { active_comps[c] = true; }
-                }
+        for &(_o, _d, ref bv, _f, _w) in &self._cached_bc_faces {
+            if let Some(bv) = bv {
+                for c in 0..3 { if bv[c].abs() > 0.0 { active_comps[c] = true; } }
             }
         }
 
@@ -390,9 +397,9 @@ impl SimpleSolver {
 
             sources.fill(0.0);
 
-            for bface in &boundary_faces {
-                if let Some(ref bv) = bface.bc_vel {
-                    sources[bface.owner] += (bface.d + f64::max(-bface.f_flux_bc, 0.0)) * bv[comp];
+            for &(owner, d, ref bv, f_flux_bc, _w) in &self._cached_bc_faces {
+                if let Some(bv) = bv {
+                    sources[owner] += (d + f64::max(-f_flux_bc, 0.0)) * bv[comp];
                 }
             }
 
