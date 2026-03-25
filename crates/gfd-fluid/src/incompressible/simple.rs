@@ -66,6 +66,14 @@ pub struct SimpleSolver {
     cached_boundary_geom: Vec<(usize, usize, f64)>,
     /// Reusable CG solver for pressure correction (workspace persists).
     cg_solver: CG,
+    /// Cached momentum CSR matrix (values updated in-place each iteration).
+    mom_matrix: Option<gfd_core::SparseMatrix>,
+    /// Cached pressure correction CSR matrix (values updated in-place).
+    pc_matrix: Option<gfd_core::SparseMatrix>,
+    /// Reusable workspace vectors.
+    ws_sources: Vec<f64>,
+    ws_a_p: Vec<f64>,
+    ws_x_buf: Vec<f64>,
     /// Cached pressure correction CSR pattern (row_ptr, col_idx).
     /// Values array is updated in-place each SIMPLE iteration.
     pc_cached: bool,
@@ -98,6 +106,11 @@ impl SimpleSolver {
             cached_internal_geom: Vec::new(),
             cached_boundary_geom: Vec::new(),
             cg_solver: CG::new(1e-3, 1000),
+            mom_matrix: None,
+            pc_matrix: None,
+            ws_sources: Vec::new(),
+            ws_a_p: Vec::new(),
+            ws_x_buf: Vec::new(),
             pc_cached: false,
             pc_row_ptr: Vec::new(),
             pc_col_idx: Vec::new(),
@@ -245,10 +258,22 @@ impl SimpleSolver {
         let rho_half = 0.5 * self.density;
         let vel_vals = state.velocity.values();
 
-        // Build momentum matrix values directly into cached CSR pattern
+        // Ensure workspace vectors are allocated
         let nnz = self.pc_col_idx.len();
-        let mut mat_values = vec![0.0; nnz];
-        let mut a_p = vec![0.0; n];
+        if self.ws_sources.len() != n {
+            self.ws_sources = vec![0.0; n];
+            self.ws_a_p = vec![0.0; n];
+            self.ws_x_buf = vec![0.0; n];
+        }
+
+        // Take momentum matrix out of self to avoid borrow conflict
+        let mut mom_mat = self.mom_matrix.take().unwrap_or_else(|| {
+            gfd_core::SparseMatrix::new(
+                n, n, self.pc_row_ptr.clone(), self.pc_col_idx.clone(), vec![0.0; nnz],
+            ).unwrap()
+        });
+        mom_mat.values.fill(0.0);
+        self.ws_a_p.fill(0.0);
 
         // Internal faces: compute D+F coefficients
         for (face_idx, &(fi, owner, neigh, _dist, d)) in self.cached_internal_geom.iter().enumerate() {
@@ -261,11 +286,11 @@ impl SimpleSolver {
                  + (vo[2] + vn[2]) * face.normal[2]);
             let f_pos = f64::max(f_flux, 0.0);
             let f_neg = f64::max(-f_flux, 0.0);
-            a_p[owner] += d + f_pos;
-            a_p[neigh] += d + f_neg;
+            self.ws_a_p[owner] += d + f_pos;
+            self.ws_a_p[neigh] += d + f_neg;
             let (idx_on, idx_no) = self.pc_face_csr_idx[face_idx];
-            mat_values[idx_on] = -(d + f_neg);
-            mat_values[idx_no] = -(d + f_pos);
+            mom_mat.values[idx_on] = -(d + f_neg);
+            mom_mat.values[idx_no] = -(d + f_pos);
         }
 
         // Boundary faces: diagonal contribution + precompute BC data
@@ -289,33 +314,24 @@ impl SimpleSolver {
                 (None, 0.0, false)
             };
             if bc_vel.is_some() {
-                a_p[owner] += d + f64::max(f_flux_bc, 0.0);
+                self.ws_a_p[owner] += d + f64::max(f_flux_bc, 0.0);
             } else if is_wall {
-                a_p[owner] += d;
+                self.ws_a_p[owner] += d;
             }
             boundary_faces.push(BoundaryFace { owner, d, bc_vel, f_flux_bc, is_wall });
         }
 
-        // Apply under-relaxation and set diagonal
-        let a_p_unrelaxed: Vec<f64> = a_p.clone();
+        // Apply under-relaxation: store unrelaxed diagonal in a_p_momentum,
+        // then modify a_p for the matrix diagonal
         let ur_factor = (1.0 - self.alpha_u) / self.alpha_u;
+        self.a_p_momentum.resize(n, 0.0);
         for i in 0..n {
-            a_p[i] /= self.alpha_u;
-            mat_values[self.pc_diag_csr_idx[i]] = a_p[i];
+            self.a_p_momentum[i] = self.ws_a_p[i] / self.alpha_u;
+            mom_mat.values[self.pc_diag_csr_idx[i]] = self.a_p_momentum[i];
         }
 
-        // Build CSR matrix from cached pattern + computed values
-        let template_a = gfd_core::SparseMatrix::new(
-            n, n, self.pc_row_ptr.clone(), self.pc_col_idx.clone(), mat_values,
-        ).map_err(|e| FluidError::PressureCorrectionFailed(format!("{:?}", e)))?;
-
-        // Store for pressure correction (a_p is the same for all components)
-        self.a_p_momentum = a_p.clone();
-
-        let mut sources = vec![0.0; n];
-        let mut x_buf = vec![0.0; n];
-        // Momentum tolerance can be looser than pressure since SIMPLE outer
-        // loop provides iterative correction. 1e-2 is sufficient.
+        let sources = &mut self.ws_sources;
+        let x_buf = &mut self.ws_x_buf;
         let mut solver_bicgstab = BiCGSTAB::new(1e-2, 1000);
 
         // Precompute which boundary faces have non-zero velocity per component
@@ -330,7 +346,6 @@ impl SimpleSolver {
 
         // --- Solve each velocity component using the shared matrix ---
         for comp in 0..3 {
-            // Quick check: skip trivial components (z in 2D)
             let vel_values = state.velocity.values();
             if !active_comps[comp]
                 && !vel_values.iter().any(|v| v[comp].abs() > 1e-30)
@@ -341,22 +356,20 @@ impl SimpleSolver {
 
             sources.fill(0.0);
 
-            // Boundary face sources (component-dependent)
             for bface in &boundary_faces {
                 if let Some(ref bv) = bface.bc_vel {
                     sources[bface.owner] += (bface.d + f64::max(-bface.f_flux_bc, 0.0)) * bv[comp];
                 }
             }
 
-            // Pressure gradient + under-relaxation source, copy initial guess
             for i in 0..n {
                 sources[i] -= grad_p.values()[i][comp] * mesh.cells[i].volume;
-                sources[i] += ur_factor * a_p_unrelaxed[i] * vel_values[i][comp];
+                sources[i] += ur_factor * self.ws_a_p[i] * vel_values[i][comp];
                 x_buf[i] = vel_values[i][comp];
             }
 
             solver_bicgstab
-                .solve(&template_a, &sources, &mut x_buf)
+                .solve(&mom_mat, &sources, x_buf)
                 .map_err(|e| FluidError::SolverFailed(format!("{:?}", e)))?;
 
             // Update velocity component
@@ -365,6 +378,9 @@ impl SimpleSolver {
                 vel_mut[i][comp] = x_buf[i];
             }
         }
+
+        // Put momentum matrix back
+        self.mom_matrix = Some(mom_mat);
 
         Ok(())
     }
@@ -394,9 +410,14 @@ impl SimpleSolver {
             self.build_pressure_correction_pattern(n, mesh, boundary_pressure)?;
         }
 
-        // Fast path: update CSR values in-place using cached pattern
+        // Ensure pc_matrix exists; update values in-place
         let nnz = self.pc_col_idx.len();
-        let mut values = vec![0.0; nnz];
+        let mut pc_mat = self.pc_matrix.take().unwrap_or_else(|| {
+            gfd_core::SparseMatrix::new(
+                n, n, self.pc_row_ptr.clone(), self.pc_col_idx.clone(), vec![0.0; nnz],
+            ).unwrap()
+        });
+        pc_mat.values.fill(0.0);
         let mut sources_pc = vec![0.0; n];
 
         // Internal faces: compute coefficients and mass flux
@@ -407,13 +428,11 @@ impl SimpleSolver {
             let ra_f = 0.5 * (ra_o + ra_n);
             let coeff = self.density * ra_f * face.area / dist;
 
-            // Update off-diagonal entries
             let (idx_on, idx_no) = self.pc_face_csr_idx[face_idx];
-            values[idx_on] = -coeff;
-            values[idx_no] = -coeff;
-            // Accumulate diagonal
-            values[self.pc_diag_csr_idx[owner]] += coeff;
-            values[self.pc_diag_csr_idx[neigh]] += coeff;
+            pc_mat.values[idx_on] = -coeff;
+            pc_mat.values[idx_no] = -coeff;
+            pc_mat.values[self.pc_diag_csr_idx[owner]] += coeff;
+            pc_mat.values[self.pc_diag_csr_idx[neigh]] += coeff;
 
             // RHS: mass imbalance
             let vo = vel_vals[owner];
@@ -454,47 +473,55 @@ impl SimpleSolver {
             }
         }
 
-        // Build system using cached pattern
-        let a = gfd_core::SparseMatrix::new(
-            n, n, self.pc_row_ptr.clone(), self.pc_col_idx.clone(), values,
-        ).map_err(|e| FluidError::PressureCorrectionFailed(format!("{:?}", e)))?;
-        let mut system = gfd_core::LinearSystem::new(a, sources_pc);
-
-        // Apply Dirichlet p' = 0 for outlet patches
-        for patch in &mesh.boundary_patches {
-            if boundary_pressure.contains_key(&patch.name) {
-                for &fid in &patch.face_ids {
-                    let cell_id = mesh.faces[fid].owner_cell;
-                    apply_dirichlet(&mut system, cell_id, 0.0);
-                }
-            }
-        }
-
-        // No pressure BC → fix cell 0
+        // Apply Dirichlet p' = 0 for fixed-pressure or enclosed domains
+        // directly to the cached matrix values and sources
         let has_pressure_bc = boundary_pressure
             .keys()
             .any(|k| mesh.boundary_patch(k).is_some());
         if !has_pressure_bc {
-            apply_dirichlet(&mut system, 0, 0.0);
+            // Fix cell 0: zero out row, set diagonal to 1, rhs to 0
+            let start = self.pc_row_ptr[0];
+            let end = self.pc_row_ptr[1];
+            for idx in start..end {
+                pc_mat.values[idx] = if self.pc_col_idx[idx] == 0 { 1.0 } else { 0.0 };
+            }
+            sources_pc[0] = 0.0;
         }
+        for patch in &mesh.boundary_patches {
+            if boundary_pressure.contains_key(&patch.name) {
+                for &fid in &patch.face_ids {
+                    let cell_id = mesh.faces[fid].owner_cell;
+                    let start = self.pc_row_ptr[cell_id];
+                    let end = self.pc_row_ptr[cell_id + 1];
+                    for idx in start..end {
+                        pc_mat.values[idx] = if self.pc_col_idx[idx] == cell_id { 1.0 } else { 0.0 };
+                    }
+                    sources_pc[cell_id] = 0.0;
+                }
+            }
+        }
+
+        // Solve using cached matrix directly (no LinearSystem construction)
+        let mut x_pc = vec![0.0; n];
 
         // Solve pressure correction (SPD system -- use cached CG solver)
         let stats = self.cg_solver
-            .solve(&system.a, &system.b, &mut system.x)
+            .solve(&pc_mat, &sources_pc, &mut x_pc)
             .map_err(|e| FluidError::SolverFailed(format!("{:?}", e)))?;
 
         // If CG doesn't converge, fall back to BiCGSTAB
         if !stats.converged {
-            for xi in system.x.iter_mut() {
-                *xi = 0.0;
-            }
+            x_pc.fill(0.0);
             let mut fallback = BiCGSTAB::new(1e-3, 1000);
             fallback
-                .solve(&system.a, &system.b, &mut system.x)
+                .solve(&pc_mat, &sources_pc, &mut x_pc)
                 .map_err(|e| FluidError::SolverFailed(format!("{:?}", e)))?;
         }
 
-        Ok(system.x)
+        // Put pressure correction matrix back
+        self.pc_matrix = Some(pc_mat);
+
+        Ok(x_pc)
     }
 
     /// Build the CSR pattern for the pressure correction matrix.
