@@ -317,23 +317,19 @@ impl SimpleSolver {
                 sources[i] += ur_factor * a_p_unrelaxed[i] * vel_values[i][comp];
             }
 
-            // Build system: reuse matrix, set component-specific RHS
-            let mut system = gfd_core::LinearSystem::new(
-                template_system.a.clone(),
-                sources.clone(),
-            );
+            // Solve directly using the template matrix (avoid SparseMatrix clone)
+            // Copy current velocity as initial guess into a reusable buffer
+            let mut x_buf: Vec<f64> = vel_values.iter().map(|v| v[comp]).collect();
 
-            // Use current velocity as initial guess
-            for i in 0..n {
-                system.x[i] = state.velocity.values()[i][comp];
-            }
+            let mut solver = BiCGSTAB::new(1e-3, 1000);
+            solver
+                .solve(&template_system.a, &sources, &mut x_buf)
+                .map_err(|e| FluidError::SolverFailed(format!("{:?}", e)))?;
 
-            solve_linear_system(&mut system, self.use_gpu, false)?;
-
-            // --- Update velocity component ---
+            // Update velocity component
             let vel_mut = state.velocity.values_mut();
             for i in 0..n {
-                vel_mut[i][comp] = system.x[i];
+                vel_mut[i][comp] = x_buf[i];
             }
         }
 
