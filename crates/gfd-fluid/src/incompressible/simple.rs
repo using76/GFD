@@ -62,6 +62,8 @@ pub struct SimpleSolver {
     cached_boundary_geom: Vec<(usize, usize, f64)>,
     /// Cached cell volumes (flat array for fast access).
     cached_volumes: Vec<f64>,
+    /// Cached face areas (flat array).
+    cached_face_area: Vec<f64>,
     /// Cached face.area * face.normal (normal_area) for all faces.
     cached_normal_area: Vec<[f64; 3]>,
     /// Precomputed boundary face momentum data: (owner, D, bc_vel, f_flux_bc, is_wall).
@@ -109,6 +111,7 @@ impl SimpleSolver {
             cached_internal_geom: Vec::new(),
             cached_boundary_geom: Vec::new(),
             cached_volumes: Vec::new(),
+            cached_face_area: Vec::new(),
             cached_normal_area: Vec::new(),
             _cached_bc_faces: Vec::new(),
             _cached_bc_faces_built: false,
@@ -169,6 +172,8 @@ impl SimpleSolver {
         self.cached_normal_area = mesh.faces.iter()
             .map(|f| [f.area * f.normal[0], f.area * f.normal[1], f.area * f.normal[2]])
             .collect();
+
+        self.cached_face_area = mesh.faces.iter().map(|f| f.area).collect();
 
         // Cache geometric data (distances and diffusion coefficients)
         self.cached_internal_geom.clear();
@@ -463,11 +468,10 @@ impl SimpleSolver {
 
         // Internal faces: compute coefficients and mass flux
         for (face_idx, &(fi, owner, neigh, dist, _d)) in self.cached_internal_geom.iter().enumerate() {
-            let face = &mesh.faces[fi];
             let ra_o = self.cached_volumes[owner] / self.a_p_momentum[owner];
             let ra_n = self.cached_volumes[neigh] / self.a_p_momentum[neigh];
             let ra_f = 0.5 * (ra_o + ra_n);
-            let coeff = self.density * ra_f * face.area / dist;
+            let coeff = self.density * ra_f * self.cached_face_area[fi] / dist;
 
             let (idx_on, idx_no) = self.pc_face_csr_idx[face_idx];
             pc_mat.values[idx_on] = -coeff;
