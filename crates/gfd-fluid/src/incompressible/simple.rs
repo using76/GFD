@@ -54,7 +54,11 @@ pub struct SimpleSolver {
     /// Wall patch names (no-slip).
     wall_patches: Vec<String>,
     /// Cached face-to-patch map (built once per mesh).
-    face_patch_cache: HashMap<usize, String>,
+    face_patch_cache: Vec<Option<usize>>,
+    /// Cached patch names (indices match face_patch_cache values).
+    patch_names: Vec<String>,
+    /// Number of faces for which the cache was built.
+    cached_num_faces: usize,
 }
 
 impl SimpleSolver {
@@ -72,7 +76,9 @@ impl SimpleSolver {
             boundary_velocities: HashMap::new(),
             boundary_pressure: HashMap::new(),
             wall_patches: Vec::new(),
-            face_patch_cache: HashMap::new(),
+            face_patch_cache: Vec::new(),
+            patch_names: Vec::new(),
+            cached_num_faces: 0,
         }
     }
 
@@ -88,6 +94,43 @@ impl SimpleSolver {
         self.wall_patches = wall_patches;
     }
 
+    /// Ensure the face-to-patch cache is built for this mesh.
+    fn ensure_face_patch_cache(&mut self, mesh: &UnstructuredMesh) {
+        if self.cached_num_faces == mesh.faces.len() && !self.face_patch_cache.is_empty() {
+            return;
+        }
+        let num_faces = mesh.faces.len();
+        self.face_patch_cache = vec![None; num_faces];
+        self.patch_names.clear();
+        let mut name_to_idx: HashMap<String, usize> = HashMap::new();
+        for patch in &mesh.boundary_patches {
+            let idx = if let Some(&idx) = name_to_idx.get(&patch.name) {
+                idx
+            } else {
+                let idx = self.patch_names.len();
+                self.patch_names.push(patch.name.clone());
+                name_to_idx.insert(patch.name.clone(), idx);
+                idx
+            };
+            for &fid in &patch.face_ids {
+                if fid < num_faces {
+                    self.face_patch_cache[fid] = Some(idx);
+                }
+            }
+        }
+        self.cached_num_faces = num_faces;
+    }
+
+    /// Get the patch name for a face from cache.
+    #[inline]
+    fn get_face_patch(&self, face_id: usize) -> Option<&str> {
+        if face_id < self.face_patch_cache.len() {
+            self.face_patch_cache[face_id].map(|idx| self.patch_names[idx].as_str())
+        } else {
+            None
+        }
+    }
+
     /// Full SIMPLE step with explicit boundary condition arguments.
     pub fn solve_step_with_bcs(
         &mut self,
@@ -97,6 +140,9 @@ impl SimpleSolver {
         boundary_pressure: &HashMap<String, f64>,
         wall_patches: &[String],
     ) -> Result<f64> {
+        // Build face-to-patch cache once
+        self.ensure_face_patch_cache(mesh);
+
         // 1. Solve momentum equations for all 3 components
         self.solve_momentum(state, mesh, boundary_velocities, wall_patches)?;
 
@@ -131,9 +177,6 @@ impl SimpleSolver {
         wall_patches: &[String],
     ) -> Result<()> {
         let n = mesh.num_cells();
-
-        // Build a lookup: face_id -> (patch_name) for boundary faces
-        let face_patch_map = build_face_patch_map(mesh);
 
         // Compute pressure gradient once for all components
         let grad_computer = GreenGaussCellBasedGradient;
@@ -172,7 +215,7 @@ impl SimpleSolver {
                     if d < 1e-30 { 1e-30 } else { d }
                 };
                 let d = compute_diffusive_coefficient(self.viscosity, face.area, dist_to_face);
-                let patch = face_patch_map.get(&face.id).map(|s| s.to_string());
+                let patch = self.get_face_patch(face.id).map(|s| s.to_string());
                 let (bc_vel, f_flux_bc, is_wall) = if let Some(ref pname) = patch {
                     if let Some(bv) = boundary_velocities.get(pname.as_str()) {
                         let ff = self.density
@@ -291,10 +334,12 @@ impl SimpleSolver {
     ) -> Result<Vec<f64>> {
         let n = mesh.num_cells();
         let mut a_p_pc = vec![0.0; n];
-        let mut neighbors_pc: Vec<Vec<(usize, f64)>> = vec![vec![]; n];
         let mut sources_pc = vec![0.0; n];
 
-        let face_patch_map = build_face_patch_map(mesh);
+        // Count internal faces for NNZ estimate
+        let n_internal = mesh.faces.iter().filter(|f| f.neighbor_cell.is_some()).count();
+        let nnz_estimate = n + 2 * n_internal;
+        let mut assembler = Assembler::with_nnz_estimate(n, nnz_estimate);
 
         // NOTE: Rhie-Chow correction tested (EXP007) but destabilized convergence.
         // Using simple linear interpolation for face velocities instead.
@@ -318,8 +363,9 @@ impl SimpleSolver {
 
                 a_p_pc[owner] += coeff;
                 a_p_pc[neigh] += coeff;
-                neighbors_pc[owner].push((neigh, coeff));
-                neighbors_pc[neigh].push((owner, coeff));
+                // Add off-diagonal directly to assembler (no intermediate Vec<Vec<>>)
+                assembler.add_neighbor(owner, neigh, coeff);
+                assembler.add_neighbor(neigh, owner, coeff);
 
                 // RHS: mass imbalance through face
                 let vel_o = state.velocity.values()[owner];
@@ -340,13 +386,11 @@ impl SimpleSolver {
                 sources_pc[neigh] += mass_flux;
             } else {
                 // Boundary face
-                let patch_name = face_patch_map.get(&face.id);
+                let patch_name = self.get_face_patch(face.id);
 
                 if let Some(pname) = patch_name {
-                    if let Some(_p_val) = boundary_pressure.get(pname) {
+                    if boundary_pressure.contains_key(pname) {
                         // Outlet with fixed pressure: p' = 0 (Dirichlet)
-                        // Will be handled after assembly via apply_dirichlet
-                        // But we still need the mass flux for the source
                         let vel_o = state.velocity.values()[owner];
                         let mass_flux = self.density
                             * (vel_o[0] * face.normal[0]
@@ -373,10 +417,10 @@ impl SimpleSolver {
             }
         }
 
-        // Assemble
-        let mut assembler = Assembler::new(n);
+        // Add diagonals and sources to assembler
         for i in 0..n {
-            assembler.add_cell_equation(i, a_p_pc[i], &neighbors_pc[i], sources_pc[i]);
+            assembler.add_diagonal(i, a_p_pc[i]);
+            assembler.add_source(i, sources_pc[i]);
         }
         let mut system = assembler
             .finalize()
@@ -474,8 +518,6 @@ impl SimpleSolver {
         let n = mesh.num_cells();
         let mut mass_imbalance = vec![0.0; n];
 
-        let face_patch_map = build_face_patch_map(mesh);
-
         for face in &mesh.faces {
             let owner = face.owner_cell;
 
@@ -498,7 +540,7 @@ impl SimpleSolver {
                 mass_imbalance[neigh] -= mass_flux;
             } else {
                 // Boundary face
-                let patch_name = face_patch_map.get(&face.id);
+                let patch_name = self.get_face_patch(face.id);
                 if let Some(pname) = patch_name {
                     if let Some(bc_vel) = boundary_velocities.get(pname) {
                         let mass_flux = self.density
