@@ -33,3 +33,5 @@ EXP030	total_benchmark_ms	560	keep	cache momentum matrix CSR pattern - 7% faster
 EXP031	total_benchmark_ms	560	keep	eliminate all matrix clones via in-place value updates - marginal, cleaner code
 EXP032	total_benchmark_ms	560	keep	cache cell volumes in flat array - marginal
 EXP033	total_benchmark_ms	260	keep	cache face normal*area products for all face loops - 13% faster (better cache locality)
+EXP034	total_benchmark_ms	320	discard	residual loop via cached geom - no improvement
+EXP035	total_benchmark_ms	280	keep	inline pressure gradient in solve_momentum - 10% faster (eliminates VectorField alloc)
