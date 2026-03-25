@@ -282,47 +282,47 @@ impl SimpleSolver {
         self.a_p_momentum = a_p.clone();
 
         let mut sources = vec![0.0; n];
+        let mut x_buf = vec![0.0; n];
+        let mut solver_bicgstab = BiCGSTAB::new(1e-3, 1000);
 
-        // --- Solve each velocity component using the shared matrix ---
-        // Detect trivial components: if all BCs and current velocities are zero
-        // for a component, skip the expensive linear solve (common for z in 2D).
-        for comp in 0..3 {
-            sources.fill(0.0);
-
-            // Boundary face sources (component-dependent)
-            let mut has_bc_source = false;
-            for bface in &boundary_faces {
-                if let Some(ref bv) = bface.bc_vel {
-                    let s = (bface.d + f64::max(-bface.f_flux_bc, 0.0)) * bv[comp];
-                    if s.abs() > 0.0 { has_bc_source = true; }
-                    sources[bface.owner] += s;
+        // Precompute which boundary faces have non-zero velocity per component
+        let mut active_comps = [false; 3];
+        for bface in &boundary_faces {
+            if let Some(ref bv) = bface.bc_vel {
+                for c in 0..3 {
+                    if bv[c].abs() > 0.0 { active_comps[c] = true; }
                 }
             }
+        }
 
-            // Check if this component is trivially zero (no BC, zero velocity)
+        // --- Solve each velocity component using the shared matrix ---
+        for comp in 0..3 {
+            // Quick check: skip trivial components (z in 2D)
             let vel_values = state.velocity.values();
-            let comp_is_active = has_bc_source
-                || vel_values.iter().any(|v| v[comp].abs() > 1e-30)
-                || grad_p.values().iter().any(|g| g[comp].abs() > 1e-30);
-
-            if !comp_is_active {
-                // Skip linear solve; velocity stays at zero
+            if !active_comps[comp]
+                && !vel_values.iter().any(|v| v[comp].abs() > 1e-30)
+                && !grad_p.values().iter().any(|g| g[comp].abs() > 1e-30)
+            {
                 continue;
             }
 
-            // Pressure gradient source
-            for i in 0..n {
-                sources[i] -= grad_p.values()[i][comp] * mesh.cells[i].volume;
-                // Under-relaxation source
-                sources[i] += ur_factor * a_p_unrelaxed[i] * vel_values[i][comp];
+            sources.fill(0.0);
+
+            // Boundary face sources (component-dependent)
+            for bface in &boundary_faces {
+                if let Some(ref bv) = bface.bc_vel {
+                    sources[bface.owner] += (bface.d + f64::max(-bface.f_flux_bc, 0.0)) * bv[comp];
+                }
             }
 
-            // Solve directly using the template matrix (avoid SparseMatrix clone)
-            // Copy current velocity as initial guess into a reusable buffer
-            let mut x_buf: Vec<f64> = vel_values.iter().map(|v| v[comp]).collect();
+            // Pressure gradient + under-relaxation source, copy initial guess
+            for i in 0..n {
+                sources[i] -= grad_p.values()[i][comp] * mesh.cells[i].volume;
+                sources[i] += ur_factor * a_p_unrelaxed[i] * vel_values[i][comp];
+                x_buf[i] = vel_values[i][comp];
+            }
 
-            let mut solver = BiCGSTAB::new(1e-3, 1000);
-            solver
+            solver_bicgstab
                 .solve(&template_system.a, &sources, &mut x_buf)
                 .map_err(|e| FluidError::SolverFailed(format!("{:?}", e)))?;
 
