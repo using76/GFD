@@ -255,11 +255,37 @@ impl SimpleSolver {
     ) -> Result<()> {
         let n = mesh.num_cells();
 
-        // Compute pressure gradient once for all components
-        let grad_computer = GreenGaussCellBasedGradient;
-        let grad_p = grad_computer
-            .compute(&state.pressure, mesh)
-            .map_err(|e| FluidError::CoreError(e))?;
+        // Inline Green-Gauss pressure gradient (avoids VectorField allocation)
+        let p_vals = state.pressure.values();
+        let mut grad_p_data = vec![[0.0_f64; 3]; n];
+        for (fi, face) in mesh.faces.iter().enumerate() {
+            let owner = face.owner_cell;
+            let na = self.cached_normal_area[fi];
+            if let Some(neighbor) = face.neighbor_cell {
+                let phi_f = 0.5 * (p_vals[owner] + p_vals[neighbor]);
+                let c0 = phi_f * na[0];
+                let c1 = phi_f * na[1];
+                let c2 = phi_f * na[2];
+                grad_p_data[owner][0] += c0;
+                grad_p_data[owner][1] += c1;
+                grad_p_data[owner][2] += c2;
+                grad_p_data[neighbor][0] -= c0;
+                grad_p_data[neighbor][1] -= c1;
+                grad_p_data[neighbor][2] -= c2;
+            } else {
+                let phi_f = p_vals[owner];
+                grad_p_data[owner][0] += phi_f * na[0];
+                grad_p_data[owner][1] += phi_f * na[1];
+                grad_p_data[owner][2] += phi_f * na[2];
+            }
+        }
+        // Divide by cell volume
+        for i in 0..n {
+            let inv_vol = 1.0 / self.cached_volumes[i];
+            grad_p_data[i][0] *= inv_vol;
+            grad_p_data[i][1] *= inv_vol;
+            grad_p_data[i][2] *= inv_vol;
+        }
 
         // Ensure CSR pattern is cached (shared between momentum and pressure correction)
         if !self.pc_cached {
@@ -361,7 +387,7 @@ impl SimpleSolver {
             let vel_values = state.velocity.values();
             if !active_comps[comp]
                 && !vel_values.iter().any(|v| v[comp].abs() > 1e-30)
-                && !grad_p.values().iter().any(|g| g[comp].abs() > 1e-30)
+                && !grad_p_data.iter().any(|g| g[comp].abs() > 1e-30)
             {
                 continue;
             }
@@ -375,7 +401,7 @@ impl SimpleSolver {
             }
 
             for i in 0..n {
-                sources[i] -= grad_p.values()[i][comp] * self.cached_volumes[i];
+                sources[i] -= grad_p_data[i][comp] * self.cached_volumes[i];
                 sources[i] += ur_factor * self.ws_a_p[i] * vel_values[i][comp];
                 x_buf[i] = vel_values[i][comp];
             }
