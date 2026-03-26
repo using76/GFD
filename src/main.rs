@@ -1,11 +1,63 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use gfd_core::field::{Field, FieldData, ScalarField, VectorField};
 use gfd_core::mesh::structured::StructuredMesh;
 use gfd_io::json_input::{load_config, SimulationConfig};
+
+pub mod config_gen;
+
+// ---------------------------------------------------------------------------
+// JSON output data structures
+// ---------------------------------------------------------------------------
+
+/// Summary of a single field's statistics.
+#[derive(Debug, Clone, Serialize)]
+pub struct FieldStats {
+    pub min: f64,
+    pub max: f64,
+    pub mean: f64,
+}
+
+/// A probe result containing extracted field values at a specific location.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProbeResult {
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pressure: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub velocity: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+}
+
+/// Probe point definition in the JSON config.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ProbeConfig {
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    #[serde(default)]
+    pub z: f64,
+}
+
+/// Structured JSON output from a simulation run.
+#[derive(Debug, Clone, Serialize)]
+pub struct SimulationResult {
+    pub status: String,
+    pub iterations: usize,
+    pub final_residual: f64,
+    pub wall_time_ms: u64,
+    pub fields: HashMap<String, FieldStats>,
+    pub probes: Vec<ProbeResult>,
+    pub vtk_path: String,
+}
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -34,6 +86,38 @@ enum Commands {
         /// Enable GPU acceleration for linear solves (requires CUDA and the `gpu` feature)
         #[arg(long)]
         gpu: bool,
+
+        /// Output a structured JSON result summary to stdout
+        #[arg(long)]
+        json_output: bool,
+
+        /// JSON file or inline JSON string with probe point definitions
+        /// (array of {"name", "x", "y", "z"} objects)
+        #[arg(long)]
+        probes: Option<String>,
+    },
+
+    /// Run multiple simulations from JSON configuration files (batch mode)
+    Batch {
+        /// Paths to the simulation JSON configurations
+        #[arg(value_name = "CONFIGS")]
+        configs: Vec<PathBuf>,
+
+        /// Number of worker threads (defaults to all available cores)
+        #[arg(short, long)]
+        threads: Option<usize>,
+
+        /// Enable GPU acceleration for linear solves
+        #[arg(long)]
+        gpu: bool,
+
+        /// Output a structured JSON result array to stdout
+        #[arg(long)]
+        json_output: bool,
+
+        /// JSON file or inline JSON string with probe point definitions
+        #[arg(long)]
+        probes: Option<String>,
     },
 
     /// Validate a simulation JSON configuration without running
@@ -63,6 +147,37 @@ enum Commands {
 
     /// Run the benchmark suite and report metrics
     Benchmark,
+
+    /// Generate a JSON config for a standard simulation template
+    GenerateConfig {
+        /// Template name: "lid_driven_cavity", "pipe_flow", "heat_conduction"
+        #[arg(value_name = "TEMPLATE")]
+        template: String,
+
+        /// Grid size in X direction
+        #[arg(long, default_value = "20")]
+        nx: usize,
+
+        /// Grid size in Y direction
+        #[arg(long, default_value = "20")]
+        ny: usize,
+
+        /// Reynolds number (for flow templates)
+        #[arg(long, default_value = "100")]
+        re: f64,
+
+        /// Thermal conductivity (for heat conduction)
+        #[arg(long, default_value = "1.0")]
+        conductivity: f64,
+
+        /// Left boundary temperature (for heat conduction)
+        #[arg(long, default_value = "100.0")]
+        t_left: f64,
+
+        /// Right boundary temperature (for heat conduction)
+        #[arg(long, default_value = "200.0")]
+        t_right: f64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -80,9 +195,55 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { config, threads, gpu } => {
-            tracing::info!(?config, ?threads, gpu, "Starting simulation");
-            run_simulation(&config, threads, gpu)?;
+        Commands::Run {
+            config,
+            threads,
+            gpu,
+            json_output,
+            probes,
+        } => {
+            tracing::info!(?config, ?threads, gpu, json_output, "Starting simulation");
+            let probe_configs = parse_probes(&probes)?;
+            let result = run_simulation(&config, threads, gpu, &probe_configs)?;
+            if json_output {
+                let json = serde_json::to_string_pretty(&result)
+                    .context("Failed to serialize result to JSON")?;
+                println!("{}", json);
+            }
+        }
+        Commands::Batch {
+            configs,
+            threads,
+            gpu,
+            json_output,
+            probes,
+        } => {
+            tracing::info!(count = configs.len(), "Starting batch simulation");
+            let probe_configs = parse_probes(&probes)?;
+            let mut results = Vec::new();
+            for config_path in &configs {
+                tracing::info!(?config_path, "Running batch item");
+                match run_simulation(config_path, threads, gpu, &probe_configs) {
+                    Ok(result) => results.push(result),
+                    Err(e) => {
+                        tracing::error!(?config_path, error = %e, "Batch item failed");
+                        results.push(SimulationResult {
+                            status: format!("error: {}", e),
+                            iterations: 0,
+                            final_residual: f64::NAN,
+                            wall_time_ms: 0,
+                            fields: HashMap::new(),
+                            probes: Vec::new(),
+                            vtk_path: String::new(),
+                        });
+                    }
+                }
+            }
+            if json_output {
+                let json = serde_json::to_string_pretty(&results)
+                    .context("Failed to serialize batch results to JSON")?;
+                println!("{}", json);
+            }
         }
         Commands::Validate { config } => {
             tracing::info!(?config, "Validating configuration");
@@ -106,16 +267,178 @@ fn main() -> Result<()> {
                 anyhow::bail!("Benchmark failed with exit code: {:?}", status.code());
             }
         }
+        Commands::GenerateConfig {
+            template,
+            nx,
+            ny,
+            re,
+            conductivity,
+            t_left,
+            t_right,
+        } => {
+            let config = match template.as_str() {
+                "lid_driven_cavity" => config_gen::lid_driven_cavity(nx, ny, re),
+                "pipe_flow" => config_gen::pipe_flow(nx, ny, re),
+                "heat_conduction" => config_gen::heat_conduction(nx, ny, conductivity, t_left, t_right),
+                _ => anyhow::bail!(
+                    "Unknown template '{}'. Available: lid_driven_cavity, pipe_flow, heat_conduction",
+                    template
+                ),
+            };
+            let json = serde_json::to_string_pretty(&config)
+                .context("Failed to serialize config to JSON")?;
+            println!("{}", json);
+        }
     }
 
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
+// Probe parsing
+// ---------------------------------------------------------------------------
+
+/// Parse probe definitions from a CLI argument.
+///
+/// The argument can be either:
+/// - A path to a JSON file containing an array of probe objects
+/// - An inline JSON string (array of `{"name", "x", "y", "z"}`)
+fn parse_probes(probes_arg: &Option<String>) -> Result<Vec<ProbeConfig>> {
+    let Some(arg) = probes_arg else {
+        return Ok(Vec::new());
+    };
+
+    // Try to parse as inline JSON first
+    if let Ok(probes) = serde_json::from_str::<Vec<ProbeConfig>>(arg) {
+        return Ok(probes);
+    }
+
+    // Try to read as a file path
+    let contents = std::fs::read_to_string(arg)
+        .with_context(|| format!("Failed to read probes file: {}", arg))?;
+    let probes: Vec<ProbeConfig> = serde_json::from_str(&contents)
+        .with_context(|| "Failed to parse probes JSON")?;
+    Ok(probes)
+}
+
+/// Find the nearest cell to a given point in the mesh.
+fn find_nearest_cell(
+    mesh: &gfd_core::mesh::unstructured::UnstructuredMesh,
+    x: f64,
+    y: f64,
+    z: f64,
+) -> usize {
+    let mut best_cell = 0;
+    let mut best_dist_sq = f64::MAX;
+    for (i, cell) in mesh.cells.iter().enumerate() {
+        let dx = cell.center[0] - x;
+        let dy = cell.center[1] - y;
+        let dz = cell.center[2] - z;
+        let dist_sq = dx * dx + dy * dy + dz * dz;
+        if dist_sq < best_dist_sq {
+            best_dist_sq = dist_sq;
+            best_cell = i;
+        }
+    }
+    best_cell
+}
+
+/// Extract probe values from the current field state.
+fn extract_probes(
+    mesh: &gfd_core::mesh::unstructured::UnstructuredMesh,
+    probe_configs: &[ProbeConfig],
+    pressure: Option<&ScalarField>,
+    velocity: Option<&VectorField>,
+    temperature: Option<&ScalarField>,
+) -> Vec<ProbeResult> {
+    probe_configs
+        .iter()
+        .map(|pc| {
+            let cell_id = find_nearest_cell(mesh, pc.x, pc.y, pc.z);
+            ProbeResult {
+                name: pc.name.clone(),
+                x: pc.x,
+                y: pc.y,
+                z: pc.z,
+                pressure: pressure.and_then(|p| p.get(cell_id).ok()),
+                velocity: velocity.and_then(|v| v.get(cell_id).ok()),
+                temperature: temperature.and_then(|t| t.get(cell_id).ok()),
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Field statistics
+// ---------------------------------------------------------------------------
+
+fn scalar_stats(field: &ScalarField) -> FieldStats {
+    let vals = field.values();
+    if vals.is_empty() {
+        return FieldStats {
+            min: 0.0,
+            max: 0.0,
+            mean: 0.0,
+        };
+    }
+    let mut min = f64::MAX;
+    let mut max = f64::MIN;
+    let mut sum = 0.0;
+    for &v in vals {
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+        sum += v;
+    }
+    FieldStats {
+        min,
+        max,
+        mean: sum / vals.len() as f64,
+    }
+}
+
+fn velocity_magnitude_stats(field: &VectorField) -> FieldStats {
+    let vals = field.values();
+    if vals.is_empty() {
+        return FieldStats {
+            min: 0.0,
+            max: 0.0,
+            mean: 0.0,
+        };
+    }
+    let mut min = f64::MAX;
+    let mut max = f64::MIN;
+    let mut sum = 0.0;
+    for v in vals {
+        let mag = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if mag < min {
+            min = mag;
+        }
+        if mag > max {
+            max = mag;
+        }
+        sum += mag;
+    }
+    FieldStats {
+        min,
+        max,
+        mean: sum / vals.len() as f64,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Run simulation
 // ---------------------------------------------------------------------------
 
-fn run_simulation(config_path: &PathBuf, threads: Option<usize>, gpu: bool) -> Result<()> {
+fn run_simulation(
+    config_path: &PathBuf,
+    threads: Option<usize>,
+    gpu: bool,
+    probe_configs: &[ProbeConfig],
+) -> Result<SimulationResult> {
     // 1. Thread pool
     if let Some(n) = threads {
         gfd_parallel::thread_pool::configure_thread_pool(n)
@@ -148,17 +471,26 @@ fn run_simulation(config_path: &PathBuf, threads: Option<usize>, gpu: bool) -> R
         tracing::info!("GPU acceleration enabled for linear solves");
     }
 
-    if has_solid {
-        run_solid_mechanics(&config, &mesh)?;
+    let start = std::time::Instant::now();
+
+    let result = if has_solid {
+        run_solid_mechanics(&config, &mesh, probe_configs)?
     } else if has_energy && !has_flow {
-        run_heat_conduction(&config, &mesh)?;
+        run_heat_conduction(&config, &mesh, probe_configs)?
     } else if has_flow {
-        run_fluid_flow(&config, &mesh, has_energy, gpu)?;
+        run_fluid_flow(&config, &mesh, has_energy, gpu, probe_configs)?
     } else {
         anyhow::bail!("No physics model enabled. Set models.flow, models.energy, or models.solid in config.");
-    }
+    };
 
-    Ok(())
+    // Patch wall_time_ms with the actual elapsed time
+    let wall_time_ms = start.elapsed().as_millis() as u64;
+    let result = SimulationResult {
+        wall_time_ms,
+        ..result
+    };
+
+    Ok(result)
 }
 
 /// Create a mesh from config. Uses structured mesh generation.
@@ -225,7 +557,8 @@ fn parse_mesh_dims(name: &str) -> (usize, usize, usize) {
 fn run_heat_conduction(
     config: &SimulationConfig,
     mesh: &gfd_core::mesh::unstructured::UnstructuredMesh,
-) -> Result<()> {
+    probe_configs: &[ProbeConfig],
+) -> Result<SimulationResult> {
     use gfd_thermal::ThermalState;
     use gfd_thermal::conduction::ConductionSolver;
 
@@ -279,9 +612,30 @@ fn run_heat_conduction(
     tracing::info!(residual = residual, "Conduction solved");
 
     // Write output
-    write_results(config, mesh, &state.temperature, None)?;
+    let vtk_path = write_results(config, mesh, &state.temperature, None)?;
 
-    Ok(())
+    // Build field stats
+    let mut fields = HashMap::new();
+    fields.insert("temperature".to_string(), scalar_stats(&state.temperature));
+
+    // Extract probes
+    let probes = extract_probes(mesh, probe_configs, None, None, Some(&state.temperature));
+
+    let status = if residual < config.run.tolerance {
+        "converged"
+    } else {
+        "max_iterations"
+    };
+
+    Ok(SimulationResult {
+        status: status.to_string(),
+        iterations: 1,
+        final_residual: residual,
+        wall_time_ms: 0, // will be overwritten by caller
+        fields,
+        probes,
+        vtk_path,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +647,8 @@ fn run_fluid_flow(
     mesh: &gfd_core::mesh::unstructured::UnstructuredMesh,
     has_energy: bool,
     gpu: bool,
-) -> Result<()> {
+    probe_configs: &[ProbeConfig],
+) -> Result<SimulationResult> {
     use gfd_fluid::FluidState;
     use gfd_fluid::incompressible::simple::SimpleSolver;
 
@@ -428,6 +783,10 @@ fn run_fluid_flow(
 
     tracing::info!(max_iter, tolerance, "Starting SIMPLE iterations");
 
+    let mut final_residual = f64::MAX;
+    let mut final_iter = 0;
+    let mut converged = false;
+
     for iter in 0..max_iter {
         let residual = solver
             .solve_step_with_bcs(
@@ -446,20 +805,62 @@ fn run_fluid_flow(
                 .map_err(|e| anyhow::anyhow!("Energy equation failed: {:?}", e))?;
         }
 
+        final_residual = residual;
+        final_iter = iter + 1;
+
         if iter % 10 == 0 || residual < tolerance {
             tracing::info!(iter, residual, "SIMPLE iteration");
         }
 
         if residual < tolerance {
             tracing::info!(iter, residual, "Converged!");
+            converged = true;
             break;
         }
     }
 
     // Write output
-    write_results(config, mesh, &state.pressure, Some(&state.velocity))?;
+    let vtk_path = write_results(config, mesh, &state.pressure, Some(&state.velocity))?;
 
-    Ok(())
+    // Build field stats
+    let mut fields = HashMap::new();
+    fields.insert("pressure".to_string(), scalar_stats(&state.pressure));
+    fields.insert(
+        "velocity_magnitude".to_string(),
+        velocity_magnitude_stats(&state.velocity),
+    );
+    if let Some(ref t_state) = thermal_state {
+        fields.insert(
+            "temperature".to_string(),
+            scalar_stats(&t_state.temperature),
+        );
+    }
+
+    // Extract probes
+    let temp_field = thermal_state.as_ref().map(|ts| &ts.temperature);
+    let probes = extract_probes(
+        mesh,
+        probe_configs,
+        Some(&state.pressure),
+        Some(&state.velocity),
+        temp_field,
+    );
+
+    let status = if converged {
+        "converged"
+    } else {
+        "max_iterations"
+    };
+
+    Ok(SimulationResult {
+        status: status.to_string(),
+        iterations: final_iter,
+        final_residual,
+        wall_time_ms: 0, // will be overwritten by caller
+        fields,
+        probes,
+        vtk_path,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -469,7 +870,8 @@ fn run_fluid_flow(
 fn run_solid_mechanics(
     config: &SimulationConfig,
     mesh: &gfd_core::mesh::unstructured::UnstructuredMesh,
-) -> Result<()> {
+    probe_configs: &[ProbeConfig],
+) -> Result<SimulationResult> {
     use gfd_solid::elastic::LinearElasticSolver;
     use gfd_solid::SolidState;
 
@@ -522,11 +924,36 @@ fn run_solid_mechanics(
 
     tracing::info!(max_displacement = max_disp, "Solid mechanics solved");
 
-    write_results(config, mesh, &ScalarField::from_vec("displacement_magnitude",
-        state.displacement.values().iter().map(|d| (d[0]*d[0]+d[1]*d[1]+d[2]*d[2]).sqrt()).collect()),
-        Some(&state.displacement))?;
+    let disp_mag = ScalarField::from_vec(
+        "displacement_magnitude",
+        state
+            .displacement
+            .values()
+            .iter()
+            .map(|d| (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt())
+            .collect(),
+    );
+    let vtk_path = write_results(config, mesh, &disp_mag, Some(&state.displacement))?;
 
-    Ok(())
+    // Build field stats
+    let mut fields = HashMap::new();
+    fields.insert(
+        "displacement_magnitude".to_string(),
+        scalar_stats(&disp_mag),
+    );
+
+    // Extract probes (pressure/temperature not available for solid)
+    let probes = extract_probes(mesh, probe_configs, None, None, None);
+
+    Ok(SimulationResult {
+        status: "converged".to_string(),
+        iterations: 1,
+        final_residual: max_disp,
+        wall_time_ms: 0,
+        fields,
+        probes,
+        vtk_path,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -538,7 +965,7 @@ fn write_results(
     mesh: &gfd_core::mesh::unstructured::UnstructuredMesh,
     scalar: &ScalarField,
     vector: Option<&VectorField>,
-) -> Result<()> {
+) -> Result<String> {
     let output_dir = &config.results.output_dir;
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output dir: {}", output_dir))?;
@@ -555,7 +982,7 @@ fn write_results(
         .map_err(|e| anyhow::anyhow!("VTK write failed: {:?}", e))?;
 
     tracing::info!(path = %output_path, "Results written");
-    Ok(())
+    Ok(output_path)
 }
 
 // ---------------------------------------------------------------------------
