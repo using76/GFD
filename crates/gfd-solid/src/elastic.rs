@@ -1012,6 +1012,7 @@ mod tests {
     }
 
     /// Test elastoplastic: high stress exceeds yield, producing plastic strain.
+    /// Uses nu=0.0 so uniaxial traction produces uniaxial stress (VM = sigma_xx).
     #[test]
     fn elastoplastic_above_yield() {
         let structured = StructuredMesh::uniform(3, 1, 1, 3.0, 1.0, 1.0);
@@ -1019,21 +1020,23 @@ mod tests {
         let num_cells = mesh.num_cells();
         let mut state = SolidState::new(num_cells);
 
-        // Very high traction to exceed yield stress
+        // Very high traction to exceed yield stress. Use lower yield stress
+        // to ensure yielding occurs on a coarse mesh.
         let mut force_patches = HashMap::new();
         force_patches.insert("xmax".to_string(), [500e6, 0.0, 0.0]); // 500 MPa traction
 
+        // Use nu=0 so stress is purely uniaxial and VM = |sigma_xx|
         let fixed_patches = vec![
             "xmin".to_string(),
             "ymin".to_string(),
             "zmin".to_string(),
         ];
 
-        let yield_stress = 250e6; // 250 MPa
+        let yield_stress = 100e6; // 100 MPa (lower yield to ensure yielding)
         let hardening = 1e9; // 1 GPa hardening
         let yield_model = VonMisesYield::new(yield_stress, hardening);
 
-        let solver = LinearElasticSolver::new(200e9, 0.3);
+        let solver = LinearElasticSolver::new(200e9, 0.0); // nu=0 for clean uniaxial
         let mut plastic_strain = vec![0.0; num_cells];
 
         let max_disp = solver
@@ -1050,22 +1053,22 @@ mod tests {
 
         assert!(max_disp > 0.0, "Should have displacement");
 
-        // The elastoplastic solver should have run. On small meshes with
-        // force-based BCs, yielding depends on the actual stress magnitude
-        // which is mesh-dependent. Check that the solve completed without error.
+        // At least some cells should have yielded (500 MPa traction > 100 MPa yield)
         let max_eps_p = plastic_strain.iter().cloned().fold(0.0_f64, f64::max);
-        // Plastic strain may or may not be > 0 depending on mesh resolution;
-        // the important thing is that the solve path executed correctly.
-        assert!(max_eps_p >= 0.0, "Plastic strain should be non-negative");
+        assert!(
+            max_eps_p > 0.0,
+            "Some cells should have plastic strain above yield, max eps_p = {}",
+            max_eps_p
+        );
 
-        // Verify that the corrected von Mises stress is <= yield stress + hardening
+        // Verify that the corrected von Mises stress is at or below the yield surface
         for cell_id in 0..num_cells {
             let stress = state.stress.get(cell_id).unwrap_or([[0.0; 3]; 3]);
             let vm = VonMisesYield::compute_von_mises(&stress);
             let eps_p = plastic_strain[cell_id];
             let sigma_y = yield_model.current_yield_stress(eps_p);
             assert!(
-                vm <= sigma_y + 1e-3, // small tolerance
+                vm <= sigma_y + 1.0, // 1 Pa absolute tolerance
                 "Cell {}: VM stress {:.3e} should be <= yield stress {:.3e}",
                 cell_id,
                 vm,
