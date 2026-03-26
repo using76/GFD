@@ -1,5 +1,8 @@
 //! Mesh I/O — export generated meshes to various formats.
 
+pub mod export;
+pub mod formats;
+
 use gfd_core::mesh::unstructured::UnstructuredMesh;
 use crate::Result;
 

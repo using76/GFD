@@ -4,5 +4,7 @@
 //! extrusion, and Voronoi dual mesh generation.
 
 pub mod delaunay;
+pub mod hexahedral;
 pub mod polyhedral;
 pub mod prism_layer;
+pub mod tetrahedral;
