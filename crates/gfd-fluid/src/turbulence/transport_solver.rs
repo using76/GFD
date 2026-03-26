@@ -297,12 +297,14 @@ impl TurbulenceTransportSolver {
             .to_vec();
 
         // Compute eddy viscosity: mu_t = C_mu * rho * k^2 / epsilon.
+        // Apply realizability limiter: mu_t < 1000 * mu_laminar (Fluent practice).
         let mut mu_t = vec![0.0; n];
         for i in 0..n {
             let rho = state.density.values()[i];
+            let mu_lam = state.viscosity.values()[i];
             let k_val = k_old[i].max(K_MIN);
             let eps_val = epsilon_vals[i].max(EPSILON_MIN);
-            mu_t[i] = C_MU * rho * k_val * k_val / eps_val;
+            mu_t[i] = (C_MU * rho * k_val * k_val / eps_val).min(1000.0 * mu_lam);
         }
 
         // Effective diffusivity: gamma_eff = mu + mu_t / sigma_k.
@@ -316,14 +318,18 @@ impl TurbulenceTransportSolver {
         let mut source_implicit = vec![0.0; n];
 
         for i in 0..n {
-            // Production (explicit source).
-            source_explicit[i] = mu_t[i] * s_sq[i];
-
-            // Destruction: -rho * epsilon.
-            // Linearized implicitly: add rho * epsilon / k to the diagonal.
+            // Production: P_k = mu_t * S^2 with Kato-Launder-style limiter.
+            // Clip P_k to max(P_k, 10 * rho * epsilon) to prevent unphysical
+            // k spikes at stagnation points (standard Fluent/CFX practice).
             let rho = state.density.values()[i];
             let k_val = k_old[i].max(K_MIN);
             let eps_val = epsilon_vals[i].max(EPSILON_MIN);
+            let p_k = mu_t[i] * s_sq[i];
+            let p_k_limited = p_k.min(10.0 * rho * eps_val);
+            source_explicit[i] = p_k_limited;
+
+            // Destruction: -rho * epsilon.
+            // Linearized implicitly: add rho * epsilon / k to the diagonal.
             source_implicit[i] = rho * eps_val / k_val;
         }
 
@@ -381,13 +387,14 @@ impl TurbulenceTransportSolver {
             .values()
             .to_vec();
 
-        // Compute eddy viscosity: mu_t = C_mu * rho * k^2 / epsilon.
+        // Compute eddy viscosity with realizability limiter.
         let mut mu_t = vec![0.0; n];
         for i in 0..n {
             let rho = state.density.values()[i];
+            let mu_lam = state.viscosity.values()[i];
             let k_val = k_vals[i].max(K_MIN);
             let eps_val = eps_old[i].max(EPSILON_MIN);
-            mu_t[i] = C_MU * rho * k_val * k_val / eps_val;
+            mu_t[i] = (C_MU * rho * k_val * k_val / eps_val).min(1000.0 * mu_lam);
         }
 
         // Effective diffusivity: gamma_eff = mu + mu_t / sigma_eps.
