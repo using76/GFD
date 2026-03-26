@@ -4,6 +4,7 @@ pub mod vof;
 pub mod level_set;
 pub mod euler_euler;
 pub mod dpm;
+pub mod mixture;
 
 use gfd_core::{ScalarField, UnstructuredMesh};
 use crate::Result;

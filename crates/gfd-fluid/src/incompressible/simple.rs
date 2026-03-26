@@ -90,6 +90,22 @@ pub struct SimpleSolver {
     pc_face_csr_idx: Vec<(usize, usize)>,
     /// Mapping: CSR index for diagonal entry of each cell.
     pc_diag_csr_idx: Vec<usize>,
+    /// Boussinesq approximation parameters (None = disabled).
+    boussinesq: Option<BoussinesqParams>,
+    /// External momentum damping coefficient per cell [N*s/m^4].
+    /// Used by solidification (Carman-Kozeny damping) and other couplings.
+    external_momentum_damping: Option<Vec<f64>>,
+}
+
+/// Parameters for the Boussinesq buoyancy approximation.
+#[derive(Debug, Clone)]
+pub struct BoussinesqParams {
+    /// Reference density [kg/m^3].
+    pub rho_ref: f64,
+    /// Thermal expansion coefficient [1/K].
+    pub beta: f64,
+    /// Reference temperature [K].
+    pub t_ref: f64,
 }
 
 impl SimpleSolver {
@@ -129,6 +145,8 @@ impl SimpleSolver {
             pc_col_idx: Vec::new(),
             pc_face_csr_idx: Vec::new(),
             pc_diag_csr_idx: Vec::new(),
+            boussinesq: None,
+            external_momentum_damping: None,
         }
     }
 
@@ -142,6 +160,26 @@ impl SimpleSolver {
         self.boundary_velocities = boundary_velocities;
         self.boundary_pressure = boundary_pressure;
         self.wall_patches = wall_patches;
+    }
+
+    /// Sets the Boussinesq buoyancy approximation parameters.
+    pub fn set_boussinesq_params(&mut self, rho_ref: f64, beta: f64, t_ref: f64) {
+        self.boussinesq = Some(BoussinesqParams { rho_ref, beta, t_ref });
+    }
+
+    /// Clears the Boussinesq parameters.
+    pub fn clear_boussinesq_params(&mut self) {
+        self.boussinesq = None;
+    }
+
+    /// Sets an external momentum damping field (e.g., Carman-Kozeny from solidification).
+    pub fn set_external_momentum_damping(&mut self, damping: Vec<f64>) {
+        self.external_momentum_damping = Some(damping);
+    }
+
+    /// Clears external momentum damping.
+    pub fn clear_external_momentum_damping(&mut self) {
+        self.external_momentum_damping = None;
     }
 
     /// Ensure the face-to-patch cache is built for this mesh.
@@ -231,6 +269,32 @@ impl SimpleSolver {
         self.solve_step_with_bcs_dt(state, mesh, boundary_velocities, boundary_pressure, wall_patches, f64::INFINITY)
     }
 
+    /// Full SIMPLE step with Boussinesq buoyancy coupling.
+    ///
+    /// Like [`solve_step_with_bcs_dt`] but accepts an optional temperature field.
+    /// When Boussinesq parameters are set and temperature is provided, adds
+    /// buoyancy source: S_i = -rho_ref * beta * (T - T_ref) * g_i * V_cell.
+    pub fn solve_step_with_temperature(
+        &mut self,
+        state: &mut FluidState,
+        mesh: &UnstructuredMesh,
+        boundary_velocities: &HashMap<String, [f64; 3]>,
+        boundary_pressure: &HashMap<String, f64>,
+        wall_patches: &[String],
+        dt: f64,
+        temperature: Option<&gfd_core::ScalarField>,
+    ) -> Result<f64> {
+        self.ensure_face_patch_cache(mesh);
+        self.solve_momentum_with_dt_and_temperature(
+            state, mesh, boundary_velocities, boundary_pressure, wall_patches, dt, temperature,
+        )?;
+        let p_prime = self.solve_pressure_correction(state, mesh, boundary_pressure)?;
+        self.correct_velocity(state, mesh, &p_prime)?;
+        self.correct_pressure(state, &p_prime);
+        let residual = self.compute_continuity_residual(state, mesh, boundary_velocities, wall_patches);
+        Ok(residual)
+    }
+
     /// Full SIMPLE step with explicit boundary condition arguments and a time step.
     ///
     /// `dt` controls the transient term: pass `f64::INFINITY` for steady-state (no temporal term),
@@ -270,10 +334,6 @@ impl SimpleSolver {
     // -----------------------------------------------------------------------
 
     /// Solve the momentum equations for all three velocity components.
-    ///
-    /// Discretizes convection (first-order upwind) + diffusion + pressure gradient.
-    /// Applies under-relaxation and solves with BiCGSTAB.
-    /// When `dt` is finite, adds implicit Euler transient term and gravity source.
     fn solve_momentum_with_dt(
         &mut self,
         state: &mut FluidState,
@@ -282,6 +342,22 @@ impl SimpleSolver {
         boundary_pressure: &HashMap<String, f64>,
         wall_patches: &[String],
         dt: f64,
+    ) -> Result<()> {
+        self.solve_momentum_with_dt_and_temperature(
+            state, mesh, boundary_velocities, boundary_pressure, wall_patches, dt, None,
+        )
+    }
+
+    /// Solve the momentum equations with optional Boussinesq buoyancy coupling.
+    fn solve_momentum_with_dt_and_temperature(
+        &mut self,
+        state: &mut FluidState,
+        mesh: &UnstructuredMesh,
+        boundary_velocities: &HashMap<String, [f64; 3]>,
+        boundary_pressure: &HashMap<String, f64>,
+        wall_patches: &[String],
+        dt: f64,
+        temperature: Option<&gfd_core::ScalarField>,
     ) -> Result<()> {
         let n = mesh.num_cells();
 
@@ -401,6 +477,14 @@ impl SimpleSolver {
             }
         }
 
+        // External momentum damping (e.g., Carman-Kozeny from solidification)
+        if let Some(ref damping) = self.external_momentum_damping {
+            let len = damping.len().min(n);
+            for i in 0..len {
+                self.ws_a_p[i] += damping[i] * self.cached_volumes[i];
+            }
+        }
+
         // Apply under-relaxation: store unrelaxed diagonal in a_p_momentum,
         // then modify a_p for the matrix diagonal
         let ur_factor = (1.0 - self.alpha_u) / self.alpha_u;
@@ -422,6 +506,10 @@ impl SimpleSolver {
             }
         }
 
+        // Check if Boussinesq is active
+        let has_boussinesq = self.boussinesq.is_some() && temperature.is_some();
+        let has_ext_damping = self.external_momentum_damping.is_some();
+
         // --- Solve each velocity component using the shared matrix ---
         for comp in 0..3 {
             let vel_values = state.velocity.values();
@@ -430,6 +518,8 @@ impl SimpleSolver {
                 && !grad_p_data.iter().any(|g| g[comp].abs() > 1e-30)
                 && self.gravity[comp] == 0.0
                 && !transient
+                && !has_boussinesq
+                && !has_ext_damping
             {
                 continue;
             }
@@ -458,6 +548,16 @@ impl SimpleSolver {
                 // Under-relaxation source
                 sources[i] += ur_factor * self.ws_a_p[i] * vel_values[i][comp];
                 x_buf[i] = vel_values[i][comp];
+            }
+
+            // Boussinesq buoyancy source: S_i = -rho_ref * beta * (T - T_ref) * g_i * V
+            if let (Some(ref bparams), Some(temp)) = (&self.boussinesq, temperature) {
+                let t_vals = temp.values();
+                for i in 0..n {
+                    let vol_i = self.cached_volumes[i];
+                    sources[i] += -bparams.rho_ref * bparams.beta
+                        * (t_vals[i] - bparams.t_ref) * self.gravity[comp] * vol_i;
+                }
             }
 
             solver_bicgstab
@@ -1322,5 +1422,111 @@ mod tests {
             has_y_motion,
             "Gravity should produce non-zero y-velocity"
         );
+    }
+
+    #[test]
+    fn test_set_boussinesq_params() {
+        let mut solver = SimpleSolver::new(1.0, 1e-3);
+        assert!(solver.boussinesq.is_none());
+        solver.set_boussinesq_params(1.225, 3.4e-3, 300.0);
+        assert!(solver.boussinesq.is_some());
+        let bp = solver.boussinesq.as_ref().unwrap();
+        assert_eq!(bp.rho_ref, 1.225);
+        assert_eq!(bp.beta, 3.4e-3);
+        assert_eq!(bp.t_ref, 300.0);
+        solver.clear_boussinesq_params();
+        assert!(solver.boussinesq.is_none());
+    }
+
+    #[test]
+    fn test_boussinesq_buoyancy_produces_motion() {
+        let (mesh, _bv, bp, wp) = make_3x3x1_lid_driven_cavity();
+        let n = mesh.num_cells();
+        let density = 1.0;
+        let viscosity = 0.1;
+        let mut state = FluidState::new(n);
+        for i in 0..n {
+            let _ = state.density.set(i, density);
+            let _ = state.viscosity.set(i, viscosity);
+        }
+        let mut solver = SimpleSolver::new(density, viscosity);
+        solver.alpha_u = 0.5;
+        solver.alpha_p = 0.2;
+        solver.gravity = [0.0, -9.81, 0.0];
+        solver.set_boussinesq_params(density, 2.1e-4, 300.0);
+        let temp = gfd_core::ScalarField::new(
+            "temperature",
+            (0..n).map(|i| 350.0 - 20.0 * mesh.cells[i].center[1]).collect(),
+        );
+        let bv_empty = HashMap::new();
+        let res = solver.solve_step_with_temperature(
+            &mut state, &mesh, &bv_empty, &bp, &wp, f64::INFINITY, Some(&temp),
+        );
+        assert!(res.is_ok(), "Boussinesq step failed: {:?}", res.err());
+        let vel = state.velocity.values();
+        let has_y_motion = vel.iter().any(|v| v[1].abs() > 1e-12);
+        assert!(has_y_motion, "Boussinesq should produce y-velocity");
+    }
+
+    #[test]
+    fn test_boussinesq_uniform_temp_no_extra_force() {
+        let (mesh, _bv, bp, wp) = make_3x3x1_lid_driven_cavity();
+        let n = mesh.num_cells();
+        let density = 1.0;
+        let viscosity = 0.1;
+        let bv_empty = HashMap::new();
+
+        let mut state_no = FluidState::new(n);
+        for i in 0..n { let _ = state_no.density.set(i, density); let _ = state_no.viscosity.set(i, viscosity); }
+        let mut solver_no = SimpleSolver::new(density, viscosity);
+        solver_no.alpha_u = 0.7; solver_no.alpha_p = 0.3;
+        solver_no.gravity = [0.0, -9.81, 0.0];
+        let _ = solver_no.solve_step_with_bcs_dt(&mut state_no, &mesh, &bv_empty, &bp, &wp, f64::INFINITY).unwrap();
+
+        let mut state_b = FluidState::new(n);
+        for i in 0..n { let _ = state_b.density.set(i, density); let _ = state_b.viscosity.set(i, viscosity); }
+        let mut solver_b = SimpleSolver::new(density, viscosity);
+        solver_b.alpha_u = 0.7; solver_b.alpha_p = 0.3;
+        solver_b.gravity = [0.0, -9.81, 0.0];
+        solver_b.set_boussinesq_params(density, 2.1e-4, 300.0);
+        let temp = gfd_core::ScalarField::new("temperature", vec![300.0; n]);
+        let _ = solver_b.solve_step_with_temperature(&mut state_b, &mesh, &bv_empty, &bp, &wp, f64::INFINITY, Some(&temp)).unwrap();
+
+        let vel_no = state_no.velocity.values();
+        let vel_b = state_b.velocity.values();
+        for i in 0..n {
+            for c in 0..3 {
+                assert!((vel_no[i][c] - vel_b[i][c]).abs() < 1e-10,
+                    "Cell {} comp {}: should be equal at T=T_ref", i, c);
+            }
+        }
+    }
+
+    #[test]
+    fn test_external_momentum_damping() {
+        let (mesh, bv, bp, wp) = make_3x3x1_lid_driven_cavity();
+        let n = mesh.num_cells();
+        let density = 1.0;
+        let viscosity = 0.1;
+
+        let mut state_no_damp = FluidState::new(n);
+        for i in 0..n { let _ = state_no_damp.density.set(i, density); let _ = state_no_damp.viscosity.set(i, viscosity); }
+        let mut solver_no = SimpleSolver::new(density, viscosity);
+        solver_no.alpha_u = 0.7; solver_no.alpha_p = 0.3;
+        let _ = solver_no.solve_step_with_bcs(&mut state_no_damp, &mesh, &bv, &bp, &wp).unwrap();
+
+        let mut state_damp = FluidState::new(n);
+        for i in 0..n { let _ = state_damp.density.set(i, density); let _ = state_damp.viscosity.set(i, viscosity); }
+        let mut solver_d = SimpleSolver::new(density, viscosity);
+        solver_d.alpha_u = 0.7; solver_d.alpha_p = 0.3;
+        solver_d.set_external_momentum_damping(vec![1.0e8; n]);
+        let _ = solver_d.solve_step_with_bcs(&mut state_damp, &mesh, &bv, &bp, &wp).unwrap();
+
+        let vel_no = state_no_damp.velocity.values();
+        let vel_d = state_damp.velocity.values();
+        let mag_no: f64 = vel_no.iter().map(|v| v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sum();
+        let mag_d: f64 = vel_d.iter().map(|v| v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sum();
+        assert!(mag_d < mag_no * 0.5,
+            "Large damping should reduce velocity: no_damp={}, damp={}", mag_no.sqrt(), mag_d.sqrt());
     }
 }

@@ -154,6 +154,140 @@ impl EnthalpyPorosity {
     }
 }
 
+/// Coupled energy-phase-change solver using the enthalpy-porosity method.
+pub struct CoupledPhaseChangeSolver {
+    /// The enthalpy-porosity phase change model.
+    pub phase_change: EnthalpyPorosity,
+    /// Thermal conductivity [W/(m*K)].
+    pub conductivity: f64,
+    /// Specific heat capacity rho*cp [J/(m^3*K)].
+    pub rho_cp: f64,
+    /// Maximum number of coupling iterations.
+    pub max_coupling_iterations: usize,
+    /// Convergence tolerance for liquid fraction change.
+    pub coupling_tolerance: f64,
+}
+
+/// Result of a coupled phase change solve step.
+pub struct CoupledPhaseChangeResult {
+    /// Energy source terms from latent heat.
+    pub energy_source: ScalarField,
+    /// Momentum damping coefficients (Carman-Kozeny).
+    pub momentum_damping: ScalarField,
+    /// Current liquid fraction field.
+    pub liquid_fraction: ScalarField,
+    /// Number of coupling iterations performed.
+    pub iterations: usize,
+    /// Final max change in liquid fraction.
+    pub liquid_fraction_residual: f64,
+}
+
+impl CoupledPhaseChangeSolver {
+    /// Creates a new coupled phase change solver.
+    pub fn new(
+        solidus_temperature: f64,
+        liquidus_temperature: f64,
+        latent_heat: f64,
+        conductivity: f64,
+        rho_cp: f64,
+    ) -> Self {
+        Self {
+            phase_change: EnthalpyPorosity::new(solidus_temperature, liquidus_temperature, latent_heat),
+            conductivity,
+            rho_cp,
+            max_coupling_iterations: 20,
+            coupling_tolerance: 1e-4,
+        }
+    }
+
+    /// Sets the density for latent heat source computation.
+    pub fn with_density(mut self, density: f64) -> Self {
+        self.phase_change = self.phase_change.with_density(density);
+        self
+    }
+
+    /// Sets the mushy zone constant.
+    pub fn with_mushy_constant(mut self, c: f64) -> Self {
+        self.phase_change = self.phase_change.with_mushy_constant(c);
+        self
+    }
+
+    /// Performs a coupled energy + phase change solve step.
+    ///
+    /// Iterates between the energy equation and phase change until converged.
+    pub fn solve_coupled_phase_change(
+        &mut self,
+        temperature: &mut ScalarField,
+        mesh: &UnstructuredMesh,
+        dt: f64,
+        boundary_temps: &std::collections::HashMap<String, f64>,
+    ) -> Result<CoupledPhaseChangeResult> {
+        let n = mesh.num_cells();
+        let mut fl_old = self.phase_change.compute_liquid_fraction(temperature, mesh)?;
+        let mut fl_residual = f64::MAX;
+        let mut iterations = 0;
+        let mut phase_source = vec![0.0_f64; n];
+
+        for iter in 0..self.max_coupling_iterations {
+            iterations = iter + 1;
+            let conductivity_per_cell = vec![self.conductivity; n];
+            let rho_cp_per_cell = vec![self.rho_cp; n];
+            let total_source: Vec<f64> = phase_source.clone();
+
+            let mut solver = crate::conduction::ConductionSolver::new();
+            solver.tolerance = 1e-8;
+            solver.max_iterations = 500;
+
+            let mut thermal_state = crate::ThermalState::new(n, 0.0);
+            for i in 0..n {
+                let _ = thermal_state.temperature.set(i, temperature.values()[i]);
+            }
+
+            solver.solve_transient_step(
+                &mut thermal_state, mesh, &conductivity_per_cell,
+                &rho_cp_per_cell, &total_source, dt, boundary_temps,
+            )?;
+
+            for i in 0..n {
+                let _ = temperature.set(i, thermal_state.temperature.values()[i]);
+            }
+
+            let fl_new = self.phase_change.compute_liquid_fraction(temperature, mesh)?;
+
+            fl_residual = 0.0_f64;
+            for i in 0..n {
+                let diff = (fl_new.values()[i] - fl_old.values()[i]).abs();
+                fl_residual = fl_residual.max(diff);
+            }
+
+            if let Some(ref prev_fl) = self.phase_change.prev_liquid_fraction {
+                let rho = self.phase_change.density;
+                let latent = self.phase_change.latent_heat;
+                for i in 0..n {
+                    let dfl_dt = (fl_new.values()[i] - prev_fl[i]) / dt;
+                    phase_source[i] = -rho * latent * dfl_dt;
+                }
+            }
+
+            fl_old = fl_new;
+
+            if fl_residual < self.coupling_tolerance {
+                break;
+            }
+        }
+
+        let result = self.phase_change.solve_phase_change_step(temperature, mesh, dt)?;
+
+        Ok(CoupledPhaseChangeResult {
+            energy_source: result.energy_source,
+            momentum_damping: result.momentum_damping,
+            liquid_fraction: result.liquid_fraction,
+            iterations,
+            liquid_fraction_residual: fl_residual,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +487,87 @@ mod tests {
 
         // Fully liquid: near-zero damping
         assert!(damping[2] < 1e-5, "Liquid should have near-zero damping, got {}", damping[2]);
+    }
+
+    #[test]
+    fn coupled_solver_creation() {
+        let solver = CoupledPhaseChangeSolver::new(500.0, 600.0, 200_000.0, 50.0, 4.0e6);
+        assert_eq!(solver.conductivity, 50.0);
+        assert_eq!(solver.rho_cp, 4.0e6);
+        assert_eq!(solver.phase_change.solidus_temperature, 500.0);
+    }
+
+    #[test]
+    fn coupled_solver_fully_liquid_no_source() {
+        let mut solver = CoupledPhaseChangeSolver::new(500.0, 600.0, 200_000.0, 50.0, 4.0e6)
+            .with_density(1000.0);
+        solver.max_coupling_iterations = 5;
+        let mesh = make_1d_mesh(5, 1.0);
+        let n = mesh.num_cells();
+        let mut temp = ScalarField::new("temperature", vec![700.0; n]);
+        let mut boundary_temps = std::collections::HashMap::new();
+        boundary_temps.insert("left".to_string(), 700.0);
+        boundary_temps.insert("right".to_string(), 700.0);
+        let result = solver.solve_coupled_phase_change(&mut temp, &mesh, 0.01, &boundary_temps).unwrap();
+        for &v in result.liquid_fraction.values() {
+            assert!((v - 1.0).abs() < 1e-10, "Should be fully liquid, got fl={}", v);
+        }
+        for &v in result.momentum_damping.values() {
+            assert!(v < 1e-5, "Liquid should have near-zero damping, got {}", v);
+        }
+    }
+
+    #[test]
+    fn coupled_solver_fully_solid_large_damping() {
+        let mut solver = CoupledPhaseChangeSolver::new(500.0, 600.0, 200_000.0, 50.0, 4.0e6)
+            .with_density(1000.0);
+        solver.max_coupling_iterations = 5;
+        let mesh = make_1d_mesh(5, 1.0);
+        let n = mesh.num_cells();
+        let mut temp = ScalarField::new("temperature", vec![400.0; n]);
+        let mut boundary_temps = std::collections::HashMap::new();
+        boundary_temps.insert("left".to_string(), 400.0);
+        boundary_temps.insert("right".to_string(), 400.0);
+        let result = solver.solve_coupled_phase_change(&mut temp, &mesh, 0.01, &boundary_temps).unwrap();
+        for &v in result.liquid_fraction.values() {
+            assert!(v.abs() < 1e-10, "Should be fully solid, got fl={}", v);
+        }
+        for &v in result.momentum_damping.values() {
+            assert!(v > 1e7, "Solid should have large damping, got {}", v);
+        }
+    }
+
+    #[test]
+    fn coupled_solver_returns_iterations() {
+        let mut solver = CoupledPhaseChangeSolver::new(500.0, 600.0, 200_000.0, 50.0, 4.0e6)
+            .with_density(1000.0);
+        solver.max_coupling_iterations = 10;
+        let mesh = make_1d_mesh(3, 1.0);
+        let n = mesh.num_cells();
+        let mut temp = ScalarField::new("temperature", vec![550.0; n]);
+        let mut boundary_temps = std::collections::HashMap::new();
+        boundary_temps.insert("left".to_string(), 550.0);
+        boundary_temps.insert("right".to_string(), 550.0);
+        let result = solver.solve_coupled_phase_change(&mut temp, &mesh, 0.01, &boundary_temps).unwrap();
+        assert!(result.iterations >= 1);
+        assert!(result.liquid_fraction_residual.is_finite());
+    }
+
+    #[test]
+    fn coupled_solver_mushy_zone_convergence() {
+        let mut solver = CoupledPhaseChangeSolver::new(500.0, 600.0, 200_000.0, 50.0, 4.0e6)
+            .with_density(1000.0);
+        solver.max_coupling_iterations = 20;
+        solver.coupling_tolerance = 1e-6;
+        let mesh = make_1d_mesh(5, 1.0);
+        let n = mesh.num_cells();
+        let mut temp = ScalarField::new("temperature", vec![550.0; n]);
+        let mut boundary_temps = std::collections::HashMap::new();
+        boundary_temps.insert("left".to_string(), 550.0);
+        boundary_temps.insert("right".to_string(), 550.0);
+        let result = solver.solve_coupled_phase_change(&mut temp, &mesh, 0.01, &boundary_temps).unwrap();
+        for &v in result.liquid_fraction.values() {
+            assert!((v - 0.5).abs() < 0.1, "Mushy zone fl should be ~0.5, got {}", v);
+        }
     }
 }
