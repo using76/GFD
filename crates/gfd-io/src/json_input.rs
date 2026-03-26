@@ -1,10 +1,10 @@
 //! JSON simulation configuration loading.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use crate::Result;
 
 /// Top-level simulation configuration matching the GFD JSON schema.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulationConfig {
     /// General setup configuration.
     pub setup: SetupConfig,
@@ -17,7 +17,7 @@ pub struct SimulationConfig {
 }
 
 /// General setup: mesh, physics, materials, etc.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetupConfig {
     /// General simulation settings.
     #[serde(default)]
@@ -37,7 +37,7 @@ pub struct SetupConfig {
 }
 
 /// General simulation settings.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GeneralConfig {
     /// Simulation name.
     #[serde(default)]
@@ -58,7 +58,7 @@ fn default_dimension() -> usize {
 }
 
 /// Physics models configuration.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelsConfig {
     /// Flow model: "incompressible", "compressible", or "none".
     #[serde(default)]
@@ -81,7 +81,7 @@ pub struct ModelsConfig {
 }
 
 /// Material definition.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaterialConfig {
     /// Material name.
     pub name: String,
@@ -94,7 +94,7 @@ pub struct MaterialConfig {
 }
 
 /// Boundary condition definition.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoundaryConditionConfig {
     /// Name of the boundary patch.
     pub patch: String,
@@ -107,7 +107,7 @@ pub struct BoundaryConditionConfig {
 }
 
 /// Initial conditions.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InitialConditionsConfig {
     /// Uniform initial velocity [m/s].
     #[serde(default)]
@@ -127,7 +127,7 @@ pub struct InitialConditionsConfig {
 }
 
 /// Solver configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolverConfig {
     /// Pressure-velocity coupling: "SIMPLE", "PISO", "SIMPLEC".
     #[serde(default = "default_pv_coupling")]
@@ -152,7 +152,7 @@ fn default_convection_scheme() -> String {
 }
 
 /// Under-relaxation factors for each equation.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelaxationConfig {
     /// Velocity under-relaxation.
     #[serde(default = "default_relax_velocity")]
@@ -193,7 +193,7 @@ impl Default for RelaxationConfig {
 }
 
 /// Linear solver settings.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinearSolverConfig {
     /// Solver type: "cg", "bicgstab", "gmres".
     #[serde(default = "default_solver_type")]
@@ -234,7 +234,7 @@ impl Default for LinearSolverConfig {
 }
 
 /// Run control configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunConfig {
     /// Simulation type: "steady" or "transient".
     #[serde(default = "default_sim_type")]
@@ -276,7 +276,7 @@ impl Default for RunConfig {
 }
 
 /// Results output configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultsConfig {
     /// Output directory.
     #[serde(default = "default_output_dir")]
