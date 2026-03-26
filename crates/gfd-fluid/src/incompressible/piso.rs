@@ -87,11 +87,12 @@ impl PisoSolver {
     /// Predictor step: solve momentum equation for u* with NO under-relaxation.
     ///
     /// This is the key difference from SIMPLE: alpha_u = 1.0.
+    /// When `dt` is finite, adds implicit Euler transient term to the momentum equation.
     fn predict_velocity(
         &mut self,
         state: &mut FluidState,
         mesh: &UnstructuredMesh,
-        _dt: f64,
+        dt: f64,
     ) -> Result<()> {
         let n = mesh.num_cells();
         let face_patch_map = build_face_patch_map(mesh);
@@ -185,6 +186,16 @@ impl PisoSolver {
             for i in 0..n {
                 let gp = grad_p.values()[i];
                 sources_vec[i] -= gp[comp] * mesh.cells[i].volume;
+            }
+
+            // Transient term (implicit Euler): a_P += rho*V/dt, source += (rho*V/dt)*u_old
+            if dt.is_finite() {
+                let vel_values = state.velocity.values();
+                for i in 0..n {
+                    let temporal_coeff = self.density * mesh.cells[i].volume / dt;
+                    a_p[i] += temporal_coeff;
+                    sources_vec[i] += temporal_coeff * vel_values[i][comp];
+                }
             }
 
             // NO under-relaxation for PISO (alpha_u = 1.0).
@@ -512,5 +523,101 @@ mod tests {
 
         let result = solver.solve_step(&mut state, &mesh, 0.01);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn piso_transient_term_affects_solution() {
+        // Test that PISO with a finite dt produces different results than with infinite dt.
+        let mesh = make_test_mesh();
+        let n = mesh.num_cells();
+
+        // Solve with finite dt (transient)
+        let mut state_trans = FluidState::new(n);
+        state_trans.velocity = VectorField::new("velocity", vec![[1.0, 0.0, 0.0]; n]);
+        let mut solver_trans = PisoSolver::with_properties(2, 1.0, 1e-3);
+        solver_trans.set_boundary_conditions(
+            HashMap::from([("inlet".to_string(), [1.0, 0.0, 0.0])]),
+            HashMap::from([("outlet".to_string(), 0.0)]),
+            vec![],
+        );
+        let res_trans = solver_trans.solve_step(&mut state_trans, &mesh, 0.001);
+        assert!(res_trans.is_ok(), "Transient PISO failed: {:?}", res_trans.err());
+
+        // Solve with large dt (quasi-steady: temporal term negligible)
+        let mut state_large = FluidState::new(n);
+        state_large.velocity = VectorField::new("velocity", vec![[1.0, 0.0, 0.0]; n]);
+        let mut solver_large = PisoSolver::with_properties(2, 1.0, 1e-3);
+        solver_large.set_boundary_conditions(
+            HashMap::from([("inlet".to_string(), [1.0, 0.0, 0.0])]),
+            HashMap::from([("outlet".to_string(), 0.0)]),
+            vec![],
+        );
+        let res_large = solver_large.solve_step(&mut state_large, &mesh, 1e6);
+        assert!(res_large.is_ok(), "Large-dt PISO failed: {:?}", res_large.err());
+
+        // Solutions should differ due to the transient term
+        let vel_t = state_trans.velocity.values();
+        let vel_l = state_large.velocity.values();
+        let mut max_diff = 0.0_f64;
+        for i in 0..n {
+            for c in 0..3 {
+                max_diff = max_diff.max((vel_t[i][c] - vel_l[i][c]).abs());
+            }
+        }
+        assert!(
+            max_diff > 1e-10,
+            "Small dt and large dt PISO solutions should differ, max_diff={}",
+            max_diff
+        );
+    }
+
+    #[test]
+    fn piso_transient_preserves_initial_velocity() {
+        // With a very small dt, the transient term dominates and the velocity
+        // should stay closer to the initial condition than with large dt.
+        let mesh = make_test_mesh();
+        let n = mesh.num_cells();
+        let u_init = [2.0, 0.5, 0.0];
+
+        // Solve with very small dt (strong temporal term)
+        let mut state_small = FluidState::new(n);
+        state_small.velocity = VectorField::new("velocity", vec![u_init; n]);
+        let mut solver_small = PisoSolver::with_properties(2, 1.0, 1e-3);
+        solver_small.set_boundary_conditions(
+            HashMap::from([("inlet".to_string(), [1.0, 0.0, 0.0])]),
+            HashMap::from([("outlet".to_string(), 0.0)]),
+            vec![],
+        );
+        let result_small = solver_small.solve_step(&mut state_small, &mesh, 1e-8);
+        assert!(result_small.is_ok());
+
+        // Solve with large dt (weak temporal term)
+        let mut state_large = FluidState::new(n);
+        state_large.velocity = VectorField::new("velocity", vec![u_init; n]);
+        let mut solver_large = PisoSolver::with_properties(2, 1.0, 1e-3);
+        solver_large.set_boundary_conditions(
+            HashMap::from([("inlet".to_string(), [1.0, 0.0, 0.0])]),
+            HashMap::from([("outlet".to_string(), 0.0)]),
+            vec![],
+        );
+        let result_large = solver_large.solve_step(&mut state_large, &mesh, 1e6);
+        assert!(result_large.is_ok());
+
+        // The small-dt solution should stay closer to the initial velocity
+        // than the large-dt solution (transient term anchors to u_old).
+        let vel_s = state_small.velocity.values();
+        let vel_l = state_large.velocity.values();
+        let mut drift_small = 0.0_f64;
+        let mut drift_large = 0.0_f64;
+        for i in 0..n {
+            drift_small += (vel_s[i][0] - u_init[0]).abs();
+            drift_large += (vel_l[i][0] - u_init[0]).abs();
+        }
+        assert!(
+            drift_small < drift_large,
+            "Small dt should drift less from initial velocity: small_drift={}, large_drift={}",
+            drift_small,
+            drift_large,
+        );
     }
 }

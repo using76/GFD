@@ -19,10 +19,27 @@ const C2_EPS: f64 = 1.92;
 const SIGMA_K: f64 = 1.0;
 const SIGMA_EPS: f64 = 1.3;
 
-/// Standard k-omega SST model constants.
+/// Standard k-omega SST model constants (inner, k-omega side).
 const ALPHA_OMEGA: f64 = 5.0 / 9.0;
 const BETA_OMEGA: f64 = 0.075;
 const SIGMA_OMEGA: f64 = 2.0;
+
+/// k-omega SST inner (zone 1) coefficients.
+#[allow(dead_code)]
+const SIGMA_K1: f64 = 0.85;
+const SIGMA_W1: f64 = 0.5;
+const BETA_1: f64 = 0.075;
+const GAMMA_1: f64 = 5.0 / 9.0;
+
+/// k-omega SST outer (zone 2, k-epsilon transformed) coefficients.
+#[allow(dead_code)]
+const SIGMA_K2: f64 = 1.0;
+const SIGMA_W2: f64 = 0.856;
+const BETA_2: f64 = 0.0828;
+const GAMMA_2: f64 = 0.44;
+
+/// beta* constant for SST model.
+const BETA_STAR: f64 = 0.09;
 
 /// Minimum values for turbulence variables (to avoid division by zero).
 const K_MIN: f64 = 1e-10;
@@ -43,6 +60,9 @@ pub struct TurbulenceTransportSolver {
     pub max_sub_iterations: usize,
     /// Convergence tolerance for transport equation residuals.
     pub tolerance: f64,
+    /// Wall distance per cell \[m\]. When `Some`, enables SST F1 blending in the
+    /// k-omega equation. When `None`, pure k-omega constants are used (no blending).
+    pub wall_distance: Option<Vec<f64>>,
 }
 
 impl TurbulenceTransportSolver {
@@ -53,6 +73,7 @@ impl TurbulenceTransportSolver {
             relax_second: 0.7,
             max_sub_iterations: 20,
             tolerance: 1e-6,
+            wall_distance: None,
         }
     }
 
@@ -63,6 +84,7 @@ impl TurbulenceTransportSolver {
             relax_second,
             max_sub_iterations: 20,
             tolerance: 1e-6,
+            wall_distance: None,
         }
     }
 
@@ -443,10 +465,75 @@ impl TurbulenceTransportSolver {
         Ok(residual)
     }
 
+    /// Computes the SST F1 blending function per cell.
+    ///
+    /// F1 = tanh(arg1^4), where
+    ///   arg1 = min(max(sqrt(k)/(beta*omega*y), 500*nu/(y^2*omega)), 4*rho*sigma_w2*k/(CD_kw*y^2))
+    ///   CD_kw = max(2*rho*sigma_w2/omega * (dk/dx_j * domega/dx_j), 1e-10)
+    ///
+    /// Requires `wall_distance` to be set. Returns a vector of F1 values per cell.
+    fn compute_f1_blending(
+        &self,
+        state: &FluidState,
+        mesh: &UnstructuredMesh,
+        k_vals: &[f64],
+        omega_vals: &[f64],
+    ) -> Result<Vec<f64>> {
+        let n = mesh.num_cells();
+        let wall_dist = self.wall_distance.as_ref().unwrap();
+        let grad_computer = GreenGaussCellBasedGradient;
+
+        // Compute gradients of k and omega for the cross-diffusion term.
+        let k_field = ScalarField::new("k_tmp", k_vals.to_vec());
+        let omega_field = ScalarField::new("omega_tmp", omega_vals.to_vec());
+
+        let grad_k = grad_computer
+            .compute(&k_field, mesh)
+            .map_err(FluidError::CoreError)?;
+        let grad_omega = grad_computer
+            .compute(&omega_field, mesh)
+            .map_err(FluidError::CoreError)?;
+
+        let mut f1 = vec![0.0; n];
+
+        for i in 0..n {
+            let rho = state.density.values()[i];
+            let nu = state.viscosity.values()[i] / rho; // kinematic viscosity
+            let k_val = k_vals[i].max(K_MIN);
+            let omega_val = omega_vals[i].max(OMEGA_MIN);
+            let y = wall_dist[i].max(1e-20); // avoid division by zero
+            let y2 = y * y;
+
+            // Cross-diffusion term: dk/dx_j * domega/dx_j
+            let gk = grad_k.values()[i];
+            let gw = grad_omega.values()[i];
+            let cross_diff = gk[0] * gw[0] + gk[1] * gw[1] + gk[2] * gw[2];
+
+            // CD_kw = max(2*rho*sigma_w2/omega * cross_diff, 1e-10)
+            let cd_kw = f64::max(2.0 * rho * SIGMA_W2 / omega_val * cross_diff, 1e-10);
+
+            // arg1 = min(max(sqrt(k)/(beta*omega*y), 500*nu/(y^2*omega)), 4*rho*sigma_w2*k/(CD_kw*y^2))
+            let term1 = k_val.sqrt() / (BETA_STAR * omega_val * y);
+            let term2 = 500.0 * nu / (y2 * omega_val);
+            let term3 = 4.0 * rho * SIGMA_W2 * k_val / (cd_kw * y2);
+
+            let arg1 = f64::min(f64::max(term1, term2), term3);
+
+            // F1 = tanh(arg1^4)
+            let arg1_4 = arg1 * arg1 * arg1 * arg1;
+            f1[i] = arg1_4.tanh();
+        }
+
+        Ok(f1)
+    }
+
     /// Solves the transport equation for specific dissipation rate omega.
     ///
     /// d(rho*omega)/dt + div(rho*U*omega) = div((mu + mu_t/sigma_omega)*grad(omega))
-    ///                                      + alpha_omega * omega/k * P_k - beta_omega * rho * omega^2
+    ///                                      + gamma * omega/k * P_k - beta * rho * omega^2
+    ///
+    /// When `wall_distance` is set, SST F1 blending is applied to blend between
+    /// k-omega (inner) and k-epsilon (outer) model constants.
     pub fn solve_omega_equation(
         &self,
         state: &mut FluidState,
@@ -476,6 +563,13 @@ impl TurbulenceTransportSolver {
             .values()
             .to_vec();
 
+        // Compute F1 blending if wall_distance is available.
+        let f1 = if self.wall_distance.is_some() {
+            Some(self.compute_f1_blending(state, mesh, &k_vals, &omega_old)?)
+        } else {
+            None
+        };
+
         // Eddy viscosity: mu_t = rho * k / omega.
         let mut mu_t = vec![0.0; n];
         for i in 0..n {
@@ -485,9 +579,16 @@ impl TurbulenceTransportSolver {
             mu_t[i] = rho * k_val / omega_val;
         }
 
-        // Effective diffusivity: gamma_eff = mu + mu_t / sigma_omega.
+        // Effective diffusivity using blended sigma_w: gamma_eff = mu + mu_t / sigma_w_blended.
         let gamma_eff: Vec<f64> = (0..n)
-            .map(|i| state.viscosity.values()[i] + mu_t[i] / SIGMA_OMEGA)
+            .map(|i| {
+                let sigma_w = if let Some(ref f1_vals) = f1 {
+                    f1_vals[i] * SIGMA_W1 + (1.0 - f1_vals[i]) * SIGMA_W2
+                } else {
+                    SIGMA_OMEGA
+                };
+                state.viscosity.values()[i] + mu_t[i] / sigma_w
+            })
             .collect();
 
         // Compute production P_k = mu_t * S^2.
@@ -502,12 +603,62 @@ impl TurbulenceTransportSolver {
             let omega_val = omega_old[i].max(OMEGA_MIN);
             let p_k = mu_t[i] * s_sq[i];
 
-            // Production: alpha_omega * omega/k * P_k.
-            source_explicit[i] = ALPHA_OMEGA * omega_val / k_val * p_k;
+            // Blended constants.
+            let (gamma, beta) = if let Some(ref f1_vals) = f1 {
+                let f = f1_vals[i];
+                (
+                    f * GAMMA_1 + (1.0 - f) * GAMMA_2,
+                    f * BETA_1 + (1.0 - f) * BETA_2,
+                )
+            } else {
+                (ALPHA_OMEGA, BETA_OMEGA)
+            };
 
-            // Destruction: beta_omega * rho * omega^2.
-            // Linearized: beta_omega * rho * omega added to diagonal.
-            source_implicit[i] = BETA_OMEGA * rho * omega_val;
+            // Production: gamma * omega/k * P_k.
+            source_explicit[i] = gamma * omega_val / k_val * p_k;
+
+            // Destruction: beta * rho * omega^2.
+            // Linearized: beta * rho * omega added to diagonal.
+            source_implicit[i] = beta * rho * omega_val;
+
+            // Cross-diffusion term for SST (added as explicit source in zone 2).
+            // 2*(1-F1)*rho*sigma_w2/omega * dk/dx_j * domega/dx_j
+            // This is the key SST addition from the k-epsilon side.
+            if let Some(ref f1_vals) = f1 {
+                if f1_vals[i] < 1.0 {
+                    // We need the cross-diffusion term; compute from gradients.
+                    // Note: gradients already computed in compute_f1_blending but we
+                    // recompute here to avoid storing them. For a production solver,
+                    // caching would be preferred.
+                    // For now, the cross-diffusion source is part of the omega equation.
+                    // The term is: 2*(1-F1)*rho*sigma_w2/omega * (dk/dxj * domega/dxj)
+                    // This is computed within the f1 computation and recomputed here.
+                }
+            }
+        }
+
+        // Add cross-diffusion source term for SST if wall_distance is available.
+        if let Some(ref f1_vals) = f1 {
+            let grad_computer = GreenGaussCellBasedGradient;
+            let k_field = ScalarField::new("k_tmp", k_vals.clone());
+            let omega_field = ScalarField::new("omega_tmp", omega_old.clone());
+            let grad_k = grad_computer
+                .compute(&k_field, mesh)
+                .map_err(FluidError::CoreError)?;
+            let grad_omega = grad_computer
+                .compute(&omega_field, mesh)
+                .map_err(FluidError::CoreError)?;
+
+            for i in 0..n {
+                let rho = state.density.values()[i];
+                let omega_val = omega_old[i].max(OMEGA_MIN);
+                let gk = grad_k.values()[i];
+                let gw = grad_omega.values()[i];
+                let cross_diff = gk[0] * gw[0] + gk[1] * gw[1] + gk[2] * gw[2];
+                // Only add positive cross-diffusion (clamp to zero from below).
+                let cd_term = 2.0 * (1.0 - f1_vals[i]) * rho * SIGMA_W2 / omega_val * cross_diff;
+                source_explicit[i] += f64::max(cd_term, 0.0);
+            }
         }
 
         // Solve the scalar transport equation for omega.
@@ -676,5 +827,91 @@ mod tests {
         for v in mu_t.values() {
             assert!((v - C_MU).abs() < 1e-10);
         }
+    }
+
+    #[test]
+    fn solve_omega_with_sst_blending_does_not_panic() {
+        let mesh = make_test_mesh();
+        let n = mesh.num_cells();
+        let mut state = FluidState::new(n);
+
+        state.velocity = VectorField::new("velocity", vec![[1.0, 0.0, 0.0]; n]);
+        state.turb_kinetic_energy = Some(ScalarField::new("k", vec![1.0; n]));
+        state.turb_specific_dissipation = Some(ScalarField::new("omega", vec![100.0; n]));
+
+        let mut solver = TurbulenceTransportSolver::new();
+        // Set wall distance (all cells at distance 0.1 from wall)
+        solver.wall_distance = Some(vec![0.1; n]);
+
+        let residual = solver.solve_omega_equation(&mut state, &mesh, 0.01);
+        assert!(residual.is_ok(), "SST omega solve failed: {:?}", residual.err());
+    }
+
+    #[test]
+    fn sst_f1_near_wall_approaches_one() {
+        // Near wall (small y), F1 should approach 1.0 (pure k-omega).
+        let mesh = make_test_mesh();
+        let n = mesh.num_cells();
+        let mut state = FluidState::new(n);
+
+        state.velocity = VectorField::new("velocity", vec![[1.0, 0.0, 0.0]; n]);
+        state.turb_kinetic_energy = Some(ScalarField::new("k", vec![1.0; n]));
+        state.turb_specific_dissipation = Some(ScalarField::new("omega", vec![1000.0; n]));
+
+        let mut solver = TurbulenceTransportSolver::new();
+        // Very close to wall
+        solver.wall_distance = Some(vec![0.001; n]);
+
+        let k_vals = vec![1.0; n];
+        let omega_vals = vec![1000.0; n];
+        let f1 = solver.compute_f1_blending(&state, &mesh, &k_vals, &omega_vals).unwrap();
+
+        for &f in &f1 {
+            // Near wall, F1 should be close to 1.0
+            assert!(f > 0.9, "F1 near wall should be close to 1.0, got {}", f);
+        }
+    }
+
+    #[test]
+    fn sst_f1_far_from_wall_approaches_zero() {
+        // Far from wall (large y), F1 should approach 0.0 (pure k-epsilon behavior).
+        let mesh = make_test_mesh();
+        let n = mesh.num_cells();
+        let mut state = FluidState::new(n);
+
+        state.velocity = VectorField::new("velocity", vec![[1.0, 0.0, 0.0]; n]);
+        state.turb_kinetic_energy = Some(ScalarField::new("k", vec![0.1; n]));
+        state.turb_specific_dissipation = Some(ScalarField::new("omega", vec![1.0; n]));
+
+        let mut solver = TurbulenceTransportSolver::new();
+        // Far from wall
+        solver.wall_distance = Some(vec![100.0; n]);
+
+        let k_vals = vec![0.1; n];
+        let omega_vals = vec![1.0; n];
+        let f1 = solver.compute_f1_blending(&state, &mesh, &k_vals, &omega_vals).unwrap();
+
+        for &f in &f1 {
+            // Far from wall, F1 should be close to 0.0
+            assert!(f < 0.1, "F1 far from wall should be close to 0.0, got {}", f);
+        }
+    }
+
+    #[test]
+    fn sst_blending_without_wall_distance_uses_pure_komega() {
+        // Without wall_distance, the solver should use pure k-omega constants
+        // (no blending), same as before.
+        let mesh = make_test_mesh();
+        let n = mesh.num_cells();
+        let mut state = FluidState::new(n);
+
+        state.velocity = VectorField::new("velocity", vec![[1.0, 0.0, 0.0]; n]);
+        state.turb_kinetic_energy = Some(ScalarField::new("k", vec![1.0; n]));
+        state.turb_specific_dissipation = Some(ScalarField::new("omega", vec![1.0; n]));
+
+        // No wall_distance set -- should run without error
+        let solver = TurbulenceTransportSolver::new();
+        let residual = solver.solve_omega_equation(&mut state, &mesh, 0.01);
+        assert!(residual.is_ok());
     }
 }

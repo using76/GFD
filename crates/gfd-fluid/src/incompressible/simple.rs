@@ -47,6 +47,8 @@ pub struct SimpleSolver {
     boundary_velocities: HashMap<String, [f64; 3]>,
     /// Boundary pressures: patch name -> pressure value.
     boundary_pressure: HashMap<String, f64>,
+    /// Gravity body force vector [m/s^2] (default: [0, 0, 0]).
+    pub gravity: [f64; 3],
     /// Wall patch names (no-slip).
     wall_patches: Vec<String>,
     /// Cached face-to-patch map (built once per mesh).
@@ -100,6 +102,7 @@ impl SimpleSolver {
             density,
             viscosity,
             use_gpu: false,
+            gravity: [0.0, 0.0, 0.0],
             a_p_momentum: Vec::new(),
             _prev_p_prime: Vec::new(),
             boundary_velocities: HashMap::new(),
@@ -214,6 +217,9 @@ impl SimpleSolver {
     }
 
     /// Full SIMPLE step with explicit boundary condition arguments.
+    ///
+    /// `dt` controls the transient term: pass `f64::INFINITY` for steady-state (no temporal term),
+    /// or a finite value to include implicit Euler time discretization in the momentum equation.
     pub fn solve_step_with_bcs(
         &mut self,
         state: &mut FluidState,
@@ -222,11 +228,27 @@ impl SimpleSolver {
         boundary_pressure: &HashMap<String, f64>,
         wall_patches: &[String],
     ) -> Result<f64> {
+        self.solve_step_with_bcs_dt(state, mesh, boundary_velocities, boundary_pressure, wall_patches, f64::INFINITY)
+    }
+
+    /// Full SIMPLE step with explicit boundary condition arguments and a time step.
+    ///
+    /// `dt` controls the transient term: pass `f64::INFINITY` for steady-state (no temporal term),
+    /// or a finite value to include implicit Euler time discretization in the momentum equation.
+    pub fn solve_step_with_bcs_dt(
+        &mut self,
+        state: &mut FluidState,
+        mesh: &UnstructuredMesh,
+        boundary_velocities: &HashMap<String, [f64; 3]>,
+        boundary_pressure: &HashMap<String, f64>,
+        wall_patches: &[String],
+        dt: f64,
+    ) -> Result<f64> {
         // Build face-to-patch cache once
         self.ensure_face_patch_cache(mesh);
 
         // 1. Solve momentum equations for all 3 components
-        self.solve_momentum(state, mesh, boundary_velocities, boundary_pressure, wall_patches)?;
+        self.solve_momentum_with_dt(state, mesh, boundary_velocities, boundary_pressure, wall_patches, dt)?;
 
         // 2. Solve pressure correction equation
         let p_prime =
@@ -251,13 +273,15 @@ impl SimpleSolver {
     ///
     /// Discretizes convection (first-order upwind) + diffusion + pressure gradient.
     /// Applies under-relaxation and solves with BiCGSTAB.
-    fn solve_momentum(
+    /// When `dt` is finite, adds implicit Euler transient term and gravity source.
+    fn solve_momentum_with_dt(
         &mut self,
         state: &mut FluidState,
         mesh: &UnstructuredMesh,
         boundary_velocities: &HashMap<String, [f64; 3]>,
         boundary_pressure: &HashMap<String, f64>,
         wall_patches: &[String],
+        dt: f64,
     ) -> Result<()> {
         let n = mesh.num_cells();
 
@@ -369,6 +393,14 @@ impl SimpleSolver {
             }
         }
 
+        // Transient term: add rho * V / dt to diagonal (before under-relaxation)
+        let transient = dt.is_finite();
+        if transient {
+            for i in 0..n {
+                self.ws_a_p[i] += self.density * self.cached_volumes[i] / dt;
+            }
+        }
+
         // Apply under-relaxation: store unrelaxed diagonal in a_p_momentum,
         // then modify a_p for the matrix diagonal
         let ur_factor = (1.0 - self.alpha_u) / self.alpha_u;
@@ -396,6 +428,8 @@ impl SimpleSolver {
             if !active_comps[comp]
                 && !vel_values.iter().any(|v| v[comp].abs() > 1e-30)
                 && !grad_p_data.iter().any(|g| g[comp].abs() > 1e-30)
+                && self.gravity[comp] == 0.0
+                && !transient
             {
                 continue;
             }
@@ -408,8 +442,20 @@ impl SimpleSolver {
                 }
             }
 
+            let gravity_comp = self.gravity[comp];
             for i in 0..n {
-                sources[i] -= grad_p_data[i][comp] * self.cached_volumes[i];
+                let vol_i = self.cached_volumes[i];
+                // Pressure gradient source
+                sources[i] -= grad_p_data[i][comp] * vol_i;
+                // Gravity body force: rho * g[comp] * V
+                if gravity_comp != 0.0 {
+                    sources[i] += self.density * gravity_comp * vol_i;
+                }
+                // Transient source: (rho * V / dt) * u_old
+                if transient {
+                    sources[i] += (self.density * vol_i / dt) * vel_values[i][comp];
+                }
+                // Under-relaxation source
                 sources[i] += ur_factor * self.ws_a_p[i] * vel_values[i][comp];
                 x_buf[i] = vel_values[i][comp];
             }
@@ -786,7 +832,8 @@ impl PressureVelocityCoupling for SimpleSolver {
         let bv = self.boundary_velocities.clone();
         let bp = self.boundary_pressure.clone();
         let wp = self.wall_patches.clone();
-        self.solve_step_with_bcs(state, mesh, &bv, &bp, &wp)
+        // SIMPLE is steady-state: dt = INFINITY means no transient term
+        self.solve_step_with_bcs_dt(state, mesh, &bv, &bp, &wp, f64::INFINITY)
     }
 }
 
@@ -1141,5 +1188,139 @@ mod tests {
         assert!(res.is_ok(), "solve_step should succeed: {:?}", res.err());
         let residual = res.unwrap();
         assert!(residual.is_finite(), "Residual should be finite");
+    }
+
+    #[test]
+    fn simple_transient_term_with_finite_dt() {
+        // Test that solve_step_with_bcs_dt runs with a finite time step
+        // and produces finite results.
+        let (mesh, boundary_velocities, boundary_pressure, wall_patches) =
+            make_3x3x1_lid_driven_cavity();
+
+        let n = mesh.num_cells();
+        let mut state = FluidState::new(n);
+
+        let density = 1.0;
+        let viscosity = 0.1;
+        for i in 0..n {
+            state.density.set(i, density).unwrap();
+            state.viscosity.set(i, viscosity).unwrap();
+        }
+
+        let mut solver = SimpleSolver::new(density, viscosity);
+        solver.alpha_u = 0.5;
+        solver.alpha_p = 0.2;
+
+        let dt = 0.01;
+        let res = solver.solve_step_with_bcs_dt(
+            &mut state,
+            &mesh,
+            &boundary_velocities,
+            &boundary_pressure,
+            &wall_patches,
+            dt,
+        );
+        assert!(res.is_ok(), "Transient SIMPLE step failed: {:?}", res.err());
+        let residual = res.unwrap();
+        assert!(residual.is_finite(), "Transient residual should be finite");
+
+        // Verify all velocities are finite
+        for v in state.velocity.values() {
+            assert!(v[0].is_finite() && v[1].is_finite() && v[2].is_finite());
+        }
+    }
+
+    #[test]
+    fn simple_transient_vs_steady_differ() {
+        // Transient (finite dt) and steady (INFINITY dt) should produce different results.
+        let (mesh, bv, bp, wp) = make_3x3x1_lid_driven_cavity();
+        let n = mesh.num_cells();
+
+        let density = 1.0;
+        let viscosity = 0.1;
+
+        // Steady solve
+        let mut state_steady = FluidState::new(n);
+        for i in 0..n {
+            state_steady.density.set(i, density).unwrap();
+            state_steady.viscosity.set(i, viscosity).unwrap();
+        }
+        let mut solver_steady = SimpleSolver::new(density, viscosity);
+        solver_steady.alpha_u = 0.5;
+        solver_steady.alpha_p = 0.2;
+        solver_steady
+            .solve_step_with_bcs_dt(&mut state_steady, &mesh, &bv, &bp, &wp, f64::INFINITY)
+            .unwrap();
+
+        // Transient solve
+        let mut state_trans = FluidState::new(n);
+        for i in 0..n {
+            state_trans.density.set(i, density).unwrap();
+            state_trans.viscosity.set(i, viscosity).unwrap();
+        }
+        let mut solver_trans = SimpleSolver::new(density, viscosity);
+        solver_trans.alpha_u = 0.5;
+        solver_trans.alpha_p = 0.2;
+        solver_trans
+            .solve_step_with_bcs_dt(&mut state_trans, &mesh, &bv, &bp, &wp, 0.01)
+            .unwrap();
+
+        // Velocities should differ between steady and transient
+        let vel_s = state_steady.velocity.values();
+        let vel_t = state_trans.velocity.values();
+        let mut max_diff = 0.0_f64;
+        for i in 0..n {
+            for c in 0..3 {
+                max_diff = max_diff.max((vel_s[i][c] - vel_t[i][c]).abs());
+            }
+        }
+        assert!(
+            max_diff > 1e-10,
+            "Steady and transient solutions should differ, max_diff={}",
+            max_diff
+        );
+    }
+
+    #[test]
+    fn simple_gravity_produces_vertical_velocity() {
+        // With gravity in -y direction and no lid motion, flow should develop
+        // a non-zero y-velocity.
+        let (mesh, _bv, bp, wp) = make_3x3x1_lid_driven_cavity();
+        let n = mesh.num_cells();
+
+        let density = 1.0;
+        let viscosity = 0.1;
+
+        let mut state = FluidState::new(n);
+        for i in 0..n {
+            state.density.set(i, density).unwrap();
+            state.viscosity.set(i, viscosity).unwrap();
+        }
+
+        let mut solver = SimpleSolver::new(density, viscosity);
+        solver.alpha_u = 0.5;
+        solver.alpha_p = 0.2;
+        solver.gravity = [0.0, -9.81, 0.0];
+
+        // No lid velocity -- only gravity drives the flow
+        let bv_no_lid = HashMap::new();
+
+        let res = solver.solve_step_with_bcs_dt(
+            &mut state,
+            &mesh,
+            &bv_no_lid,
+            &bp,
+            &wp,
+            f64::INFINITY,
+        );
+        assert!(res.is_ok(), "Gravity SIMPLE step failed: {:?}", res.err());
+
+        // Check that y-velocity is non-zero somewhere (gravity should drive motion)
+        let vel = state.velocity.values();
+        let has_y_motion = vel.iter().any(|v| v[1].abs() > 1e-10);
+        assert!(
+            has_y_motion,
+            "Gravity should produce non-zero y-velocity"
+        );
     }
 }

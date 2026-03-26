@@ -387,17 +387,121 @@ impl EulerEulerSolver {
         }
     }
 
-    /// Solves the momentum equation for a single phase.
+    /// Computes the drag coefficient K_drag per cell for a phase pair.
+    ///
+    /// Returns a Vec of scalar coefficients used for implicit drag treatment.
+    /// K_drag has units [kg/(m^3*s)] so that F_drag = K_drag * (u_q - u_p).
+    fn compute_drag_coefficients_per_cell(
+        &self,
+        phase_p: usize,
+        phase_q: usize,
+        mesh: &UnstructuredMesh,
+    ) -> Vec<f64> {
+        let n = mesh.num_cells();
+        let mut k_drag = vec![0.0; n];
+
+        if !self.force_config.drag_enabled {
+            return k_drag;
+        }
+
+        let vel_p = self.phases[phase_p].velocity.values();
+        let vel_q = self.phases[phase_q].velocity.values();
+        let alpha_p = self.phases[phase_p].alpha.values();
+        let rho_c = self.phases[phase_q].density;
+        let mu_c = self.phases[phase_q].viscosity;
+
+        for cell in 0..n {
+            let u_rel = [
+                vel_p[cell][0] - vel_q[cell][0],
+                vel_p[cell][1] - vel_q[cell][1],
+                vel_p[cell][2] - vel_q[cell][2],
+            ];
+            let u_rel_mag =
+                (u_rel[0] * u_rel[0] + u_rel[1] * u_rel[1] + u_rel[2] * u_rel[2]).sqrt();
+            let alpha_d = alpha_p[cell].max(0.0).min(1.0);
+            k_drag[cell] = self.compute_drag_coefficient(rho_c, mu_c, alpha_d, u_rel_mag);
+        }
+
+        k_drag
+    }
+
+    /// Computes the explicit (non-drag) interphase forces: lift and virtual mass.
+    ///
+    /// Drag is treated implicitly in the momentum equation and is NOT included here.
+    fn compute_explicit_interphase_forces(
+        &self,
+        phase_p: usize,
+        phase_q: usize,
+        mesh: &UnstructuredMesh,
+        dt: f64,
+    ) -> Vec<[f64; 3]> {
+        let n = mesh.num_cells();
+        let mut forces = vec![[0.0; 3]; n];
+
+        let vel_p = self.phases[phase_p].velocity.values();
+        let vel_q = self.phases[phase_q].velocity.values();
+        let alpha_p = self.phases[phase_p].alpha.values();
+        let rho_c = self.phases[phase_q].density;
+
+        for cell in 0..n {
+            let u_rel = [
+                vel_p[cell][0] - vel_q[cell][0],
+                vel_p[cell][1] - vel_q[cell][1],
+                vel_p[cell][2] - vel_q[cell][2],
+            ];
+            let alpha_d = alpha_p[cell].max(0.0).min(1.0);
+
+            // Lift force: M_lift = C_L * rho_c * alpha_d * (u_d - u_c) x curl(u_c)
+            if self.force_config.lift_enabled {
+                let c_l = self.force_config.lift_coefficient;
+                let curl = self.approximate_curl(phase_q, cell, mesh);
+                let cross = [
+                    u_rel[1] * curl[2] - u_rel[2] * curl[1],
+                    u_rel[2] * curl[0] - u_rel[0] * curl[2],
+                    u_rel[0] * curl[1] - u_rel[1] * curl[0],
+                ];
+                for dim in 0..3 {
+                    forces[cell][dim] += c_l * rho_c * alpha_d * cross[dim];
+                }
+            }
+
+            // Virtual mass force: M_vm = C_vm * rho_c * alpha_d * (Du_c/Dt - Du_d/Dt)
+            if self.force_config.virtual_mass_enabled && dt > 0.0 {
+                let c_vm = self.force_config.virtual_mass_coefficient;
+                if phase_p < self.prev_velocities.len()
+                    && phase_q < self.prev_velocities.len()
+                    && cell < self.prev_velocities[phase_p].len()
+                    && cell < self.prev_velocities[phase_q].len()
+                {
+                    let prev_p = self.prev_velocities[phase_p][cell];
+                    let prev_q = self.prev_velocities[phase_q][cell];
+                    for dim in 0..3 {
+                        let du_c_dt = (vel_q[cell][dim] - prev_q[dim]) / dt;
+                        let du_d_dt = (vel_p[cell][dim] - prev_p[dim]) / dt;
+                        forces[cell][dim] += c_vm * rho_c * alpha_d * (du_c_dt - du_d_dt);
+                    }
+                }
+            }
+        }
+
+        forces
+    }
+
+    /// Solves the momentum equation for a single phase with implicit drag treatment.
     ///
     /// d(alpha_k * rho_k * u_k)/dt + div(alpha_k * rho_k * u_k * u_k)
     ///   = -alpha_k * grad(p) + div(alpha_k * tau_k) + M_k + alpha_k * rho_k * g
     ///
-    /// Uses an explicit first-order upwind scheme for convection and
-    /// a central difference for diffusion.
+    /// Drag force is treated implicitly for stability:
+    ///   (mass/dt + K_drag*V) * u_new = mass/dt * u_old + K_drag*V * u_other + explicit_sources
+    ///
+    /// This avoids the instability of explicit drag treatment at high drag coefficients.
     fn solve_momentum_for_phase(
         &self,
         phase_idx: usize,
-        interphase_forces: &[[f64; 3]],
+        explicit_forces: &[[f64; 3]],
+        drag_coeff_sum: &[f64],
+        drag_weighted_vel: &[[f64; 3]],
         mesh: &UnstructuredMesh,
         dt: f64,
     ) -> Vec<[f64; 3]> {
@@ -410,7 +514,10 @@ impl EulerEulerSolver {
 
         let mut new_vel = vel.to_vec();
 
-        // For each cell, compute the RHS of the momentum equation
+        // For each cell, build and solve the implicit momentum equation:
+        // a_P * u_new = H (explicit sources)
+        // where a_P = mass/dt + K_drag_total * V  (diagonal coefficient)
+        //       H = mass/dt * u_old + K_drag_total * V * u_weighted + other sources
         for cell in 0..n {
             let vol = mesh.cells[cell].volume;
             let a_k = alpha[cell].max(1e-10);
@@ -467,7 +574,6 @@ impl EulerEulerSolver {
             }
 
             // Pressure gradient: -alpha_k * grad(p) * V
-            // Approximate grad(p) using Green-Gauss
             let mut grad_p = [0.0_f64; 3];
             for &fid in &mesh.cells[cell].faces {
                 if fid >= mesh.faces.len() {
@@ -491,9 +597,9 @@ impl EulerEulerSolver {
                 rhs[dim] -= a_k * grad_p[dim] * vol;
             }
 
-            // Interphase momentum transfer: M_k * V
+            // Explicit interphase forces (lift + virtual mass): F_explicit * V
             for dim in 0..3 {
-                rhs[dim] += interphase_forces[cell][dim] * vol;
+                rhs[dim] += explicit_forces[cell][dim] * vol;
             }
 
             // Gravity: alpha_k * rho_k * g * V
@@ -501,9 +607,22 @@ impl EulerEulerSolver {
                 rhs[dim] += a_k * rho * g[dim] * vol;
             }
 
-            // Explicit time integration: u_new = u_old + dt * rhs / mass
+            // Implicit drag treatment:
+            // The momentum equation is:
+            //   (mass/dt) * u_new = (mass/dt) * u_old + rhs_explicit + K_drag*V*(u_other - u_new)
+            // Rearranging:
+            //   (mass/dt + K_drag*V) * u_new = (mass/dt)*u_old + rhs_explicit + K_drag*V*u_other
+            //
+            // drag_coeff_sum[cell] = sum of K_drag over all phase pairs
+            // drag_weighted_vel[cell] = sum of K_drag * u_other over all phase pairs
+            let k_drag_vol = drag_coeff_sum[cell] * vol;
+            let a_diag = mass / dt + k_drag_vol;
+
             for dim in 0..3 {
-                new_vel[cell][dim] = vel[cell][dim] + dt * rhs[dim] / mass;
+                let rhs_total = mass / dt * vel[cell][dim]
+                    + rhs[dim]
+                    + drag_weighted_vel[cell][dim] * vol;
+                new_vel[cell][dim] = rhs_total / a_diag;
             }
         }
 
@@ -557,27 +676,69 @@ impl EulerEulerSolver {
             // Step 1: Solve continuity for each phase
             self.solve_continuity(mesh, dt);
 
-            // Step 2: Compute interphase forces and solve momentum for each phase
-            // Accumulate forces on each phase from all pairs
-            let mut all_forces: Vec<Vec<[f64; 3]>> =
+            // Step 2: Compute interphase forces with implicit drag treatment.
+            //
+            // For each phase p, we need:
+            //   - explicit_forces[p]: lift + virtual mass (treated explicitly)
+            //   - drag_coeff_sum[p]: sum of K_drag over all phase pairs
+            //   - drag_weighted_vel[p]: sum of K_drag * u_other over all pairs
+            //
+            // Drag is treated implicitly: added to diagonal and RHS of momentum eq.
+            // This prevents instability at high drag coefficients.
+            let mut explicit_forces: Vec<Vec<[f64; 3]>> =
+                (0..num_phases).map(|_| vec![[0.0; 3]; n]).collect();
+            let mut drag_coeff_sum: Vec<Vec<f64>> =
+                (0..num_phases).map(|_| vec![0.0; n]).collect();
+            let mut drag_weighted_vel: Vec<Vec<[f64; 3]>> =
                 (0..num_phases).map(|_| vec![[0.0; 3]; n]).collect();
 
             for p in 0..num_phases {
                 for q in (p + 1)..num_phases {
-                    let forces_on_p = self.compute_interphase_forces(p, q, mesh, dt);
+                    // Compute drag coefficients for implicit treatment
+                    let k_drag_pq = self.compute_drag_coefficients_per_cell(p, q, mesh);
+
+                    // Compute explicit forces (lift + virtual mass only)
+                    let explicit_on_p = self.compute_explicit_interphase_forces(p, q, mesh, dt);
+
+                    let vel_p = self.phases[p].velocity.values();
+                    let vel_q = self.phases[q].velocity.values();
+
                     for cell in 0..n {
+                        let k = k_drag_pq[cell];
+
+                        // Drag on phase p from q: K_drag * (u_q - u_p)
+                        // Implicit: add K_drag to diagonal of p, K_drag*u_q to RHS of p
+                        drag_coeff_sum[p][cell] += k;
+                        drag_coeff_sum[q][cell] += k;
+
                         for dim in 0..3 {
-                            all_forces[p][cell][dim] += forces_on_p[cell][dim];
-                            // Newton's third law: force on q is negative
-                            all_forces[q][cell][dim] -= forces_on_p[cell][dim];
+                            drag_weighted_vel[p][cell][dim] += k * vel_q[cell][dim];
+                            // Newton's third law: drag on q from p = K_drag * (u_p - u_q)
+                            drag_weighted_vel[q][cell][dim] += k * vel_p[cell][dim];
+                        }
+
+                        // Explicit forces (lift + virtual mass)
+                        for dim in 0..3 {
+                            explicit_forces[p][cell][dim] += explicit_on_p[cell][dim];
+                            // Newton's third law
+                            explicit_forces[q][cell][dim] -= explicit_on_p[cell][dim];
                         }
                     }
                 }
             }
 
-            // Solve momentum for each phase
+            // Solve momentum for each phase with implicit drag
             let new_velocities: Vec<Vec<[f64; 3]>> = (0..num_phases)
-                .map(|p| self.solve_momentum_for_phase(p, &all_forces[p], mesh, dt))
+                .map(|p| {
+                    self.solve_momentum_for_phase(
+                        p,
+                        &explicit_forces[p],
+                        &drag_coeff_sum[p],
+                        &drag_weighted_vel[p],
+                        mesh,
+                        dt,
+                    )
+                })
                 .collect();
 
             // Apply new velocities with under-relaxation
@@ -592,7 +753,9 @@ impl EulerEulerSolver {
                 }
             }
 
-            // Step 3: Enforce sum(alpha) = 1 constraint by normalization
+            // Step 3: Enforce sum(alpha) = 1 constraint by normalization.
+            // Clamp each alpha to [0, 1] first, then normalize so that
+            // sum(alpha_k) = 1 exactly for each cell.
             for cell in 0..n {
                 let sum: f64 = self
                     .phases
@@ -893,6 +1056,140 @@ mod tests {
                 forces[cell][0] < -1.0,
                 "Virtual mass should resist dispersed phase acceleration"
             );
+        }
+    }
+
+    #[test]
+    fn test_implicit_drag_stabilizes_coupling() {
+        // With high drag (small particles, large density ratio), the implicit
+        // treatment should still produce bounded velocities. Previously,
+        // explicit drag could cause instability.
+        let mesh = make_test_mesh(5, 5);
+        let n = mesh.num_cells();
+
+        let mut phase_a = Phase::new("water", "liquid", n, 1000.0, 1e-3, 0.7);
+        let mut phase_b = Phase::new("bubbles", "gas", n, 1.2, 1.8e-5, 0.3);
+
+        // Large velocity difference to stress drag coupling
+        for cell in 0..n {
+            phase_a.velocity.values_mut()[cell] = [2.0, 0.0, 0.0];
+            phase_b.velocity.values_mut()[cell] = [0.0, 0.0, 0.0];
+        }
+
+        let mut config = InterphaseForceConfig::default();
+        config.particle_diameter = 1e-4; // very small particles => very high drag
+        config.lift_enabled = false;
+        config.virtual_mass_enabled = false;
+
+        let mut solver = EulerEulerSolver::with_config(vec![phase_a, phase_b], config);
+        let residual = solver.solve_phase_coupling(&mesh, 1e-3).unwrap();
+
+        assert!(residual.is_finite(), "Residual should be finite with implicit drag");
+
+        // All velocities should remain bounded
+        for p in 0..2 {
+            for cell in 0..n {
+                let vel = solver.phases[p].velocity.values()[cell];
+                let mag = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
+                assert!(
+                    mag < 100.0,
+                    "Phase {} cell {}: velocity magnitude {} is too large",
+                    p, cell, mag
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_volume_fraction_constraint_after_coupling() {
+        // After solve_phase_coupling, sum(alpha) must equal 1 for each cell
+        let mesh = make_test_mesh(4, 4);
+        let n = mesh.num_cells();
+
+        // Start with slightly imbalanced volume fractions
+        let mut phase_a = Phase::new("water", "liquid", n, 1000.0, 1e-3, 0.6);
+        let mut phase_b = Phase::new("air", "gas", n, 1.2, 1.8e-5, 0.35);
+
+        // Deliberately set sum != 1 in some cells
+        phase_a.alpha.values_mut()[0] = 0.8;
+        phase_b.alpha.values_mut()[0] = 0.5; // sum = 1.3
+
+        let mut solver = EulerEulerSolver::new(vec![phase_a, phase_b]);
+        let _ = solver.solve_phase_coupling(&mesh, 1e-4).unwrap();
+
+        for cell in 0..n {
+            let sum: f64 = solver
+                .phases
+                .iter()
+                .map(|ph| ph.alpha.values()[cell])
+                .sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-10,
+                "Volume fraction constraint violated at cell {}: sum={}",
+                cell, sum
+            );
+        }
+    }
+
+    #[test]
+    fn test_drag_weighted_velocity_convergence() {
+        // With only drag enabled and equal density phases at different velocities,
+        // after many coupling iterations, velocities should approach each other
+        let mesh = make_test_mesh(3, 3);
+        let n = mesh.num_cells();
+
+        let mut phase_a = Phase::new("phase_a", "liquid", n, 1000.0, 1e-3, 0.5);
+        let mut phase_b = Phase::new("phase_b", "liquid", n, 1000.0, 1e-3, 0.5);
+
+        for cell in 0..n {
+            phase_a.velocity.values_mut()[cell] = [1.0, 0.0, 0.0];
+            phase_b.velocity.values_mut()[cell] = [-1.0, 0.0, 0.0];
+        }
+
+        let mut config = InterphaseForceConfig::default();
+        config.lift_enabled = false;
+        config.virtual_mass_enabled = false;
+        config.drag_enabled = true;
+        config.particle_diameter = 1e-3;
+
+        let mut solver = EulerEulerSolver::with_config(vec![phase_a, phase_b], config);
+        solver.max_coupling_iterations = 50;
+        let _ = solver.solve_phase_coupling(&mesh, 0.01).unwrap();
+
+        // After coupling, relative velocity should be reduced
+        for cell in 0..n {
+            let u_a = solver.phases[0].velocity.values()[cell][0];
+            let u_b = solver.phases[1].velocity.values()[cell][0];
+            let u_rel = (u_a - u_b).abs();
+            assert!(
+                u_rel < 2.0,
+                "Drag should reduce relative velocity, but u_rel={} at cell {}",
+                u_rel, cell
+            );
+        }
+    }
+
+    #[test]
+    fn test_alpha_bounded_zero_one() {
+        // Volume fractions must always remain in [0, 1]
+        let mesh = make_test_mesh(4, 4);
+        let n = mesh.num_cells();
+
+        let phase_a = Phase::new("water", "liquid", n, 1000.0, 1e-3, 0.9);
+        let phase_b = Phase::new("air", "gas", n, 1.2, 1.8e-5, 0.1);
+
+        let mut solver = EulerEulerSolver::new(vec![phase_a, phase_b]);
+        let _ = solver.solve_phase_coupling(&mesh, 1e-3).unwrap();
+
+        for p in 0..2 {
+            for cell in 0..n {
+                let alpha = solver.phases[p].alpha.values()[cell];
+                assert!(
+                    alpha >= -1e-15 && alpha <= 1.0 + 1e-15,
+                    "Phase {} cell {}: alpha={} out of [0,1]",
+                    p, cell, alpha
+                );
+            }
         }
     }
 }
