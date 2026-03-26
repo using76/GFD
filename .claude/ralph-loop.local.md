@@ -2,9 +2,9 @@
 active: true
 iteration: 1
 session_id: 
-max_iterations: 500
+max_iterations: 50
 completion_promise: null
-started_at: "2026-03-26T04:55:35Z"
+started_at: "2026-03-26T05:35:44Z"
 ---
 
-autoresearch폴더내 autoresearch 기능을 사용해서 GFD의 모든기능 모든 솔버를 구현하자
+남은 작업도 마저 autoresearch를 활용해서 마무리해줘 끝내보자

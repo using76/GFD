@@ -138,7 +138,8 @@ fn run_simulation(config_path: &PathBuf, threads: Option<usize>, gpu: bool) -> R
     );
 
     // 4. Determine physics and run
-    let has_flow = config.setup.models.flow == "incompressible";
+    let has_flow = config.setup.models.flow == "incompressible"
+        || config.setup.models.flow == "compressible";
     let has_energy = config.setup.models.energy;
     let has_solid = config.setup.models.solid == "linear_elastic"
         || config.setup.models.solid == "hyperelastic";
@@ -290,7 +291,7 @@ fn run_heat_conduction(
 fn run_fluid_flow(
     config: &SimulationConfig,
     mesh: &gfd_core::mesh::unstructured::UnstructuredMesh,
-    _has_energy: bool,
+    has_energy: bool,
     gpu: bool,
 ) -> Result<()> {
     use gfd_fluid::FluidState;
@@ -388,6 +389,39 @@ fn run_fluid_flow(
         wall_patches.clone(),
     );
 
+    // Energy equation setup (if enabled)
+    let mut thermal_state = if has_energy {
+        use gfd_thermal::ThermalState;
+        let init_temp = config.setup.initial_conditions.as_ref()
+            .and_then(|ic| ic.temperature).unwrap_or(300.0);
+        Some(ThermalState::new(n, init_temp))
+    } else {
+        None
+    };
+
+    let mut energy_solver = if has_energy {
+        use gfd_thermal::convection::ConvectionDiffusionSolver;
+        let conductivity = config.setup.materials.first()
+            .and_then(|m| m.properties.get("conductivity").copied()).unwrap_or(1.0);
+        let specific_heat = config.setup.materials.first()
+            .and_then(|m| m.properties.get("specific_heat").copied()).unwrap_or(1000.0);
+        let source = config.setup.materials.first()
+            .and_then(|m| m.properties.get("heat_source").copied()).unwrap_or(0.0);
+        let mut s = ConvectionDiffusionSolver::with_properties(density, specific_heat, conductivity, source);
+        // Set thermal BCs
+        let mut thermal_bcs = HashMap::new();
+        for bc in &config.setup.boundary_conditions {
+            if let Some(t) = bc.parameters.get("temperature").and_then(|v| v.as_f64()) {
+                thermal_bcs.insert(bc.patch.clone(), t);
+            }
+        }
+        s.set_boundary_temps(thermal_bcs);
+        tracing::info!(k = conductivity, cp = specific_heat, "Energy equation enabled");
+        Some(s)
+    } else {
+        None
+    };
+
     // Iteration loop
     let max_iter = config.run.max_iterations;
     let tolerance = config.run.tolerance;
@@ -404,6 +438,13 @@ fn run_fluid_flow(
                 &wall_patches,
             )
             .map_err(|e| anyhow::anyhow!("SIMPLE iteration {} failed: {:?}", iter, e))?;
+
+        // Solve energy equation if enabled (coupled with velocity field)
+        if let (Some(ref mut e_solver), Some(ref mut t_state)) = (&mut energy_solver, &mut thermal_state) {
+            let dt = 1.0; // pseudo time step for steady
+            e_solver.solve_step(t_state, &state.velocity, mesh, dt)
+                .map_err(|e| anyhow::anyhow!("Energy equation failed: {:?}", e))?;
+        }
 
         if iter % 10 == 0 || residual < tolerance {
             tracing::info!(iter, residual, "SIMPLE iteration");
