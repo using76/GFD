@@ -9,6 +9,7 @@ pub mod compressible;
 pub mod turbulence;
 pub mod multiphase;
 pub mod combustion;
+pub mod source;
 
 use gfd_core::{ScalarField, VectorField};
 use serde::Deserialize;
