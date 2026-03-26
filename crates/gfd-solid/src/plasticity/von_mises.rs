@@ -217,4 +217,80 @@ mod tests {
         let vm = VonMisesYield::compute_von_mises(&stress);
         assert!(vm.abs() < 1e-6, "Hydrostatic stress should give zero von Mises");
     }
+
+    #[test]
+    fn test_return_mapping_elastic() {
+        // Trial stress below yield -> return mapping should not modify stress
+        let ym = VonMisesYield::new(250e6, 0.0);
+        let trial_stress = [
+            [100e6, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ];
+        let g = 80e9; // shear modulus
+        let (corrected, eps_p) = ym.return_mapping(&trial_stress, g, 0.0);
+
+        assert!(
+            (eps_p - 0.0).abs() < 1e-30,
+            "No plastic strain expected in elastic range"
+        );
+        assert!(
+            (corrected[0][0] - trial_stress[0][0]).abs() < 1e-6,
+            "Stress should be unchanged in elastic range"
+        );
+    }
+
+    #[test]
+    fn test_return_mapping_plastic() {
+        // Trial stress above yield -> return mapping should reduce von Mises stress
+        let yield_stress = 250e6;
+        let hardening = 1e9;
+        let ym = VonMisesYield::new(yield_stress, hardening);
+
+        let trial_stress = [
+            [400e6, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ];
+        let g = 80e9;
+        let (corrected, eps_p) = ym.return_mapping(&trial_stress, g, 0.0);
+
+        assert!(eps_p > 0.0, "Should have accumulated plastic strain");
+
+        let vm_corrected = VonMisesYield::compute_von_mises(&corrected);
+        let sigma_y = ym.current_yield_stress(eps_p);
+
+        // After return mapping, von Mises stress should be at the yield surface
+        assert!(
+            (vm_corrected - sigma_y).abs() / sigma_y < 1e-8,
+            "Corrected VM stress {:.3e} should equal yield stress {:.3e}",
+            vm_corrected,
+            sigma_y
+        );
+    }
+
+    #[test]
+    fn test_return_mapping_preserves_hydrostatic() {
+        // Return mapping should only affect deviatoric stress, not hydrostatic
+        let ym = VonMisesYield::new(100e6, 0.0);
+
+        let trial_stress = [
+            [300e6, 50e6, 0.0],
+            [50e6, 100e6, 0.0],
+            [0.0, 0.0, 200e6],
+        ];
+        let hydrostatic_before = (trial_stress[0][0] + trial_stress[1][1] + trial_stress[2][2]) / 3.0;
+
+        let g = 80e9;
+        let (corrected, _eps_p) = ym.return_mapping(&trial_stress, g, 0.0);
+
+        let hydrostatic_after = (corrected[0][0] + corrected[1][1] + corrected[2][2]) / 3.0;
+
+        assert!(
+            (hydrostatic_after - hydrostatic_before).abs() / hydrostatic_before.abs() < 1e-10,
+            "Hydrostatic stress should be preserved: before {:.3e}, after {:.3e}",
+            hydrostatic_before,
+            hydrostatic_after
+        );
+    }
 }

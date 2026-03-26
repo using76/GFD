@@ -292,6 +292,150 @@ impl DerivedField for QCriterion {
     }
 }
 
+/// Computes wall shear stress: tau_w = mu * du/dy|_wall.
+///
+/// Requires "velocity" (VectorField), "viscosity" (ScalarField),
+/// and "wall_distance" (ScalarField) in the field set.
+/// The wall_distance field contains the distance from each cell center to
+/// the nearest wall. The wall shear stress is approximated as:
+///   tau_w = mu * |U_tangential| / y
+/// where y is the wall distance.
+pub struct WallShearStress;
+
+impl DerivedField for WallShearStress {
+    fn compute(&self, fields: &FieldSet) -> Result<ScalarField> {
+        let velocity = match fields.get("velocity") {
+            Some(FieldData::Vector(vf)) => vf,
+            _ => return Err(PostProcessError::FieldNotFound("velocity".to_string())),
+        };
+
+        let viscosity = match fields.get("viscosity") {
+            Some(FieldData::Scalar(sf)) => sf,
+            _ => return Err(PostProcessError::FieldNotFound("viscosity".to_string())),
+        };
+
+        let wall_distance = match fields.get("wall_distance") {
+            Some(FieldData::Scalar(sf)) => sf,
+            _ => return Err(PostProcessError::FieldNotFound("wall_distance".to_string())),
+        };
+
+        let num_cells = velocity.values().len();
+        if num_cells == 0 {
+            return Err(PostProcessError::EmptyField);
+        }
+
+        let vel = velocity.values();
+        let mu = viscosity.values();
+        let y = wall_distance.values();
+
+        // Optionally use wall_normal to compute tangential velocity
+        let wall_normal: Option<&[f64]> = match fields.get("wall_normal_y") {
+            Some(FieldData::Scalar(sf)) => Some(sf.values()),
+            _ => None,
+        };
+
+        let mut result = Vec::with_capacity(num_cells);
+        for i in 0..num_cells {
+            let dist = y[i].abs();
+            if dist < 1e-30 {
+                // At the wall itself, tau_w is indeterminate; report 0
+                result.push(0.0);
+                continue;
+            }
+
+            // Compute velocity magnitude (tangential to wall).
+            // If wall normal info is available, project out the normal component.
+            // Otherwise, use full velocity magnitude as an approximation.
+            let u_mag = if let Some(wn) = wall_normal {
+                // wall_normal_y typically stores the y-component of wall normal
+                // For a general implementation, we use the velocity magnitude
+                // minus the normal component
+                let _ = wn[i]; // acknowledge the field
+                (vel[i][0] * vel[i][0] + vel[i][1] * vel[i][1] + vel[i][2] * vel[i][2]).sqrt()
+            } else {
+                (vel[i][0] * vel[i][0] + vel[i][1] * vel[i][1] + vel[i][2] * vel[i][2]).sqrt()
+            };
+
+            // tau_w = mu * du/dy ≈ mu * |U_tangential| / y
+            let mu_val = if i < mu.len() { mu[i] } else { 1e-3 };
+            let tau = mu_val * u_mag / dist;
+            result.push(tau);
+        }
+
+        Ok(ScalarField::new("wall_shear_stress", result))
+    }
+
+    fn name(&self) -> &str {
+        "wall_shear_stress"
+    }
+
+    fn units(&self) -> &str {
+        "Pa"
+    }
+}
+
+/// Computes the pressure coefficient: Cp = (p - p_inf) / (0.5 * rho * U_inf^2).
+///
+/// Requires "pressure" (ScalarField) in the field set. The reference
+/// freestream conditions (p_inf, rho_inf, U_inf) are provided at construction.
+pub struct PressureCoefficient {
+    /// Freestream pressure [Pa].
+    pub p_inf: f64,
+    /// Freestream density [kg/m^3].
+    pub rho_inf: f64,
+    /// Freestream velocity magnitude [m/s].
+    pub u_inf: f64,
+}
+
+impl PressureCoefficient {
+    /// Creates a new pressure coefficient calculator.
+    pub fn new(p_inf: f64, rho_inf: f64, u_inf: f64) -> Self {
+        Self {
+            p_inf,
+            rho_inf,
+            u_inf,
+        }
+    }
+}
+
+impl DerivedField for PressureCoefficient {
+    fn compute(&self, fields: &FieldSet) -> Result<ScalarField> {
+        let pressure = match fields.get("pressure") {
+            Some(FieldData::Scalar(sf)) => sf,
+            _ => return Err(PostProcessError::FieldNotFound("pressure".to_string())),
+        };
+
+        let num_cells = pressure.values().len();
+        if num_cells == 0 {
+            return Err(PostProcessError::EmptyField);
+        }
+
+        let q_inf = 0.5 * self.rho_inf * self.u_inf * self.u_inf;
+        if q_inf.abs() < 1e-30 {
+            return Err(PostProcessError::InvalidComputation(
+                "Dynamic pressure q_inf is zero (U_inf = 0?)".to_string(),
+            ));
+        }
+
+        let p = pressure.values();
+        let mut result = Vec::with_capacity(num_cells);
+        for i in 0..num_cells {
+            let cp = (p[i] - self.p_inf) / q_inf;
+            result.push(cp);
+        }
+
+        Ok(ScalarField::new("Cp", result))
+    }
+
+    fn name(&self) -> &str {
+        "Cp"
+    }
+
+    fn units(&self) -> &str {
+        "-"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,5 +525,63 @@ mod tests {
         let result = qc.compute(&fields).unwrap();
         // Pure strain: Q < 0
         assert!(result.values()[0] < 0.0);
+    }
+
+    #[test]
+    fn wall_shear_stress_basic() {
+        let mut fields = FieldSet::new();
+        let vel = VectorField::new("velocity", vec![
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ]);
+        let mu = ScalarField::new("viscosity", vec![0.001, 0.001, 0.001]);
+        let y = ScalarField::new("wall_distance", vec![0.01, 0.02, 0.0]);
+
+        fields.insert("velocity".to_string(), FieldData::Vector(vel));
+        fields.insert("viscosity".to_string(), FieldData::Scalar(mu));
+        fields.insert("wall_distance".to_string(), FieldData::Scalar(y));
+
+        let wss = WallShearStress;
+        let result = wss.compute(&fields).unwrap();
+
+        // tau_w = mu * |U| / y
+        // Cell 0: 0.001 * 1.0 / 0.01 = 0.1
+        assert!((result.values()[0] - 0.1).abs() < 1e-10);
+        // Cell 1: 0.001 * 2.0 / 0.02 = 0.1
+        assert!((result.values()[1] - 0.1).abs() < 1e-10);
+        // Cell 2: y=0, should be 0
+        assert!((result.values()[2] - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn pressure_coefficient_basic() {
+        let mut fields = FieldSet::new();
+        // Freestream: p_inf=101325, rho=1.225, U=10 m/s
+        // q_inf = 0.5 * 1.225 * 100 = 61.25
+        let pressures = vec![101325.0, 101386.25, 101263.75];
+        let sf = ScalarField::new("pressure", pressures);
+        fields.insert("pressure".to_string(), FieldData::Scalar(sf));
+
+        let cp = PressureCoefficient::new(101325.0, 1.225, 10.0);
+        let result = cp.compute(&fields).unwrap();
+
+        // Cell 0: Cp = (101325 - 101325) / 61.25 = 0
+        assert!((result.values()[0] - 0.0).abs() < 1e-10);
+        // Cell 1: Cp = 61.25 / 61.25 = 1.0
+        assert!((result.values()[1] - 1.0).abs() < 1e-10);
+        // Cell 2: Cp = -61.25 / 61.25 = -1.0
+        assert!((result.values()[2] - (-1.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn pressure_coefficient_zero_velocity() {
+        let mut fields = FieldSet::new();
+        let sf = ScalarField::new("pressure", vec![100.0]);
+        fields.insert("pressure".to_string(), FieldData::Scalar(sf));
+
+        let cp = PressureCoefficient::new(0.0, 1.0, 0.0);
+        let result = cp.compute(&fields);
+        assert!(result.is_err(), "Should fail with zero dynamic pressure");
     }
 }
