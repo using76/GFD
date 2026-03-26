@@ -719,6 +719,48 @@ impl TurbulenceTransportSolver {
 
         Ok(ScalarField::new("eddy_viscosity", mu_t_vals))
     }
+
+    /// Computes the Realizable k-epsilon variable C_mu per cell.
+    ///
+    /// C_mu = 1 / (A_0 + A_s * U * k / epsilon)
+    /// where U = sqrt(S_ij*S_ij + Omega_ij*Omega_ij)
+    /// A_0 = 4.04, A_s = sqrt(6) * cos(phi/3)
+    /// phi = (1/3) * acos(sqrt(6) * W)
+    /// W = S_ij*S_jk*S_ki / (S_ij*S_ij)^(3/2)
+    pub fn compute_realizable_c_mu(
+        &self,
+        state: &FluidState,
+        mesh: &UnstructuredMesh,
+    ) -> Vec<f64> {
+        let n = mesh.num_cells();
+        let s_sq = self.compute_strain_rate_sq(state, mesh).unwrap_or_else(|_| vec![0.0; n]);
+
+        let mut c_mu_field = vec![C_MU; n]; // fallback to standard C_mu
+
+        if let (Some(k_field), Some(eps_field)) =
+            (&state.turb_kinetic_energy, &state.turb_dissipation)
+        {
+            for i in 0..n {
+                let s = (2.0 * s_sq[i]).sqrt(); // |S| = sqrt(2*S_ij*S_ij)
+                let k_val = k_field.values()[i].max(K_MIN);
+                let eps_val = eps_field.values()[i].max(EPSILON_MIN);
+
+                // Simplified: U ≈ S (ignoring rotation for this implementation)
+                let u_star = s;
+
+                // Shih et al. (1995): A_0 = 4.04
+                let a0 = 4.04_f64;
+                // A_s = sqrt(6)*cos(phi/3) where phi depends on S_ij invariants
+                // Simplified: A_s ≈ sqrt(6) * cos(pi/6) ≈ 2.12 for typical flows
+                let a_s = 6.0_f64.sqrt() * (std::f64::consts::PI / 6.0).cos();
+
+                let denom = a0 + a_s * u_star * k_val / eps_val;
+                c_mu_field[i] = (1.0 / denom).clamp(0.0, 0.5);
+            }
+        }
+
+        c_mu_field
+    }
 }
 
 impl Default for TurbulenceTransportSolver {

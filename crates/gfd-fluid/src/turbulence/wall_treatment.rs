@@ -231,7 +231,8 @@ pub enum WallFunctionType {
 
 /// Spalding's law-of-the-wall constants.
 const SPALDING_KAPPA: f64 = 0.41;
-const SPALDING_B: f64 = 5.5;
+// B = (1/kappa)*ln(E) with E=9.793 for smooth walls, consistent with standard log-law.
+const SPALDING_B: f64 = 5.5652; // = (1/0.41)*ln(9.793)
 
 /// Evaluates Spalding's wall function: computes y+ given u+.
 ///
