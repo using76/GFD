@@ -19,6 +19,7 @@ members = [
     "crates/gfd-parallel",
     "crates/gfd-vdb",
     "crates/gfd-gpu",
+    "crates/gfd-mesh",
 ]
 
 [package]

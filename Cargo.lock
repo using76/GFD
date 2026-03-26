@@ -328,6 +328,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gfd-mesh"
+version = "0.1.0"
+dependencies = [
+ "gfd-core",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "gfd-parallel"
 version = "0.1.0"
 dependencies = [

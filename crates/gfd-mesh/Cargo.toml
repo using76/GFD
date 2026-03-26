@@ -1,0 +1,9 @@
+[package]
+name = "gfd-mesh"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gfd-core = { path = "../gfd-core" }
+thiserror = { workspace = true }
+serde = { workspace = true }
