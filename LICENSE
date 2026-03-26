@@ -1,0 +1,37 @@
+Modified MIT License
+
+Copyright (c) 2026 GFD Project Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+1. The above copyright notice and this permission notice shall be
+   included in all copies or substantial portions of the Software.
+
+2. Any product or service that incorporates the Software (or derivative
+   works thereof) shall include the attribution notice "Powered by GFD"
+   in at least one of the following locations:
+   (a) an "About" dialog, splash screen, or credits page of the
+       application's user interface; or
+   (b) the product documentation or README; or
+   (c) a visible footer or sidebar in a web-based interface.
+
+3. If the Software (or any derivative works thereof) is used for any
+   commercial product or service that has more than 100 million monthly
+   active users, or generates more than 20 million US dollars (or
+   equivalent in other currencies) in monthly revenue, you shall either:
+   (a) prominently display "Powered by GFD Solver" on the primary user
+       interface of such product or service; or
+   (b) obtain a commercial license by contacting the copyright holders.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

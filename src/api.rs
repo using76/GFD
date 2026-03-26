@@ -41,6 +41,8 @@ pub struct SolveResult {
     pub field_stats: HashMap<String, FieldStats>,
     /// Probe point values (empty if no probes configured).
     pub probe_values: Vec<ProbeResult>,
+    /// Solver attribution (Modified MIT License requirement).
+    pub powered_by: String,
 }
 
 /// Statistics for a single field.
@@ -227,6 +229,7 @@ pub fn solve_cavity(nx: usize, ny: usize, re: f64, max_iter: usize) -> SolveResu
         wall_time_ms,
         field_stats,
         probe_values: Vec::new(),
+        powered_by: "GFD Solver — https://github.com/using76/GFD".to_string(),
     }
 }
 
@@ -335,6 +338,7 @@ pub fn solve_pipe_flow(nx: usize, ny: usize, re: f64, u_inlet: f64) -> SolveResu
         wall_time_ms,
         field_stats,
         probe_values: Vec::new(),
+        powered_by: "GFD Solver — https://github.com/using76/GFD".to_string(),
     }
 }
 
@@ -483,6 +487,7 @@ pub fn solve_flow(config_json: &str) -> Result<SolveResult, String> {
         wall_time_ms,
         field_stats,
         probe_values: Vec::new(),
+        powered_by: "GFD Solver — https://github.com/using76/GFD".to_string(),
     })
 }
 
@@ -536,6 +541,7 @@ pub fn solve_conduction_1d(
         wall_time_ms,
         field_stats,
         probe_values: Vec::new(),
+        powered_by: "GFD Solver — https://github.com/using76/GFD".to_string(),
     }
 }
 
@@ -588,6 +594,7 @@ pub fn solve_conduction_2d(
         wall_time_ms,
         field_stats,
         probe_values: Vec::new(),
+        powered_by: "GFD Solver — https://github.com/using76/GFD".to_string(),
     }
 }
 

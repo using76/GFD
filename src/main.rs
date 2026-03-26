@@ -64,8 +64,22 @@ pub struct SimulationResult {
 // ---------------------------------------------------------------------------
 
 /// GFD -- Generalized Finite Difference multi-physics solver
+const GFD_BANNER: &str = r#"
+  ╔═══════════════════════════════════════════════════╗
+  ║  GFD — Generalized Fluid Dynamics Solver          ║
+  ║  Powered by GFD  |  https://github.com/using76/GFD║
+  ║  Licensed under Modified MIT License              ║
+  ╚═══════════════════════════════════════════════════╝
+"#;
+
 #[derive(Parser, Debug)]
-#[command(name = "gfd", version, about, long_about = None)]
+#[command(
+    name = "gfd",
+    version,
+    about = "GFD — Universal multi-physics solver (CFD, thermal, structural)\nPowered by GFD | https://github.com/using76/GFD",
+    long_about = None,
+    after_help = "Powered by GFD Solver — Modified MIT License\nhttps://github.com/using76/GFD"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -193,6 +207,9 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Print branding banner (required by Modified MIT License)
+    eprintln!("{}", GFD_BANNER);
 
     match cli.command {
         Commands::Run {
