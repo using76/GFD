@@ -731,43 +731,35 @@ impl SimpleSolver {
         let vel_vals = state.velocity.values();
         let rho_half = 0.5 * self.density;
 
-        for (fi, face) in mesh.faces.iter().enumerate() {
-            let owner = face.owner_cell;
+        // Internal faces: use cached geometry (avoids Face struct access)
+        for &(fi, owner, neigh, _dist, _d) in &self.cached_internal_geom {
+            let na = self.cached_normal_area[fi];
+            let vo = vel_vals[owner];
+            let vn = vel_vals[neigh];
+            let mass_flux = rho_half
+                * ((vo[0] + vn[0]) * na[0]
+                 + (vo[1] + vn[1]) * na[1]
+                 + (vo[2] + vn[2]) * na[2]);
+            mass_imbalance[owner] += mass_flux;
+            mass_imbalance[neigh] -= mass_flux;
+        }
 
-            if let Some(neigh) = face.neighbor_cell {
-                let na = self.cached_normal_area[fi];
-                let vo = vel_vals[owner];
-                let vn = vel_vals[neigh];
-                let mass_flux = rho_half
-                    * ((vo[0] + vn[0]) * na[0]
-                     + (vo[1] + vn[1]) * na[1]
-                     + (vo[2] + vn[2]) * na[2]);
-
-                mass_imbalance[owner] += mass_flux;
-                mass_imbalance[neigh] -= mass_flux;
-            } else {
-                // Boundary face
-                let patch_name = self.get_face_patch(face.id);
-                if let Some(pname) = patch_name {
-                    if let Some(bc_vel) = boundary_velocities.get(pname) {
-                        let mass_flux = self.density
-                            * (bc_vel[0] * face.normal[0]
-                                + bc_vel[1] * face.normal[1]
-                                + bc_vel[2] * face.normal[2])
-                            * face.area;
-                        mass_imbalance[owner] += mass_flux;
-                    } else if wall_patches.iter().any(|w| w == pname) {
-                        // Wall: zero velocity, zero flux
-                    } else {
-                        // Outlet or other: use cell velocity extrapolated to face
-                        let vel_o = state.velocity.values()[owner];
-                        let mass_flux = self.density
-                            * (vel_o[0] * face.normal[0]
-                                + vel_o[1] * face.normal[1]
-                                + vel_o[2] * face.normal[2])
-                            * face.area;
-                        mass_imbalance[owner] += mass_flux;
-                    }
+        // Boundary faces
+        for &(fi, owner, _d) in &self.cached_boundary_geom {
+            let na = self.cached_normal_area[fi];
+            let patch_name = self.get_face_patch(fi);
+            if let Some(pname) = patch_name {
+                if let Some(bc_vel) = boundary_velocities.get(pname) {
+                    let mass_flux = self.density
+                        * (bc_vel[0] * na[0] + bc_vel[1] * na[1] + bc_vel[2] * na[2]);
+                    mass_imbalance[owner] += mass_flux;
+                } else if wall_patches.iter().any(|w| w == pname) {
+                    // Wall: zero velocity, zero flux
+                } else {
+                    let vel_o = vel_vals[owner];
+                    let mass_flux = self.density
+                        * (vel_o[0] * na[0] + vel_o[1] * na[1] + vel_o[2] * na[2]);
+                    mass_imbalance[owner] += mass_flux;
                 }
             }
         }
