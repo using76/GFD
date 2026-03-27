@@ -1,82 +1,51 @@
 import { useMemo } from 'react';
 import * as THREE from 'three';
-import { useAppStore } from '../store/appStore';
+import { useAppStore } from '../store/useAppStore';
 
 /**
- * Builds a Three.js BufferGeometry from unstructured mesh data.
- * Expects nodes as flat [x1,y1,z1, x2,y2,z2, ...] and
- * cells as flat connectivity arrays (hex8: 8 indices per cell).
+ * Jet colormap: blue -> cyan -> green -> yellow -> red
  */
-function buildGeometry(
-  nodes: number[] | Float64Array,
-  cells: number[] | Uint32Array
-): THREE.BufferGeometry {
-  const geometry = new THREE.BufferGeometry();
-
-  // Positions from node coords
-  const positions = new Float32Array(nodes.length);
-  for (let i = 0; i < nodes.length; i++) {
-    positions[i] = nodes[i];
+function jetColor(t: number): [number, number, number] {
+  const c = Math.max(0, Math.min(1, t));
+  let r: number, g: number, b: number;
+  if (c < 0.25) {
+    r = 0;
+    g = 4 * c;
+    b = 1;
+  } else if (c < 0.5) {
+    r = 0;
+    g = 1;
+    b = 1 - 4 * (c - 0.25);
+  } else if (c < 0.75) {
+    r = 4 * (c - 0.5);
+    g = 1;
+    b = 0;
+  } else {
+    r = 1;
+    g = 1 - 4 * (c - 0.75);
+    b = 0;
   }
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-
-  // Build index buffer from hex8 cells (split each face into triangles)
-  // Each hex has 6 faces, each face -> 2 triangles -> 6 indices per face -> 36 indices per hex
-  const HEX_FACES = [
-    [0, 1, 2, 3], // front
-    [4, 5, 6, 7], // back
-    [0, 1, 5, 4], // bottom
-    [2, 3, 7, 6], // top
-    [0, 3, 7, 4], // left
-    [1, 2, 6, 5], // right
-  ];
-
-  const nodesPerCell = 8;
-  const numCells = Math.floor(cells.length / nodesPerCell);
-  const indices: number[] = [];
-
-  for (let c = 0; c < numCells; c++) {
-    const base = c * nodesPerCell;
-    for (const face of HEX_FACES) {
-      const n0 = cells[base + face[0]];
-      const n1 = cells[base + face[1]];
-      const n2 = cells[base + face[2]];
-      const n3 = cells[base + face[3]];
-      // Two triangles per quad face
-      indices.push(n0, n1, n2);
-      indices.push(n0, n2, n3);
-    }
-  }
-
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
-
-  return geometry;
+  return [r, g, b];
 }
 
 /**
- * Creates a color attribute from field values using a blue-to-red colormap.
+ * Build contour vertex colors from field data.
  */
 function buildContourColors(
   nodeCount: number,
-  fieldValues: number[] | Float64Array,
+  fieldValues: Float32Array,
   fieldMin: number,
   fieldMax: number
 ): Float32Array {
   const colors = new Float32Array(nodeCount * 3);
   const range = fieldMax - fieldMin || 1;
-
   for (let i = 0; i < Math.min(nodeCount, fieldValues.length); i++) {
     const t = (fieldValues[i] - fieldMin) / range;
-    // Blue (0) -> Cyan -> Green -> Yellow -> Red (1)
-    const r = Math.min(1, Math.max(0, 1.5 - Math.abs(t - 1.0) * 4));
-    const g = Math.min(1, Math.max(0, 1.5 - Math.abs(t - 0.5) * 4));
-    const b = Math.min(1, Math.max(0, 1.5 - Math.abs(t - 0.0) * 4));
+    const [r, g, b] = jetColor(t);
     colors[i * 3] = r;
     colors[i * 3 + 1] = g;
     colors[i * 3 + 2] = b;
   }
-
   return colors;
 }
 
@@ -92,9 +61,6 @@ function DemoCube() {
   );
 }
 
-/**
- * Renders a demo cube wireframe overlay.
- */
 function DemoCubeWireframe() {
   return (
     <mesh position={[0, 0.5, 0]}>
@@ -105,22 +71,40 @@ function DemoCubeWireframe() {
 }
 
 export default function MeshRenderer() {
-  const meshData = useAppStore((s) => s.meshData);
+  const meshDisplayData = useAppStore((s) => s.meshDisplayData);
   const renderMode = useAppStore((s) => s.renderMode);
   const activeField = useAppStore((s) => s.activeField);
   const fieldData = useAppStore((s) => s.fieldData);
+  const contourConfig = useAppStore((s) => s.contourConfig);
 
   const geometry = useMemo(() => {
-    if (!meshData) return null;
-    return buildGeometry(meshData.nodes, meshData.cells);
-  }, [meshData]);
+    if (!meshDisplayData) return null;
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute(
+      'position',
+      new THREE.BufferAttribute(new Float32Array(meshDisplayData.positions), 3)
+    );
+    geom.setIndex(new THREE.BufferAttribute(new Uint32Array(meshDisplayData.indices), 1));
+    geom.computeVertexNormals();
+    return geom;
+  }, [meshDisplayData]);
 
-  const contourColors = useMemo(() => {
-    if (!meshData || !activeField) return null;
+  // Apply contour colors to the geometry when a field is active
+  useMemo(() => {
+    if (!geometry || !meshDisplayData || !activeField) {
+      if (geometry) geometry.deleteAttribute('color');
+      return;
+    }
     const field = fieldData.find((f) => f.name === activeField);
-    if (!field) return null;
-    return buildContourColors(meshData.nodeCount, field.values, field.min, field.max);
-  }, [meshData, activeField, fieldData]);
+    if (!field) {
+      geometry.deleteAttribute('color');
+      return;
+    }
+    const fMin = contourConfig.autoRange ? field.min : contourConfig.min;
+    const fMax = contourConfig.autoRange ? field.max : contourConfig.max;
+    const colors = buildContourColors(meshDisplayData.nodeCount, field.values, fMin, fMax);
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  }, [geometry, meshDisplayData, activeField, fieldData, contourConfig]);
 
   // No mesh loaded: show demo geometry
   if (!geometry) {
@@ -132,13 +116,14 @@ export default function MeshRenderer() {
     );
   }
 
-  // Render actual mesh
+  const hasContour = renderMode === 'contour' && activeField && geometry.getAttribute('color');
+
   return (
     <group>
       {/* Solid / Contour mode */}
       {renderMode !== 'wireframe' && (
         <mesh geometry={geometry} userData={{ selectable: true }}>
-          {renderMode === 'contour' && contourColors ? (
+          {hasContour ? (
             <meshStandardMaterial vertexColors side={THREE.DoubleSide} />
           ) : (
             <meshStandardMaterial

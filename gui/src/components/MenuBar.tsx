@@ -1,4 +1,4 @@
-import { Menu } from 'antd';
+import { Menu, message } from 'antd';
 import type { MenuProps } from 'antd';
 import {
   FileOutlined,
@@ -13,6 +13,7 @@ import {
   SettingOutlined,
   InfoCircleOutlined,
 } from '@ant-design/icons';
+import { useAppStore } from '../store/useAppStore';
 
 type MenuItem = Required<MenuProps>['items'][number];
 
@@ -71,9 +72,54 @@ const menuItems: MenuItem[] = [
 ];
 
 export default function MenuBar() {
+  const setRenderMode = useAppStore((s) => s.setRenderMode);
+  const setCameraMode = useAppStore((s) => s.setCameraMode);
+
   const handleClick: MenuProps['onClick'] = (info) => {
-    console.log('[Menu]', info.key);
-    // Menu actions will be wired up as features are implemented
+    switch (info.key) {
+      case 'file:new':
+        // Reload to reset state
+        if (confirm('Create a new project? Unsaved changes will be lost.')) {
+          window.location.reload();
+        }
+        break;
+      case 'file:save':
+        message.success('Project saved (simulation mode).');
+        break;
+      case 'file:export':
+        message.info('VTK export is available after running the solver.');
+        break;
+      case 'view:wireframe':
+        setRenderMode('wireframe');
+        break;
+      case 'view:solid':
+        setRenderMode('solid');
+        break;
+      case 'view:contour':
+        setRenderMode('contour');
+        break;
+      case 'view:perspective':
+        setCameraMode({ type: 'perspective' });
+        break;
+      case 'view:orthographic':
+        setCameraMode({ type: 'orthographic' });
+        break;
+      case 'view:fitall':
+        window.dispatchEvent(
+          new CustomEvent('gfd-camera-preset', {
+            detail: { position: [5, 5, 5] },
+          })
+        );
+        break;
+      case 'help:about':
+        message.info('GFD - Generalized Fluid Dynamics v0.1.0');
+        break;
+      case 'help:docs':
+        message.info('Documentation: See PROJECT_PLAN.md in the repository.');
+        break;
+      default:
+        console.log('[Menu]', info.key);
+    }
   };
 
   return (

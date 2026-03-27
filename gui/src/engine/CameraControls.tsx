@@ -1,11 +1,10 @@
-import { useThree } from '@react-three/fiber';
 import { Button, Space, Tooltip } from 'antd';
 import {
   CompressOutlined,
   BorderOutlined,
   ColumnWidthOutlined,
 } from '@ant-design/icons';
-import { useAppStore } from '../store/appStore';
+import { useAppStore } from '../store/useAppStore';
 
 interface ViewPreset {
   label: string;
@@ -15,38 +14,25 @@ interface ViewPreset {
 const VIEW_PRESETS: ViewPreset[] = [
   { label: 'Front', position: [0, 0, 8] },
   { label: 'Back', position: [0, 0, -8] },
-  { label: 'Top', position: [0, 8, 0] },
-  { label: 'Bottom', position: [0, -8, 0] },
+  { label: 'Top', position: [0, 8, 0.01] },
+  { label: 'Bottom', position: [0, -8, 0.01] },
   { label: 'Left', position: [-8, 0, 0] },
   { label: 'Right', position: [8, 0, 0] },
   { label: 'Iso', position: [5, 5, 5] },
 ];
 
 /**
- * Inner component that uses useThree (must be inside Canvas).
- * We export it separately for potential in-canvas use.
+ * Overlay camera control buttons rendered on top of the Canvas (outside R3F).
+ * View presets dispatch a custom event that OrbitControls can pick up,
+ * or we just store a "desired camera" in state for now. Since we are outside
+ * the canvas, we use a DOM custom event that a tiny in-canvas listener reads.
  */
-export function CameraPresetButtons() {
-  const { camera } = useThree();
-
-  const applyPreset = (preset: ViewPreset) => {
-    camera.position.set(...preset.position);
-    camera.lookAt(0, 0, 0);
-    camera.updateProjectionMatrix();
-  };
-
-  const fitAll = () => {
-    camera.position.set(5, 5, 5);
-    camera.lookAt(0, 0, 0);
-    camera.updateProjectionMatrix();
-  };
-
-  return { applyPreset, fitAll };
+function dispatchCameraEvent(position: [number, number, number]) {
+  window.dispatchEvent(
+    new CustomEvent('gfd-camera-preset', { detail: { position } })
+  );
 }
 
-/**
- * Overlay camera control buttons rendered on top of the Canvas (outside R3F).
- */
 export default function CameraControls() {
   const cameraMode = useAppStore((s) => s.cameraMode);
   const setCameraMode = useAppStore((s) => s.setCameraMode);
@@ -72,6 +58,7 @@ export default function CameraControls() {
             <Button
               size="small"
               style={{ width: 40, fontSize: 10, padding: '0 4px' }}
+              onClick={() => dispatchCameraEvent(preset.position)}
             >
               {preset.label.slice(0, 3)}
             </Button>
@@ -81,7 +68,12 @@ export default function CameraControls() {
 
       {/* Fit All */}
       <Tooltip title="Fit All" placement="right">
-        <Button size="small" icon={<CompressOutlined />} style={{ width: 40 }} />
+        <Button
+          size="small"
+          icon={<CompressOutlined />}
+          style={{ width: 40 }}
+          onClick={() => dispatchCameraEvent([5, 5, 5])}
+        />
       </Tooltip>
 
       {/* Camera Toggle */}

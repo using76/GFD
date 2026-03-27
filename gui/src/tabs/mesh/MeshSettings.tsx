@@ -1,6 +1,6 @@
 import React from 'react';
 import { Button, Divider } from 'antd';
-import { BuildOutlined } from '@ant-design/icons';
+import { BuildOutlined, LoadingOutlined } from '@ant-design/icons';
 import PropertyGrid from '../../components/PropertyGrid';
 import type { PropertyField } from '../../components/PropertyGrid';
 import { useAppStore } from '../../store/useAppStore';
@@ -30,6 +30,7 @@ const MeshSettings: React.FC = () => {
   const updateMeshConfig = useAppStore((s) => s.updateMeshConfig);
   const generateMesh = useAppStore((s) => s.generateMesh);
   const meshGenerated = useAppStore((s) => s.meshGenerated);
+  const meshGenerating = useAppStore((s) => s.meshGenerating);
 
   const values: Record<string, unknown> = { ...meshConfig };
 
@@ -45,11 +46,17 @@ const MeshSettings: React.FC = () => {
       <div style={{ padding: '0 12px 12px' }}>
         <Button
           type="primary"
-          icon={<BuildOutlined />}
+          icon={meshGenerating ? <LoadingOutlined /> : <BuildOutlined />}
           block
           onClick={generateMesh}
+          disabled={meshGenerating}
+          loading={meshGenerating}
         >
-          {meshGenerated ? 'Regenerate Mesh' : 'Generate Mesh'}
+          {meshGenerating
+            ? 'Generating...'
+            : meshGenerated
+            ? 'Regenerate Mesh'
+            : 'Generate Mesh'}
         </Button>
       </div>
     </div>

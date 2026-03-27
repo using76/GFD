@@ -4,24 +4,42 @@ import {
   PauseCircleOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
+  LoadingOutlined,
 } from '@ant-design/icons';
-import { useAppStore } from '../store/appStore';
+import { useAppStore } from '../store/useAppStore';
 
 const { Text } = Typography;
 
 export default function StatusBar() {
   const solverStatus = useAppStore((s) => s.solverStatus);
-  const gpuAvailable = useAppStore((s) => s.gpuAvailable);
-  const meshData = useAppStore((s) => s.meshData);
+  const currentIteration = useAppStore((s) => s.currentIteration);
+  const residuals = useAppStore((s) => s.residuals);
+  const useGpu = useAppStore((s) => s.useGpu);
+  const meshGenerated = useAppStore((s) => s.meshGenerated);
+  const meshDisplayData = useAppStore((s) => s.meshDisplayData);
   const selectedEntity = useAppStore((s) => s.selectedEntity);
 
-  const statusIcon = solverStatus.running ? (
-    <PlayCircleOutlined style={{ color: '#52c41a' }} />
-  ) : solverStatus.converged ? (
-    <CheckCircleOutlined style={{ color: '#1677ff' }} />
-  ) : (
-    <PauseCircleOutlined style={{ color: '#888' }} />
-  );
+  const statusIcon =
+    solverStatus === 'running' ? (
+      <LoadingOutlined style={{ color: '#52c41a' }} />
+    ) : solverStatus === 'finished' ? (
+      <CheckCircleOutlined style={{ color: '#1677ff' }} />
+    ) : solverStatus === 'paused' ? (
+      <PauseCircleOutlined style={{ color: '#faad14' }} />
+    ) : (
+      <PlayCircleOutlined style={{ color: '#888' }} />
+    );
+
+  const statusText =
+    solverStatus === 'running'
+      ? 'Solving...'
+      : solverStatus === 'finished'
+      ? 'Converged'
+      : solverStatus === 'paused'
+      ? 'Paused'
+      : 'Idle';
+
+  const lastResidual = residuals.length > 0 ? residuals[residuals.length - 1] : null;
 
   return (
     <div
@@ -36,33 +54,27 @@ export default function StatusBar() {
       <Space size="middle">
         <span>
           {statusIcon}{' '}
-          <Text style={{ fontSize: 12 }}>
-            {solverStatus.running
-              ? 'Solving...'
-              : solverStatus.converged
-                ? 'Converged'
-                : 'Idle'}
-          </Text>
+          <Text style={{ fontSize: 12 }}>{statusText}</Text>
         </span>
 
-        {solverStatus.iteration > 0 && (
+        {currentIteration > 0 && (
           <Text style={{ fontSize: 12 }}>
-            Iteration: {solverStatus.iteration}
+            Iteration: {currentIteration}
           </Text>
         )}
 
-        {solverStatus.residual > 0 && (
+        {lastResidual && (
           <Text style={{ fontSize: 12 }}>
-            Residual: {solverStatus.residual.toExponential(3)}
+            Residual: {lastResidual.continuity.toExponential(3)}
           </Text>
         )}
       </Space>
 
       <Space size="middle">
-        {meshData && (
+        {meshGenerated && meshDisplayData && (
           <Text style={{ fontSize: 12 }}>
-            Cells: {meshData.cellCount.toLocaleString()} | Nodes:{' '}
-            {meshData.nodeCount.toLocaleString()}
+            Cells: {meshDisplayData.cellCount.toLocaleString()} | Nodes:{' '}
+            {meshDisplayData.nodeCount.toLocaleString()}
           </Text>
         )}
 
@@ -73,9 +85,9 @@ export default function StatusBar() {
         )}
 
         <Tag
-          color={gpuAvailable ? 'green' : 'default'}
+          color={useGpu ? 'green' : 'default'}
           icon={
-            gpuAvailable ? (
+            useGpu ? (
               <CheckCircleOutlined />
             ) : (
               <CloseCircleOutlined />
@@ -83,7 +95,7 @@ export default function StatusBar() {
           }
           style={{ fontSize: 11, lineHeight: '18px' }}
         >
-          {gpuAvailable ? 'GPU' : 'CPU'}
+          {useGpu ? 'GPU' : 'CPU'}
         </Tag>
       </Space>
     </div>

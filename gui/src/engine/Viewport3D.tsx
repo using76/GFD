@@ -1,6 +1,6 @@
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport, Grid } from '@react-three/drei';
-import { useAppStore } from '../store/appStore';
+import { useAppStore } from '../store/useAppStore';
 import CameraControls from './CameraControls';
 import MeshRenderer from './MeshRenderer';
 import SelectionManager from './SelectionManager';

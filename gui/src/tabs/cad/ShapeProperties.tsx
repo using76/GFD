@@ -1,5 +1,6 @@
 import React from 'react';
-import { Typography } from 'antd';
+import { Typography, Button, Divider } from 'antd';
+import { DeleteOutlined } from '@ant-design/icons';
 import PropertyGrid from '../../components/PropertyGrid';
 import type { PropertyField } from '../../components/PropertyGrid';
 import { useAppStore } from '../../store/useAppStore';
@@ -8,6 +9,7 @@ const ShapeProperties: React.FC = () => {
   const selectedShapeId = useAppStore((s) => s.selectedShapeId);
   const shapes = useAppStore((s) => s.shapes);
   const updateShape = useAppStore((s) => s.updateShape);
+  const removeShape = useAppStore((s) => s.removeShape);
 
   const shape = shapes.find((s) => s.id === selectedShapeId);
 
@@ -62,12 +64,25 @@ const ShapeProperties: React.FC = () => {
   };
 
   return (
-    <PropertyGrid
-      title={`${shape.kind.toUpperCase()} Properties`}
-      fields={[...baseFields, ...dimFields]}
-      values={values}
-      onChange={handleChange}
-    />
+    <div>
+      <PropertyGrid
+        title={`${shape.kind.toUpperCase()} Properties`}
+        fields={[...baseFields, ...dimFields]}
+        values={values}
+        onChange={handleChange}
+      />
+      <Divider style={{ margin: '4px 12px' }} />
+      <div style={{ padding: '0 12px 12px' }}>
+        <Button
+          danger
+          block
+          icon={<DeleteOutlined />}
+          onClick={() => removeShape(shape.id)}
+        >
+          Delete Shape
+        </Button>
+      </div>
+    </div>
   );
 };
 
