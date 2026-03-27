@@ -18,4 +18,7 @@ export type {
   ContourConfig,
   ColormapType,
   ResultField,
+  RibbonTab,
+  ActiveTool,
+  SelectionFilterType,
 } from './useAppStore';

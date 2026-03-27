@@ -1,10 +1,10 @@
 ---
 active: true
-iteration: 1
+iteration: 2
 session_id: 
-max_iterations: 500
+max_iterations: 0
 completion_promise: null
-started_at: "2026-03-27T14:25:10Z"
+started_at: "2026-03-27T15:50:55Z"
 ---
 
-defeaturing, CFD Prep, 기능이 완벽히 안되는듯한데, 특히 디피쳐링은 된곳은 화면에 표시도 되어야 하고 3D 화면에, CFD prep도 기능이 부족해, Space clame 의 UI/UX를 철저하게 연구해서 똑같히 구현해줘
+spaceclaim의 GUI와 각요소와 기능을 구현해줘, userguide를 잘 살펴보고 아이콘들과 기능을 구현해줘, 유저가이드는 https://ansyshelp.ansys.com/public/account/secured?returnurl=/Views/Secured/corp/v242/en/spaceclaim/index.html, 그리고 첨부한 그림과 같이 ui를 배치하고 기능구현해줘 [Image

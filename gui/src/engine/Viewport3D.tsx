@@ -1,7 +1,8 @@
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport, Grid } from '@react-three/drei';
 import { useAppStore } from '../store/useAppStore';
-import CameraControls from './CameraControls';
+// CameraControls replaced by MiniToolbar in App.tsx
+// import CameraControls from './CameraControls';
 import MeshRenderer from './MeshRenderer';
 import SelectionManager from './SelectionManager';
 import CadScene from './CadScene';
@@ -79,8 +80,8 @@ export default function Viewport3D() {
         <SceneContent />
       </Canvas>
 
-      {/* Camera view buttons overlay */}
-      <CameraControls />
+      {/* Camera view buttons overlay — now handled by MiniToolbar in App.tsx */}
+      {/* <CameraControls /> */}
     </div>
   );
 }

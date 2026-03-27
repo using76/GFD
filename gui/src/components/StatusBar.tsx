@@ -7,6 +7,7 @@ import {
   LoadingOutlined,
 } from '@ant-design/icons';
 import { useAppStore } from '../store/useAppStore';
+import SelectionFilter from './SelectionFilter';
 
 const { Text } = Typography;
 
@@ -18,6 +19,7 @@ export default function StatusBar() {
   const meshGenerated = useAppStore((s) => s.meshGenerated);
   const meshDisplayData = useAppStore((s) => s.meshDisplayData);
   const selectedEntity = useAppStore((s) => s.selectedEntity);
+  const activeTool = useAppStore((s) => s.activeTool);
 
   const statusIcon =
     solverStatus === 'running' ? (
@@ -27,7 +29,7 @@ export default function StatusBar() {
     ) : solverStatus === 'paused' ? (
       <PauseCircleOutlined style={{ color: '#faad14' }} />
     ) : (
-      <PlayCircleOutlined style={{ color: '#888' }} />
+      <PlayCircleOutlined style={{ color: '#556' }} />
     );
 
   const statusText =
@@ -37,7 +39,7 @@ export default function StatusBar() {
       ? 'Converged'
       : solverStatus === 'paused'
       ? 'Paused'
-      : 'Idle';
+      : 'Ready';
 
   const lastResidual = residuals.length > 0 ? residuals[residuals.length - 1] : null;
 
@@ -48,41 +50,50 @@ export default function StatusBar() {
         justifyContent: 'space-between',
         alignItems: 'center',
         height: '100%',
-        fontSize: 12,
+        fontSize: 11,
+        padding: '0 8px',
       }}
     >
-      <Space size="middle">
+      {/* Left section: status + properties */}
+      <Space size="middle" style={{ flexShrink: 0 }}>
         <span>
           {statusIcon}{' '}
-          <Text style={{ fontSize: 12 }}>{statusText}</Text>
+          <Text style={{ fontSize: 11, color: '#aab' }}>{statusText}</Text>
         </span>
 
         {currentIteration > 0 && (
-          <Text style={{ fontSize: 12 }}>
-            Iteration: {currentIteration}
+          <Text style={{ fontSize: 11, color: '#889' }}>
+            Iter: {currentIteration}
           </Text>
         )}
 
         {lastResidual && (
-          <Text style={{ fontSize: 12 }}>
-            Residual: {lastResidual.continuity.toExponential(3)}
+          <Text style={{ fontSize: 11, color: '#889' }}>
+            Res: {lastResidual.continuity.toExponential(2)}
           </Text>
         )}
+
+        <Text style={{ fontSize: 11, color: '#667' }}>
+          Tool: {activeTool}
+        </Text>
       </Space>
 
-      <Space size="middle">
+      {/* Right section: mesh info + selection filter + GPU tag */}
+      <Space size="middle" style={{ flexShrink: 0 }}>
         {meshGenerated && meshDisplayData && (
-          <Text style={{ fontSize: 12 }}>
+          <Text style={{ fontSize: 11, color: '#889' }}>
             Cells: {meshDisplayData.cellCount.toLocaleString()} | Nodes:{' '}
             {meshDisplayData.nodeCount.toLocaleString()}
           </Text>
         )}
 
         {selectedEntity && (
-          <Text style={{ fontSize: 12 }}>
-            Selected: {selectedEntity.type} #{selectedEntity.id}
+          <Text style={{ fontSize: 11, color: '#889' }}>
+            {selectedEntity.type} #{selectedEntity.id}
           </Text>
         )}
+
+        <SelectionFilter />
 
         <Tag
           color={useGpu ? 'green' : 'default'}
@@ -93,7 +104,7 @@ export default function StatusBar() {
               <CloseCircleOutlined />
             )
           }
-          style={{ fontSize: 11, lineHeight: '18px' }}
+          style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}
         >
           {useGpu ? 'GPU' : 'CPU'}
         </Tag>

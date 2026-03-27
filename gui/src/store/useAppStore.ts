@@ -178,11 +178,28 @@ export interface SelectedEntity {
   id: number;
 }
 
+// ---- Ribbon / Tool types ----
+export type RibbonTab = 'design' | 'display' | 'measure' | 'repair' | 'prepare' | 'mesh' | 'setup' | 'calc' | 'results';
+export type ActiveTool = 'select' | 'pull' | 'move' | 'fill' | 'measure' | 'section' | 'none';
+export type SelectionFilterType = 'face' | 'edge' | 'vertex' | 'body' | 'component';
+
 // ---- Store ----
 interface AppState {
   // Active tab
   activeTab: string;
   setActiveTab: (tab: string) => void;
+
+  // Ribbon / Tool state
+  activeRibbonTab: RibbonTab;
+  setActiveRibbonTab: (tab: RibbonTab) => void;
+  activeTool: ActiveTool;
+  setActiveTool: (tool: ActiveTool) => void;
+  selectionFilter: SelectionFilterType;
+  setSelectionFilter: (filter: SelectionFilterType) => void;
+  leftPanelCollapsed: Record<string, boolean>;
+  toggleLeftPanel: (key: string) => void;
+  messages: string[];
+  addMessage: (msg: string) => void;
 
   // CAD
   shapes: Shape[];
@@ -290,6 +307,25 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Active tab
   activeTab: 'cad',
   setActiveTab: (tab) => set({ activeTab: tab }),
+
+  // Ribbon / Tool state
+  activeRibbonTab: 'design',
+  setActiveRibbonTab: (tab) => set({ activeRibbonTab: tab }),
+  activeTool: 'select',
+  setActiveTool: (tool) => set({ activeTool: tool }),
+  selectionFilter: 'face',
+  setSelectionFilter: (filter) => set({ selectionFilter: filter }),
+  leftPanelCollapsed: {},
+  toggleLeftPanel: (key) =>
+    set((s) => ({
+      leftPanelCollapsed: {
+        ...s.leftPanelCollapsed,
+        [key]: !s.leftPanelCollapsed[key],
+      },
+    })),
+  messages: [],
+  addMessage: (msg) =>
+    set((s) => ({ messages: [...s.messages.slice(-99), msg] })),
 
   // CAD
   shapes: [],
