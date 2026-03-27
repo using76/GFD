@@ -259,6 +259,18 @@ const DesignRibbon: React.FC = () => {
           message.success(`Applied shell (thickness=${thickness}) to "${shape.name}".`);
         }
       }} />
+      <RibbonButton icon={<BlockOutlined />} label="Offset" onClick={() => {
+        if (!selectedShapeId) { message.warning('Select a shape to offset.'); return; }
+        const shape = shapes.find((s) => s.id === selectedShapeId);
+        if (!shape) return;
+        const m = makeShape(shape.kind);
+        m.name = `${shape.name}-offset`;
+        m.dimensions = { ...shape.dimensions };
+        m.position = [shape.position[0] + 0.1, shape.position[1] + 0.1, shape.position[2] + 0.1];
+        m.rotation = [...shape.rotation];
+        addShape(m);
+        message.success(`Offset copy of "${shape.name}" created.`);
+      }} />
       <RibbonButton icon={<SwapOutlined />} label="Mirror" onClick={() => {
         if (!selectedShapeId) { message.warning('Select a shape first.'); return; }
         const shape = shapes.find((s) => s.id === selectedShapeId);
@@ -277,6 +289,32 @@ const DesignRibbon: React.FC = () => {
       <RibbonButton icon={<RetweetOutlined />} label="Torus" onClick={() => create('torus')} />
       <RibbonButton icon={<GatewayOutlined />} label="Pipe" onClick={() => create('pipe')} />
       <GroupSep label="Create" />
+
+      {/* Reference Geometry */}
+      <RibbonButton icon={<FieldNumberOutlined />} label="Equation" onClick={() => {
+        message.info('Enter equation surface: e.g. z = sin(x)*cos(y). (Coming soon)');
+      }} />
+      <RibbonButton icon={<BorderInnerOutlined />} label="Plane" onClick={() => {
+        const id = `shape-${nextId++}`;
+        addShape({
+          id, name: 'Ref Plane', kind: 'box',
+          position: [0, 0, 0], rotation: [0, 0, 0],
+          dimensions: { width: 4, height: 0.005, depth: 4, _refHelper: 1 },
+          group: 'body',
+        });
+        message.success('Reference plane created.');
+      }} />
+      <RibbonButton icon={<AimOutlined />} label="Axis" onClick={() => {
+        const id = `shape-${nextId++}`;
+        addShape({
+          id, name: 'Ref Axis', kind: 'cylinder',
+          position: [0, 0, 0], rotation: [0, 0, 0],
+          dimensions: { radius: 0.01, height: 6, _refHelper: 1 },
+          group: 'body',
+        });
+        message.success('Reference axis created.');
+      }} />
+      <GroupSep label="Reference" />
 
       {/* Import */}
       <Upload
@@ -367,9 +405,31 @@ const DisplayRibbon: React.FC = () => {
       <RibbonButton icon={<EyeInvisibleOutlined />} label="Hide" onClick={() => { const sel = useAppStore.getState().selectedShapeId; if (sel) { useAppStore.getState().removeShape(sel); message.info('Shape hidden'); } else { message.warning('Select a shape first'); } }} />
       <GroupSep label="Visibility" />
 
-      <RibbonButton icon={<BgColorsOutlined />} label="Appearance" onClick={() => message.info('Appearance: Change shape color in Properties panel.')} />
-      <RibbonButton icon={<BulbOutlined />} label="Lighting" onClick={() => message.info('Lighting: Adjust in View > Display settings.')} />
-      <RibbonButton icon={<PictureOutlined />} label="Background" onClick={() => message.info('Background: Dark theme active.')} />
+      <RibbonButton icon={<BgColorsOutlined />} label="Appearance" onClick={() => {
+        const sel = useAppStore.getState().selectedShapeId;
+        if (!sel) { message.warning('Select a shape to change its color.'); return; }
+        // Cycle through preset colors for the selected shape
+        const colors = ['#6a6a8a', '#ff6b6b', '#51cf66', '#339af0', '#fcc419', '#cc5de8', '#ff922b'];
+        const shape = useAppStore.getState().shapes.find(s => s.id === sel);
+        if (!shape) return;
+        const currentColor = shape.dimensions._color ?? 0;
+        const nextIdx = ((currentColor as number) + 1) % colors.length;
+        useAppStore.getState().updateShape(sel, { dimensions: { ...shape.dimensions, _color: nextIdx } });
+        message.success(`Color changed to ${colors[nextIdx]}`);
+      }} />
+      <RibbonButton icon={<BulbOutlined />} label="Lighting" onClick={() => {
+        // Toggle between light intensities by dispatching custom event
+        const current = useAppStore.getState().lightingIntensity ?? 1.0;
+        const next = current >= 1.5 ? 0.5 : current + 0.25;
+        useAppStore.getState().setLightingIntensity(next);
+        message.info(`Lighting intensity: ${(next * 100).toFixed(0)}%`);
+      }} />
+      <RibbonButton icon={<PictureOutlined />} label="Background" onClick={() => {
+        const current = useAppStore.getState().backgroundMode ?? 'dark';
+        const next = current === 'dark' ? 'light' : current === 'light' ? 'gradient' : 'dark';
+        useAppStore.getState().setBackgroundMode(next);
+        message.info(`Background: ${next}`);
+      }} />
       <GroupSep label="Style" />
 
       <RibbonButton

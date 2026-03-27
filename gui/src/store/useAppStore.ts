@@ -362,6 +362,16 @@ interface AppState {
   // Context menu
   contextMenu: { x: number; y: number; shapeId: string | null } | null;
   setContextMenu: (menu: { x: number; y: number; shapeId: string | null } | null) => void;
+
+  // Lighting / Background
+  lightingIntensity: number;
+  setLightingIntensity: (v: number) => void;
+  backgroundMode: 'dark' | 'light' | 'gradient';
+  setBackgroundMode: (v: 'dark' | 'light' | 'gradient') => void;
+
+  // MPI core count
+  mpiCores: number;
+  setMpiCores: (v: number) => void;
 }
 
 let solverInterval: ReturnType<typeof setInterval> | null = null;
@@ -876,4 +886,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Context menu
   contextMenu: null,
   setContextMenu: (menu) => set({ contextMenu: menu }),
+
+  // Lighting / Background
+  lightingIntensity: 1.0,
+  setLightingIntensity: (v) => set({ lightingIntensity: v }),
+  backgroundMode: 'dark' as const,
+  setBackgroundMode: (v) => set({ backgroundMode: v }),
+
+  // MPI core count
+  mpiCores: 4,
+  setMpiCores: (v) => set({ mpiCores: v }),
 }));

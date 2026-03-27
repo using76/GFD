@@ -160,19 +160,15 @@ export default function MeshRenderer() {
         </mesh>
       )}
 
-      {/* Wireframe overlay */}
-      {(renderMode === 'wireframe' || renderMode === 'solid') && (
-        <mesh geometry={geometry}>
-          <meshBasicMaterial color="#80a0ff" wireframe transparent opacity={renderMode === 'wireframe' ? 0.8 : 0.3} />
-        </mesh>
-      )}
-
-      {/* Contour mode: subtle wireframe overlay for cell edges */}
-      {renderMode === 'contour' && hasContour && (
-        <mesh geometry={geometry}>
-          <meshBasicMaterial color="#000000" wireframe transparent opacity={0.08} />
-        </mesh>
-      )}
+      {/* Wireframe overlay — always visible as thin lines */}
+      <mesh geometry={geometry}>
+        <meshBasicMaterial
+          color={renderMode === 'contour' ? '#000000' : '#80a0ff'}
+          wireframe
+          transparent
+          opacity={renderMode === 'wireframe' ? 0.8 : renderMode === 'contour' ? 0.08 : 0.2}
+        />
+      </mesh>
     </group>
   );
 }

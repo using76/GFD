@@ -371,9 +371,9 @@ const SectionPlaneClip: React.FC = () => {
     <mesh position={position} rotation={rotation}>
       <planeGeometry args={[10, 10]} />
       <meshBasicMaterial
-        color="#4096ff"
+        color="#ff8c00"
         transparent
-        opacity={0.08}
+        opacity={0.15}
         side={THREE.DoubleSide}
         depthWrite={false}
       />
@@ -507,15 +507,17 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
 
   const isEnclosure = shape.kind === 'enclosure' || shape.isEnclosure;
   const hasFillet = (shape.dimensions.filletRadius ?? 0) > 0;
+  const hasChamfer = (shape.dimensions.chamferSize ?? 0) > 0;
   const isShell = (shape.dimensions.isShell ?? 0) > 0;
 
   const effectiveOpacity = transparencyMode ? 0.3 : 0.85;
   const isWireframe = renderMode === 'wireframe';
 
-  // Fillet visual: use a softer color and slightly different material
+  // Fillet/chamfer visual: use different colors for each
   const filletColor = '#7a8aaa';
+  const chamferColor = '#8a7a6a';
   const normalColor = '#6a6a8a';
-  const baseColor = hasFillet ? filletColor : normalColor;
+  const baseColor = hasFillet ? filletColor : hasChamfer ? chamferColor : normalColor;
 
   return (
     <>
@@ -535,17 +537,17 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
         ) : (
           <meshStandardMaterial
             color={baseColor}
-            emissive={hasFillet ? '#1a2a4a' : '#000000'}
-            emissiveIntensity={hasFillet ? 0.15 : 0}
+            emissive={hasFillet ? '#1a2a4a' : hasChamfer ? '#2a1a0a' : '#000000'}
+            emissiveIntensity={(hasFillet || hasChamfer) ? 0.15 : 0}
             transparent
             opacity={effectiveOpacity}
-            roughness={hasFillet ? 0.3 : 0.5}
-            metalness={hasFillet ? 0.2 : 0}
+            roughness={hasFillet ? 0.3 : hasChamfer ? 0.6 : 0.5}
+            metalness={hasFillet ? 0.2 : hasChamfer ? 0.3 : 0}
           />
         )}
         <Edges
-          color={isEnclosure ? '#52c41a' : isBooleanTool ? '#ff4d4f' : hasFillet ? '#5577aa' : '#444466'}
-          threshold={hasFillet ? 30 : 15}
+          color={isEnclosure ? '#52c41a' : isBooleanTool ? '#ff4d4f' : hasFillet ? '#5577aa' : hasChamfer ? '#aa7744' : '#444466'}
+          threshold={hasFillet ? 30 : hasChamfer ? 10 : 15}
         />
       </mesh>
       {isEnclosure && (

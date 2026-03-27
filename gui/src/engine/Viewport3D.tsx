@@ -8,12 +8,14 @@ import SelectionManager from './SelectionManager';
 import CadScene from './CadScene';
 
 function SceneContent() {
+  const lightingIntensity = useAppStore((s) => s.lightingIntensity);
+
   return (
     <>
       {/* Lighting */}
-      <ambientLight intensity={0.4} />
-      <directionalLight position={[10, 10, 10]} intensity={0.8} castShadow />
-      <directionalLight position={[-5, 5, -5]} intensity={0.3} />
+      <ambientLight intensity={0.4 * lightingIntensity} />
+      <directionalLight position={[10, 10, 10]} intensity={0.8 * lightingIntensity} castShadow />
+      <directionalLight position={[-5, 5, -5]} intensity={0.3 * lightingIntensity} />
 
       {/* Grid */}
       <Grid
@@ -62,8 +64,15 @@ function SceneContent() {
   );
 }
 
+const bgColors: Record<string, string> = {
+  dark: '#0d1117',
+  light: '#e8eaed',
+  gradient: '#1a2332',
+};
+
 export default function Viewport3D() {
   const cameraMode = useAppStore((s) => s.cameraMode);
+  const backgroundMode = useAppStore((s) => s.backgroundMode);
 
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
@@ -74,8 +83,8 @@ export default function Viewport3D() {
             : { near: 0.01, far: 1000, position: [5, 5, 5] }
         }
         orthographic={cameraMode.type === 'orthographic'}
-        style={{ background: '#0d1117' }}
-        gl={{ antialias: true }}
+        style={{ background: bgColors[backgroundMode] ?? '#0d1117' }}
+        gl={{ antialias: true, localClippingEnabled: true }}
       >
         <SceneContent />
       </Canvas>

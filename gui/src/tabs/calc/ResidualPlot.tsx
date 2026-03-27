@@ -14,9 +14,9 @@ import { useAppStore } from '../../store/useAppStore';
 
 const COLORS = {
   continuity: '#1668dc',
-  xMomentum: '#52c41a',
-  yMomentum: '#faad14',
-  energy: '#ff4d4f',
+  xMomentum: '#ff4d4f',
+  yMomentum: '#52c41a',
+  energy: '#fa8c16',
 };
 
 const ResidualPlot: React.FC = () => {
@@ -74,7 +74,7 @@ const ResidualPlot: React.FC = () => {
             />
             <YAxis
               scale="log"
-              domain={['auto', 'auto']}
+              domain={[1e-6, 1]}
               allowDataOverflow
               label={{
                 value: 'Residual',
