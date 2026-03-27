@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Checkbox, Radio, InputNumber, Form } from 'antd';
+import { Checkbox, Radio, InputNumber, Form, Slider } from 'antd';
 import { useAppStore } from '../store/useAppStore';
 
 // ============================================================
@@ -33,9 +33,11 @@ const SelectOptions: React.FC = () => {
 // ============================================================
 const PullOptions: React.FC = () => {
   const [mode, setMode] = useState<'add' | 'cut' | 'nomerge'>('add');
+  const [distance, setDistance] = useState(1.0);
   const [upToSurface, setUpToSurface] = useState(false);
   const [symmetric, setSymmetric] = useState(false);
   const [draftAngle, setDraftAngle] = useState(0);
+  const [directionLock, setDirectionLock] = useState<'none' | 'x' | 'y' | 'z'>('none');
 
   return (
     <div style={{ padding: 10, fontSize: 12 }}>
@@ -49,6 +51,34 @@ const PullOptions: React.FC = () => {
         <Radio value="add" style={{ fontSize: 12 }}>Add</Radio>
         <Radio value="cut" style={{ fontSize: 12 }}>Cut</Radio>
         <Radio value="nomerge" style={{ fontSize: 12 }}>No Merge</Radio>
+      </Radio.Group>
+
+      <Form layout="vertical" size="small" style={{ marginBottom: 8 }}>
+        <Form.Item label="Distance" style={{ marginBottom: 6 }}>
+          <InputNumber
+            value={distance}
+            min={0}
+            max={100}
+            step={0.1}
+            onChange={(v) => setDistance(v ?? 1.0)}
+            style={{ width: '100%' }}
+            addonAfter="m"
+            size="small"
+          />
+        </Form.Item>
+      </Form>
+
+      <div style={{ color: '#889', fontSize: 11, marginBottom: 4, fontWeight: 500 }}>Direction Lock</div>
+      <Radio.Group
+        value={directionLock}
+        onChange={(e) => setDirectionLock(e.target.value)}
+        size="small"
+        style={{ display: 'flex', gap: 8, marginBottom: 8 }}
+      >
+        <Radio value="none" style={{ fontSize: 11 }}>Free</Radio>
+        <Radio value="x" style={{ fontSize: 11, color: '#ff4444' }}>X</Radio>
+        <Radio value="y" style={{ fontSize: 11, color: '#44ff44' }}>Y</Radio>
+        <Radio value="z" style={{ fontSize: 11, color: '#4444ff' }}>Z</Radio>
       </Radio.Group>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -84,11 +114,13 @@ const PullOptions: React.FC = () => {
 const MoveOptions: React.FC = () => {
   const [copy, setCopy] = useState(false);
   const [snapToGrid, setSnapToGrid] = useState(true);
+  const [moveDistance, setMoveDistance] = useState(1.0);
+  const [moveAngle, setMoveAngle] = useState(0);
 
   return (
     <div style={{ padding: 10, fontSize: 12 }}>
       <div style={{ color: '#889', fontSize: 11, marginBottom: 6, fontWeight: 500 }}>Move Options</div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
         <Checkbox checked={copy} onChange={(e) => setCopy(e.target.checked)} style={{ fontSize: 12 }}>
           Copy
         </Checkbox>
@@ -96,6 +128,33 @@ const MoveOptions: React.FC = () => {
           Snap to grid
         </Checkbox>
       </div>
+
+      <Form layout="vertical" size="small">
+        <Form.Item label="Distance" style={{ marginBottom: 6 }}>
+          <InputNumber
+            value={moveDistance}
+            min={0}
+            max={100}
+            step={0.1}
+            onChange={(v) => setMoveDistance(v ?? 1.0)}
+            style={{ width: '100%' }}
+            addonAfter="m"
+            size="small"
+          />
+        </Form.Item>
+        <Form.Item label="Rotation angle" style={{ marginBottom: 0 }}>
+          <InputNumber
+            value={moveAngle}
+            min={-360}
+            max={360}
+            step={15}
+            onChange={(v) => setMoveAngle(v ?? 0)}
+            style={{ width: '100%' }}
+            addonAfter="deg"
+            size="small"
+          />
+        </Form.Item>
+      </Form>
     </div>
   );
 };
@@ -104,7 +163,8 @@ const MoveOptions: React.FC = () => {
 // Fill Tool Options
 // ============================================================
 const FillOptions: React.FC = () => {
-  const [fillMode, setFillMode] = useState('delete_fill');
+  const [fillMode, setFillMode] = useState<'auto' | 'manual'>('auto');
+  const [detectBoundary, setDetectBoundary] = useState(true);
 
   return (
     <div style={{ padding: 10, fontSize: 12 }}>
@@ -113,12 +173,28 @@ const FillOptions: React.FC = () => {
         value={fillMode}
         onChange={(e) => setFillMode(e.target.value)}
         size="small"
-        style={{ display: 'flex', flexDirection: 'column', gap: 4 }}
+        style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 10 }}
       >
-        <Radio value="delete_fill" style={{ fontSize: 12 }}>Delete and Fill</Radio>
-        <Radio value="delete_patch" style={{ fontSize: 12 }}>Delete and Patch</Radio>
-        <Radio value="smooth" style={{ fontSize: 12 }}>Smooth</Radio>
+        <Radio value="auto" style={{ fontSize: 12 }}>Auto</Radio>
+        <Radio value="manual" style={{ fontSize: 12 }}>Manual</Radio>
       </Radio.Group>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <Checkbox checked={detectBoundary} onChange={(e) => setDetectBoundary(e.target.checked)} style={{ fontSize: 12 }}>
+          Boundary detection
+        </Checkbox>
+      </div>
+
+      {fillMode === 'auto' && (
+        <div style={{ marginTop: 8, padding: 6, background: '#1a1a30', borderRadius: 4, color: '#667', fontSize: 11 }}>
+          Auto mode: automatically detects and fills holes and gaps based on surrounding geometry.
+        </div>
+      )}
+      {fillMode === 'manual' && (
+        <div style={{ marginTop: 8, padding: 6, background: '#1a1a30', borderRadius: 4, color: '#667', fontSize: 11 }}>
+          Manual mode: select edges to define the fill boundary, then confirm.
+        </div>
+      )}
     </div>
   );
 };
@@ -126,30 +202,105 @@ const FillOptions: React.FC = () => {
 // ============================================================
 // Measure Tool Options
 // ============================================================
-const MeasureOptions: React.FC = () => (
-  <div style={{ padding: 10, fontSize: 12 }}>
-    <div style={{ color: '#889', fontSize: 11, marginBottom: 6, fontWeight: 500 }}>Measure Mode</div>
-    <Radio.Group defaultValue="distance" size="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <Radio value="distance" style={{ fontSize: 12 }}>Distance</Radio>
-      <Radio value="angle" style={{ fontSize: 12 }}>Angle</Radio>
-      <Radio value="area" style={{ fontSize: 12 }}>Area</Radio>
-    </Radio.Group>
-  </div>
-);
+const MeasureOptions: React.FC = () => {
+  const measureMode = useAppStore((s) => s.measureMode);
+  const setMeasureMode = useAppStore((s) => s.setMeasureMode);
+  const measureLabels = useAppStore((s) => s.measureLabels);
+  const clearMeasureLabels = useAppStore((s) => s.clearMeasureLabels);
+
+  return (
+    <div style={{ padding: 10, fontSize: 12 }}>
+      <div style={{ color: '#889', fontSize: 11, marginBottom: 6, fontWeight: 500 }}>Measure Mode</div>
+      <Radio.Group
+        value={measureMode ?? 'distance'}
+        onChange={(e) => setMeasureMode(e.target.value)}
+        size="small"
+        style={{ display: 'flex', flexDirection: 'column', gap: 4 }}
+      >
+        <Radio value="distance" style={{ fontSize: 12 }}>Distance</Radio>
+        <Radio value="angle" style={{ fontSize: 12 }}>Angle</Radio>
+        <Radio value="area" style={{ fontSize: 12 }}>Area</Radio>
+      </Radio.Group>
+
+      {measureLabels.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ color: '#889', fontSize: 11, marginBottom: 4, fontWeight: 500 }}>
+            Results ({measureLabels.length})
+          </div>
+          <div style={{ maxHeight: 120, overflow: 'auto' }}>
+            {measureLabels.map((label) => (
+              <div key={label.id} style={{ padding: '2px 4px', color: '#aab', fontSize: 11, borderBottom: '1px solid #252540' }}>
+                {label.text}
+              </div>
+            ))}
+          </div>
+          <div
+            onClick={clearMeasureLabels}
+            style={{ marginTop: 4, color: '#4096ff', fontSize: 11, cursor: 'pointer' }}
+          >
+            Clear all
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
 // ============================================================
 // Section Tool Options
 // ============================================================
-const SectionOptions: React.FC = () => (
-  <div style={{ padding: 10, fontSize: 12 }}>
-    <div style={{ color: '#889', fontSize: 11, marginBottom: 6, fontWeight: 500 }}>Section Plane</div>
-    <Radio.Group defaultValue="xy" size="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <Radio value="xy" style={{ fontSize: 12 }}>XY Plane</Radio>
-      <Radio value="xz" style={{ fontSize: 12 }}>XZ Plane</Radio>
-      <Radio value="yz" style={{ fontSize: 12 }}>YZ Plane</Radio>
-    </Radio.Group>
-  </div>
-);
+const SectionOptions: React.FC = () => {
+  const sectionPlane = useAppStore((s) => s.sectionPlane);
+  const setSectionPlane = useAppStore((s) => s.setSectionPlane);
+
+  const setNormal = (axis: 'xy' | 'xz' | 'yz') => {
+    const normals: Record<string, [number, number, number]> = {
+      xy: [0, 0, 1],
+      xz: [0, 1, 0],
+      yz: [1, 0, 0],
+    };
+    setSectionPlane({ normal: normals[axis], enabled: true });
+  };
+
+  return (
+    <div style={{ padding: 10, fontSize: 12 }}>
+      <div style={{ color: '#889', fontSize: 11, marginBottom: 6, fontWeight: 500 }}>Section Plane</div>
+      <Checkbox
+        checked={sectionPlane.enabled}
+        onChange={(e) => setSectionPlane({ enabled: e.target.checked })}
+        style={{ fontSize: 12, marginBottom: 8 }}
+      >
+        Enable section view
+      </Checkbox>
+
+      <Radio.Group
+        value={
+          sectionPlane.normal[2] === 1 ? 'xy' :
+          sectionPlane.normal[0] === 1 ? 'yz' : 'xz'
+        }
+        onChange={(e) => setNormal(e.target.value)}
+        size="small"
+        style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8 }}
+      >
+        <Radio value="xy" style={{ fontSize: 12 }}>XY Plane</Radio>
+        <Radio value="xz" style={{ fontSize: 12 }}>XZ Plane</Radio>
+        <Radio value="yz" style={{ fontSize: 12 }}>YZ Plane</Radio>
+      </Radio.Group>
+
+      <Form layout="vertical" size="small">
+        <Form.Item label="Offset" style={{ marginBottom: 0 }}>
+          <Slider
+            min={-5}
+            max={5}
+            step={0.1}
+            value={sectionPlane.offset}
+            onChange={(v) => setSectionPlane({ offset: v })}
+          />
+        </Form.Item>
+      </Form>
+    </div>
+  );
+};
 
 // ============================================================
 // No Tool Selected

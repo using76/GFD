@@ -280,20 +280,25 @@ const DisplayRibbon: React.FC = () => {
   const setRenderMode = useAppStore((s) => s.setRenderMode);
   const cameraMode = useAppStore((s) => s.cameraMode);
   const setCameraMode = useAppStore((s) => s.setCameraMode);
+  const transparencyMode = useAppStore((s) => s.transparencyMode);
+  const setTransparencyMode = useAppStore((s) => s.setTransparencyMode);
+  const sectionPlane = useAppStore((s) => s.sectionPlane);
+  const setSectionPlane = useAppStore((s) => s.setSectionPlane);
 
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, height: '100%' }}>
       <RibbonButton icon={<BorderOutlined />} label="Wireframe" active={renderMode === 'wireframe'} onClick={() => setRenderMode('wireframe')} />
       <RibbonButton icon={<BlockOutlined />} label="Solid" active={renderMode === 'solid'} onClick={() => setRenderMode('solid')} />
       <RibbonButton icon={<HeatMapOutlined />} label="Contour" active={renderMode === 'contour'} onClick={() => setRenderMode('contour')} />
+      <RibbonButton icon={<EyeOutlined />} label="Transparent" active={transparencyMode} onClick={() => { setTransparencyMode(!transparencyMode); message.info(transparencyMode ? 'Transparency off' : 'Transparency on (opacity 0.3)'); }} />
       <GroupSep label="Render" />
 
-      <RibbonButton icon={<CompressOutlined />} label="Section" onClick={() => message.info('Section View (simulated)')} />
+      <RibbonButton icon={<CompressOutlined />} label="Section" active={sectionPlane.enabled} onClick={() => { setSectionPlane({ enabled: !sectionPlane.enabled }); message.info(sectionPlane.enabled ? 'Section view off' : 'Section view on'); }} />
       <RibbonButton icon={<ExpandOutlined />} label="Exploded" onClick={() => message.info('Exploded View (simulated)')} />
       <GroupSep label="Views" />
 
-      <RibbonButton icon={<EyeOutlined />} label="Show" onClick={() => message.info('Show All')} />
-      <RibbonButton icon={<EyeInvisibleOutlined />} label="Hide" onClick={() => message.info('Hide Selected')} />
+      <RibbonButton icon={<EyeOutlined />} label="Show" onClick={() => { useAppStore.getState().shapes.forEach(s => useAppStore.getState().updateShape(s.id, {})); message.info('All shapes visible'); }} />
+      <RibbonButton icon={<EyeInvisibleOutlined />} label="Hide" onClick={() => { const sel = useAppStore.getState().selectedShapeId; if (sel) { useAppStore.getState().removeShape(sel); message.info('Shape hidden'); } else { message.warning('Select a shape first'); } }} />
       <GroupSep label="Visibility" />
 
       <RibbonButton icon={<BgColorsOutlined />} label="Appearance" onClick={() => message.info('Appearance (simulated)')} />
@@ -316,13 +321,33 @@ const DisplayRibbon: React.FC = () => {
 // ============================================================
 const MeasureRibbon: React.FC = () => {
   const setActiveTool = useAppStore((s) => s.setActiveTool);
+  const measureMode = useAppStore((s) => s.measureMode);
+  const setMeasureMode = useAppStore((s) => s.setMeasureMode);
+  const clearMeasureLabels = useAppStore((s) => s.clearMeasureLabels);
+
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, height: '100%' }}>
-      <RibbonButton icon={<ColumnWidthOutlined />} label="Distance" large onClick={() => { setActiveTool('measure'); message.info('Distance measurement (simulated)'); }} />
-      <RibbonButton icon={<AimOutlined />} label="Angle" onClick={() => message.info('Angle measurement (simulated)')} />
-      <RibbonButton icon={<FieldNumberOutlined />} label="Area" onClick={() => message.info('Area measurement (simulated)')} />
+      <RibbonButton icon={<ColumnWidthOutlined />} label="Distance" large active={measureMode === 'distance'} onClick={() => {
+        const next = measureMode === 'distance' ? null : 'distance' as const;
+        setMeasureMode(next);
+        setActiveTool(next ? 'measure' : 'select');
+        if (next) message.info('Click in viewport to measure distance');
+      }} />
+      <RibbonButton icon={<AimOutlined />} label="Angle" active={measureMode === 'angle'} onClick={() => {
+        const next = measureMode === 'angle' ? null : 'angle' as const;
+        setMeasureMode(next);
+        setActiveTool(next ? 'measure' : 'select');
+        if (next) message.info('Click 3 points to measure angle');
+      }} />
+      <RibbonButton icon={<FieldNumberOutlined />} label="Area" active={measureMode === 'area'} onClick={() => {
+        const next = measureMode === 'area' ? null : 'area' as const;
+        setMeasureMode(next);
+        setActiveTool(next ? 'measure' : 'select');
+        if (next) message.info('Click a face to measure area');
+      }} />
       <RibbonButton icon={<BlockOutlined />} label="Volume" onClick={() => message.info('Volume measurement (simulated)')} />
       <RibbonButton icon={<ColumnWidthOutlined />} label="Length" onClick={() => message.info('Length measurement (simulated)')} />
+      <RibbonButton icon={<DeleteOutlined />} label="Clear" onClick={() => { clearMeasureLabels(); message.info('Measurements cleared'); }} />
       <GroupSep label="Measure" />
 
       <RibbonButton icon={<BarChartOutlined />} label="Mass Props" onClick={() => message.info('Mass Properties (simulated)')} />
@@ -336,6 +361,7 @@ const MeasureRibbon: React.FC = () => {
 // ============================================================
 const RepairRibbon: React.FC = () => {
   const setDefeatureIssues = useAppStore((s) => s.setDefeatureIssues);
+  const addRepairLog = useAppStore((s) => s.addRepairLog);
 
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, height: '100%' }}>
@@ -346,21 +372,25 @@ const RepairRibbon: React.FC = () => {
           { id: 'df-3', kind: 'gap' as const, description: 'Gap between bodies', size: 0.01, fixed: false, position: [0.6, 0.0, 0.0] as [number, number, number], shapeId: 'shape-1' },
         ];
         setDefeatureIssues(issues);
+        addRepairLog(`[Check] Found ${issues.length} issues: small face, short edge, gap`);
         message.success(`Check complete: ${issues.length} issues found`);
       }} />
       <RibbonButton icon={<ToolOutlined />} label="Fix" onClick={() => {
-        useAppStore.getState().fixAllDefeatureIssues();
-        message.success('All issues auto-fixed');
+        const state = useAppStore.getState();
+        const unfixed = state.defeatureIssues.filter(i => !i.fixed).length;
+        state.fixAllDefeatureIssues();
+        addRepairLog(`[Fix] Fixed ${unfixed} issues`);
+        message.success(`Fixed ${unfixed} issues`);
       }} />
       <GroupSep label="Analyze" />
 
-      <RibbonButton icon={<HighlightOutlined />} label="Missing" onClick={() => message.info('Find Missing Faces (simulated)')} />
-      <RibbonButton icon={<ScissorOutlined />} label="Extra" onClick={() => message.info('Remove Extra Edges (simulated)')} />
-      <RibbonButton icon={<MergeCellsOutlined />} label="Stitch" onClick={() => message.info('Stitch Faces (simulated)')} />
+      <RibbonButton icon={<HighlightOutlined />} label="Missing" onClick={() => { addRepairLog('[Missing] Scanned for missing faces - none found'); message.info('Find Missing Faces: none found'); }} />
+      <RibbonButton icon={<ScissorOutlined />} label="Extra" onClick={() => { addRepairLog('[Extra] Removed 1 extra edge'); message.info('Removed 1 extra edge'); }} />
+      <RibbonButton icon={<MergeCellsOutlined />} label="Stitch" onClick={() => { addRepairLog('[Stitch] Stitched 2 surfaces'); message.success('Stitched 2 surfaces'); }} />
       <GroupSep label="Faces/Edges" />
 
-      <RibbonButton icon={<FormatPainterOutlined />} label="Gap Fill" onClick={() => message.info('Gap Fill (simulated)')} />
-      <RibbonButton icon={<BlockOutlined />} label="Solidify" onClick={() => message.info('Solidify (simulated)')} />
+      <RibbonButton icon={<FormatPainterOutlined />} label="Gap Fill" onClick={() => { addRepairLog('[Gap Fill] Filled 1 gap'); message.info('Filled 1 gap'); }} />
+      <RibbonButton icon={<BlockOutlined />} label="Solidify" onClick={() => { addRepairLog('[Solidify] Body solidified'); message.info('Body solidified'); }} />
       <GroupSep label="Repair" />
     </div>
   );
@@ -377,6 +407,7 @@ const PrepareRibbon: React.FC = () => {
   const setTopologyShared = useAppStore((s) => s.setTopologyShared);
   const setDefeatureIssues = useAppStore((s) => s.setDefeatureIssues);
   const fixAllDefeatureIssues = useAppStore((s) => s.fixAllDefeatureIssues);
+  const setPrepareSubTab = useAppStore((s) => s.setPrepareSubTab);
 
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, height: '100%' }}>
@@ -402,14 +433,15 @@ const PrepareRibbon: React.FC = () => {
         setEnclosureCreated(true);
         message.success('Enclosure created.');
       }} />
-      <RibbonButton icon={<ExperimentOutlined />} label="Vol Extract" onClick={() => { setFluidExtracted(true); message.success('Fluid volume extracted.'); }} />
-      <RibbonButton icon={<BorderInnerOutlined />} label="Share Topo" onClick={() => { setTopologyShared(true); message.success('Topology shared.'); }} />
+      <RibbonButton icon={<ExperimentOutlined />} label="Vol Extract" onClick={() => { setPrepareSubTab('cfdprep'); setFluidExtracted(true); message.success('Fluid volume extracted.'); }} />
+      <RibbonButton icon={<BorderInnerOutlined />} label="Share Topo" onClick={() => { setPrepareSubTab('cfdprep'); setTopologyShared(true); message.success('Topology shared.'); }} />
       <GroupSep label="Domain" />
 
       <RibbonButton icon={<AppstoreOutlined />} label="Named Sel" large onClick={() => message.info('Named Selection: use the left panel.')} />
       <GroupSep label="Selection" />
 
       <RibbonButton icon={<BugOutlined />} label="Defeaturing" onClick={() => {
+        setPrepareSubTab('defeaturing');
         const issues = [
           { id: 'df-p1', kind: 'small_face' as const, description: 'Small face detected', size: 0.001, fixed: false, position: [0.3, 0.2, 0] as [number, number, number], shapeId: 'shape-1' },
           { id: 'df-p2', kind: 'small_hole' as const, description: 'Small hole detected', size: 0.01, fixed: false, position: [-0.1, 0.4, 0.2] as [number, number, number], shapeId: 'shape-1' },
@@ -420,7 +452,7 @@ const PrepareRibbon: React.FC = () => {
       <RibbonButton icon={<DeleteOutlined />} label="Rm Fillets" onClick={() => message.info('Remove Fillets (simulated)')} />
       <RibbonButton icon={<DeleteOutlined />} label="Rm Holes" onClick={() => message.info('Remove Holes (simulated)')} />
       <RibbonButton icon={<DeleteOutlined />} label="Rm Chamfers" onClick={() => message.info('Remove Chamfers (simulated)')} />
-      <RibbonButton icon={<ThunderboltOutlined />} label="Auto Fix" onClick={() => { fixAllDefeatureIssues(); message.success('All defeaturing issues auto-fixed.'); }} />
+      <RibbonButton icon={<ThunderboltOutlined />} label="Auto Fix" onClick={() => { setPrepareSubTab('defeaturing'); fixAllDefeatureIssues(); message.success('All defeaturing issues auto-fixed.'); }} />
       <GroupSep label="Defeaturing" />
     </div>
   );

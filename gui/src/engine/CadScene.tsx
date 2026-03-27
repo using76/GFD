@@ -1,6 +1,6 @@
-import React, { useState, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { Edges, TransformControls } from '@react-three/drei';
-import { useFrame } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import { useAppStore } from '../store/useAppStore';
 import type { Shape, DefeatureIssue, DefeatureIssueKind, NamedSelection } from '../store/useAppStore';
 import * as THREE from 'three';
@@ -293,6 +293,65 @@ const NamedSelectionOverlays: React.FC = () => {
 };
 
 // ============================================================
+// Section Plane Clipping
+// ============================================================
+
+/** Applies a global clipping plane when section view is enabled */
+const SectionPlaneClip: React.FC = () => {
+  const sectionPlane = useAppStore((s) => s.sectionPlane);
+  const { gl } = useThree();
+
+  useEffect(() => {
+    if (sectionPlane.enabled) {
+      const normal = new THREE.Vector3(...sectionPlane.normal);
+      const plane = new THREE.Plane(normal, -sectionPlane.offset);
+      gl.clippingPlanes = [plane];
+      gl.localClippingEnabled = true;
+    } else {
+      gl.clippingPlanes = [];
+      gl.localClippingEnabled = false;
+    }
+    return () => {
+      gl.clippingPlanes = [];
+      gl.localClippingEnabled = false;
+    };
+  }, [sectionPlane.enabled, sectionPlane.normal, sectionPlane.offset, gl]);
+
+  if (!sectionPlane.enabled) return null;
+
+  // Visual indicator: a semi-transparent plane
+  const rotation = useMemo(() => {
+    const up = new THREE.Vector3(0, 0, 1);
+    const normal = new THREE.Vector3(...sectionPlane.normal);
+    const quat = new THREE.Quaternion().setFromUnitVectors(up, normal);
+    const euler = new THREE.Euler().setFromQuaternion(quat);
+    return [euler.x, euler.y, euler.z] as [number, number, number];
+  }, [sectionPlane.normal]);
+
+  const position = useMemo(() => {
+    const n = sectionPlane.normal;
+    return [
+      n[0] * sectionPlane.offset,
+      n[1] * sectionPlane.offset,
+      n[2] * sectionPlane.offset,
+    ] as [number, number, number];
+  }, [sectionPlane.normal, sectionPlane.offset]);
+
+  return (
+    <mesh position={position} rotation={rotation}>
+      <planeGeometry args={[10, 10]} />
+      <meshBasicMaterial
+        color="#4096ff"
+        transparent
+        opacity={0.08}
+        side={THREE.DoubleSide}
+        depthWrite={false}
+      />
+    </mesh>
+  );
+};
+
+// ============================================================
 // Shape rendering
 // ============================================================
 
@@ -304,6 +363,8 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean }> = ({
   const cadMode = useAppStore((s) => s.cadMode);
   const pendingBooleanOp = useAppStore((s) => s.pendingBooleanOp);
   const pendingBooleanTargetId = useAppStore((s) => s.pendingBooleanTargetId);
+  const transparencyMode = useAppStore((s) => s.transparencyMode);
+  const renderMode = useAppStore((s) => s.renderMode);
 
   const handleClick = useCallback(
     (e: any) => {
@@ -353,6 +414,9 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean }> = ({
 
   const isEnclosure = shape.kind === 'enclosure' || shape.isEnclosure;
 
+  const effectiveOpacity = transparencyMode ? 0.3 : 0.85;
+  const isWireframe = renderMode === 'wireframe';
+
   return (
     <>
       <mesh position={shape.position} rotation={rotation} onClick={handleClick}>
@@ -361,13 +425,20 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean }> = ({
           <BooleanGhostMaterial />
         ) : isEnclosure ? (
           <EnclosureMaterial isSelected={false} />
+        ) : isWireframe ? (
+          <meshBasicMaterial
+            color="#6a6a8a"
+            wireframe
+            transparent
+            opacity={0.6}
+          />
         ) : (
           <meshStandardMaterial
             color="#6a6a8a"
             emissive="#000000"
             emissiveIntensity={0}
             transparent
-            opacity={0.85}
+            opacity={effectiveOpacity}
           />
         )}
         <Edges
@@ -391,6 +462,8 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean }> = ({
 const SelectedShapeWithTransform: React.FC<{ shape: Shape }> = ({ shape }) => {
   const updateShape = useAppStore((s) => s.updateShape);
   const selectShape = useAppStore((s) => s.selectShape);
+  const transparencyMode = useAppStore((s) => s.transparencyMode);
+  const renderMode = useAppStore((s) => s.renderMode);
   const [meshNode, setMeshNode] = useState<THREE.Mesh | null>(null);
 
   const meshCallback = useCallback((node: THREE.Mesh | null) => {
@@ -426,13 +499,20 @@ const SelectedShapeWithTransform: React.FC<{ shape: Shape }> = ({ shape }) => {
         {makeGeometry(shape)}
         {isEnclosure ? (
           <EnclosureMaterial isSelected={true} />
+        ) : renderMode === 'wireframe' ? (
+          <meshBasicMaterial
+            color="#4096ff"
+            wireframe
+            transparent
+            opacity={0.7}
+          />
         ) : (
           <meshStandardMaterial
             color="#4096ff"
             emissive="#1668dc"
             emissiveIntensity={0.3}
             transparent
-            opacity={0.85}
+            opacity={transparencyMode ? 0.3 : 0.85}
           />
         )}
         <Edges color={isEnclosure ? '#69d42a' : '#60a0ff'} threshold={15} />

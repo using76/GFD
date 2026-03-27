@@ -178,6 +178,22 @@ export interface SelectedEntity {
   id: number;
 }
 
+// ---- Section Plane ----
+export interface SectionPlane {
+  enabled: boolean;
+  normal: [number, number, number];
+  offset: number;
+}
+
+// ---- Measure types ----
+export type MeasureMode = 'distance' | 'angle' | 'area' | null;
+
+export interface MeasureLabel {
+  id: string;
+  text: string;
+  position: [number, number, number];
+}
+
 // ---- Ribbon / Tool types ----
 export type RibbonTab = 'design' | 'display' | 'measure' | 'repair' | 'prepare' | 'mesh' | 'setup' | 'calc' | 'results';
 export type ActiveTool = 'select' | 'pull' | 'move' | 'fill' | 'measure' | 'section' | 'none';
@@ -299,6 +315,38 @@ interface AppState {
   setSelectedEntity: (entity: SelectedEntity | null) => void;
   gpuAvailable: boolean;
   setGpuAvailable: (available: boolean) => void;
+
+  // Transparency mode
+  transparencyMode: boolean;
+  setTransparencyMode: (v: boolean) => void;
+
+  // Section Plane
+  sectionPlane: SectionPlane;
+  setSectionPlane: (patch: Partial<SectionPlane>) => void;
+
+  // Measure
+  measureMode: MeasureMode;
+  setMeasureMode: (mode: MeasureMode) => void;
+  measureLabels: MeasureLabel[];
+  addMeasureLabel: (label: MeasureLabel) => void;
+  clearMeasureLabels: () => void;
+
+  // Repair log
+  repairLog: string[];
+  addRepairLog: (msg: string) => void;
+  clearRepairLog: () => void;
+
+  // Clipboard (copy/paste)
+  clipboardShapeId: string | null;
+  setClipboardShapeId: (id: string | null) => void;
+
+  // Prepare sub-tab
+  prepareSubTab: 'defeaturing' | 'cfdprep';
+  setPrepareSubTab: (tab: 'defeaturing' | 'cfdprep') => void;
+
+  // Context menu
+  contextMenu: { x: number; y: number; shapeId: string | null } | null;
+  setContextMenu: (menu: { x: number; y: number; shapeId: string | null } | null) => void;
 }
 
 let solverInterval: ReturnType<typeof setInterval> | null = null;
@@ -709,4 +757,39 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSelectedEntity: (entity) => set({ selectedEntity: entity }),
   gpuAvailable: false,
   setGpuAvailable: (available) => set({ gpuAvailable: available }),
+
+  // Transparency mode
+  transparencyMode: false,
+  setTransparencyMode: (v) => set({ transparencyMode: v }),
+
+  // Section Plane
+  sectionPlane: { enabled: false, normal: [0, 1, 0], offset: 0 },
+  setSectionPlane: (patch) =>
+    set((s) => ({ sectionPlane: { ...s.sectionPlane, ...patch } })),
+
+  // Measure
+  measureMode: null,
+  setMeasureMode: (mode) => set({ measureMode: mode }),
+  measureLabels: [],
+  addMeasureLabel: (label) =>
+    set((s) => ({ measureLabels: [...s.measureLabels, label] })),
+  clearMeasureLabels: () => set({ measureLabels: [] }),
+
+  // Repair log
+  repairLog: [],
+  addRepairLog: (msg) =>
+    set((s) => ({ repairLog: [...s.repairLog, msg] })),
+  clearRepairLog: () => set({ repairLog: [] }),
+
+  // Clipboard
+  clipboardShapeId: null,
+  setClipboardShapeId: (id) => set({ clipboardShapeId: id }),
+
+  // Prepare sub-tab
+  prepareSubTab: 'defeaturing',
+  setPrepareSubTab: (tab) => set({ prepareSubTab: tab }),
+
+  // Context menu
+  contextMenu: null,
+  setContextMenu: (menu) => set({ contextMenu: menu }),
 }));
