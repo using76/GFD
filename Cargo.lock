@@ -197,6 +197,7 @@ dependencies = [
  "gfd-linalg",
  "gfd-material",
  "gfd-matrix",
+ "gfd-mesh",
  "gfd-parallel",
  "gfd-postprocess",
  "gfd-solid",

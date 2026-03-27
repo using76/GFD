@@ -20,3 +20,5 @@ results/
 *.vdb
 *.vtu
 *.vtk
+gui/node_modules
+gui/dist

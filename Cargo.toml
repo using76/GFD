@@ -36,6 +36,10 @@ path = "src/main.rs"
 name = "gfd-benchmark"
 path = "benches/gfd_benchmark.rs"
 
+[[bin]]
+name = "gfd-server"
+path = "src/server.rs"
+
 [features]
 default = []
 gpu = ["gfd-gpu/cuda"]
@@ -79,6 +83,7 @@ gfd-discretize  = { path = "crates/gfd-discretize" }
 gfd-boundary    = { path = "crates/gfd-boundary" }
 gfd-material    = { path = "crates/gfd-material" }
 gfd-postprocess = { path = "crates/gfd-postprocess" }
+gfd-mesh        = { path = "crates/gfd-mesh" }
 gfd-gpu         = { path = "crates/gfd-gpu", optional = true }
 
 # External (from workspace)

@@ -1,0 +1,81 @@
+import React, { useState } from 'react';
+import {
+  HeatMapOutlined,
+  ArrowsAltOutlined,
+  SwapOutlined,
+  FileTextOutlined,
+} from '@ant-design/icons';
+import SplitLayout from '../components/SplitLayout';
+import OutlineTree from '../components/OutlineTree';
+import type { TreeItem } from '../components/OutlineTree';
+import ContourSettings from './results/ContourSettings';
+import VectorSettings from './results/VectorSettings';
+import ReportPanel from './results/ReportPanel';
+
+interface ResultsTabProps {
+  viewport: React.ReactNode;
+}
+
+type ResultsSection = 'contours' | 'vectors' | 'streamlines' | 'reports';
+
+const treeItems: TreeItem[] = [
+  {
+    key: 'display',
+    title: 'Display',
+    children: [
+      { key: 'contours', title: 'Contours', icon: <HeatMapOutlined />, isLeaf: true },
+      { key: 'vectors', title: 'Vectors', icon: <ArrowsAltOutlined />, isLeaf: true },
+      { key: 'streamlines', title: 'Streamlines', icon: <SwapOutlined />, isLeaf: true },
+    ],
+  },
+  {
+    key: 'reports',
+    title: 'Reports',
+    icon: <FileTextOutlined />,
+    isLeaf: true,
+  },
+];
+
+const panelMap: Record<ResultsSection, React.ReactNode> = {
+  contours: <ContourSettings />,
+  vectors: <VectorSettings />,
+  streamlines: (
+    <div style={{ padding: 16, color: '#888' }}>
+      Streamline settings will be available in a future release.
+    </div>
+  ),
+  reports: <ReportPanel />,
+};
+
+const ResultsTab: React.FC<ResultsTabProps> = ({ viewport }) => {
+  const [section, setSection] = useState<ResultsSection>('contours');
+
+  const leftPanel = (
+    <div>
+      <div
+        style={{
+          padding: '8px 12px',
+          fontWeight: 600,
+          borderBottom: '1px solid #303030',
+        }}
+      >
+        Results
+      </div>
+      <OutlineTree
+        items={treeItems}
+        selectedKey={section}
+        onSelect={(key) => setSection(key as ResultsSection)}
+      />
+    </div>
+  );
+
+  return (
+    <SplitLayout
+      left={leftPanel}
+      center={viewport}
+      right={panelMap[section] ?? <div />}
+    />
+  );
+};
+
+export default ResultsTab;
