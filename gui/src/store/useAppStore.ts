@@ -181,6 +181,7 @@ export interface SelectedEntity {
 // ---- Section Plane ----
 export interface SectionPlane {
   enabled: boolean;
+  axis: 'x' | 'y' | 'z';
   normal: [number, number, number];
   offset: number;
 }
@@ -337,12 +338,24 @@ interface AppState {
   clearRepairLog: () => void;
 
   // Clipboard (copy/paste)
+  clipboardShape: Shape | null;
+  setClipboardShape: (shape: Shape | null) => void;
   clipboardShapeId: string | null;
   setClipboardShapeId: (id: string | null) => void;
 
   // Prepare sub-tab
   prepareSubTab: 'defeaturing' | 'cfdprep';
   setPrepareSubTab: (tab: 'defeaturing' | 'cfdprep') => void;
+
+  // Exploded view
+  exploded: boolean;
+  setExploded: (v: boolean) => void;
+  explodeFactor: number;
+  setExplodeFactor: (v: number) => void;
+
+  // Selection mode (face/edge/vertex/body)
+  selectionMode: 'face' | 'edge' | 'vertex' | 'body';
+  setSelectionMode: (mode: 'face' | 'edge' | 'vertex' | 'body') => void;
 
   // Context menu
   contextMenu: { x: number; y: number; shapeId: string | null } | null;
@@ -763,7 +776,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setTransparencyMode: (v) => set({ transparencyMode: v }),
 
   // Section Plane
-  sectionPlane: { enabled: false, normal: [0, 1, 0], offset: 0 },
+  sectionPlane: { enabled: false, axis: 'y' as const, normal: [0, 1, 0], offset: 0 },
   setSectionPlane: (patch) =>
     set((s) => ({ sectionPlane: { ...s.sectionPlane, ...patch } })),
 
@@ -782,12 +795,24 @@ export const useAppStore = create<AppState>((set, get) => ({
   clearRepairLog: () => set({ repairLog: [] }),
 
   // Clipboard
+  clipboardShape: null,
+  setClipboardShape: (shape) => set({ clipboardShape: shape }),
   clipboardShapeId: null,
   setClipboardShapeId: (id) => set({ clipboardShapeId: id }),
 
   // Prepare sub-tab
   prepareSubTab: 'defeaturing',
   setPrepareSubTab: (tab) => set({ prepareSubTab: tab }),
+
+  // Exploded view
+  exploded: false,
+  setExploded: (v) => set({ exploded: v }),
+  explodeFactor: 1.5,
+  setExplodeFactor: (v) => set({ explodeFactor: v }),
+
+  // Selection mode
+  selectionMode: 'face' as const,
+  setSelectionMode: (mode) => set({ selectionMode: mode }),
 
   // Context menu
   contextMenu: null,

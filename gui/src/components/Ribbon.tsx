@@ -139,12 +139,15 @@ function makeShape(kind: ShapeKind) {
 // ============================================================
 const DesignRibbon: React.FC = () => {
   const addShape = useAppStore((s) => s.addShape);
+  const updateShape = useAppStore((s) => s.updateShape);
   const shapes = useAppStore((s) => s.shapes);
   const selectedShapeId = useAppStore((s) => s.selectedShapeId);
   const setCadMode = useAppStore((s) => s.setCadMode);
   const setPendingBooleanOp = useAppStore((s) => s.setPendingBooleanOp);
   const activeTool = useAppStore((s) => s.activeTool);
   const setActiveTool = useAppStore((s) => s.setActiveTool);
+  const clipboardShape = useAppStore((s) => s.clipboardShape);
+  const setClipboardShape = useAppStore((s) => s.setClipboardShape);
 
   const create = useCallback((kind: ShapeKind) => {
     addShape(makeShape(kind));

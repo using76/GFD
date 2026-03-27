@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { ConfigProvider, theme, message } from 'antd';
 import {
   UndoOutlined,
@@ -16,6 +16,8 @@ import { useAppStore } from './store/useAppStore';
 import Ribbon from './components/Ribbon';
 import LeftPanelStack from './components/LeftPanelStack';
 import MiniToolbar from './components/MiniToolbar';
+import MeasureOverlay from './components/MeasureOverlay';
+import ContextMenu3D from './components/ContextMenu3D';
 import StatusBar from './components/StatusBar';
 import Viewport3D from './engine/Viewport3D';
 import ResidualPlot from './tabs/calc/ResidualPlot';
@@ -221,14 +223,151 @@ const CenterContent: React.FC = () => {
     );
   }
 
-  // For all other tabs, show 3D viewport with mini toolbar
+  // For all other tabs, show 3D viewport with mini toolbar, measure overlay, and context menu support
   return (
-    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+    <div
+      style={{ width: '100%', height: '100%', position: 'relative' }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        const selectedShapeId = useAppStore.getState().selectedShapeId;
+        useAppStore.getState().setContextMenu({
+          x: e.clientX,
+          y: e.clientY,
+          shapeId: selectedShapeId,
+        });
+      }}
+    >
       <Viewport3D />
       <MiniToolbar />
+      <MeasureOverlay />
     </div>
   );
 };
+
+// ============================================================
+// View Presets (for keyboard shortcuts)
+// ============================================================
+const VIEW_PRESET_POSITIONS: Record<string, [number, number, number]> = {
+  '1': [0, 0, 8],   // Front
+  '2': [0, 0, -8],  // Back
+  '3': [0, 8, 0.01],  // Top
+  '4': [0, -8, 0.01], // Bottom
+  '5': [-8, 0, 0],  // Left
+  '6': [8, 0, 0],   // Right
+  '0': [5, 5, 5],   // Isometric
+};
+
+let pasteCounter = 300;
+
+// ============================================================
+// Keyboard Shortcuts Hook
+// ============================================================
+function useKeyboardShortcuts() {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Ignore when typing in input fields
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable) {
+        return;
+      }
+
+      const store = useAppStore.getState();
+
+      // Ctrl combinations
+      if (e.ctrlKey || e.metaKey) {
+        switch (e.key.toLowerCase()) {
+          case 'z':
+            e.preventDefault();
+            store.undoLastFix();
+            message.info('Undo');
+            return;
+          case 'c':
+            e.preventDefault();
+            if (store.selectedShapeId) {
+              store.setClipboardShapeId(store.selectedShapeId);
+              message.info('Shape copied');
+            }
+            return;
+          case 'v':
+            e.preventDefault();
+            const clipId = store.clipboardShapeId;
+            if (clipId) {
+              const original = store.shapes.find(s => s.id === clipId);
+              if (original) {
+                const id = `shape-${pasteCounter++}`;
+                store.addShape({
+                  ...original,
+                  id,
+                  name: `${original.name}-paste`,
+                  position: [original.position[0] + 0.5, original.position[1], original.position[2] + 0.5],
+                  stlData: original.stlData,
+                });
+                store.selectShape(id);
+                message.success('Shape pasted');
+              }
+            }
+            return;
+        }
+        return;
+      }
+
+      // Single key shortcuts (no modifiers)
+      switch (e.key) {
+        case 's':
+        case 'S':
+          e.preventDefault();
+          store.setActiveTool('select');
+          return;
+        case 'p':
+        case 'P':
+          e.preventDefault();
+          store.setActiveTool('pull');
+          return;
+        case 'm':
+        case 'M':
+          e.preventDefault();
+          store.setActiveTool('move');
+          return;
+        case 'f':
+        case 'F':
+          e.preventDefault();
+          store.setActiveTool('fill');
+          return;
+        case 'Delete':
+        case 'Backspace':
+          if (store.selectedShapeId) {
+            const name = store.shapes.find(s => s.id === store.selectedShapeId)?.name ?? '';
+            store.removeShape(store.selectedShapeId);
+            message.info(`Deleted ${name}`);
+          }
+          return;
+        case 'h':
+        case 'H':
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent('gfd-camera-preset', { detail: { position: [5, 5, 5] } }));
+          return;
+        case 'Escape':
+          store.selectShape(null);
+          store.setMeasureMode(null);
+          store.setContextMenu(null);
+          store.setCadMode('select');
+          return;
+      }
+
+      // Number keys for view presets
+      if (e.key >= '0' && e.key <= '6') {
+        const pos = VIEW_PRESET_POSITIONS[e.key];
+        if (pos) {
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent('gfd-camera-preset', { detail: { position: pos } }));
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+}
 
 // ============================================================
 // Main App
@@ -236,6 +375,8 @@ const CenterContent: React.FC = () => {
 export default function App() {
   const TITLE_BAR_H = 36;
   const STATUS_BAR_H = 28;
+
+  useKeyboardShortcuts();
 
   return (
     <ConfigProvider
@@ -311,6 +452,9 @@ export default function App() {
           <StatusBar />
         </div>
       </div>
+
+      {/* ============ Context Menu (rendered at top level for z-index) ============ */}
+      <ContextMenu3D />
     </ConfigProvider>
   );
 }

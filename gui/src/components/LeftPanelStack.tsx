@@ -345,6 +345,92 @@ const ResultsTreePanel: React.FC<{ onSelect: (section: string) => void; selected
 };
 
 // ============================================================
+// Repair Log Panel
+// ============================================================
+const RepairLogPanel: React.FC = () => {
+  const repairLog = useAppStore((s) => s.repairLog);
+  const clearRepairLog = useAppStore((s) => s.clearRepairLog);
+
+  if (repairLog.length === 0) {
+    return <div style={{ padding: 12, color: '#667', fontSize: 11 }}>No repair actions performed yet.</div>;
+  }
+
+  return (
+    <div style={{ padding: 8 }}>
+      <div style={{ maxHeight: 200, overflow: 'auto', marginBottom: 6 }}>
+        {repairLog.map((msg, i) => (
+          <div
+            key={i}
+            style={{
+              padding: '3px 6px',
+              fontSize: 11,
+              color: msg.includes('Fix') || msg.includes('Stitch') ? '#52c41a' : '#aab',
+              borderBottom: '1px solid #1a1a30',
+              fontFamily: 'monospace',
+            }}
+          >
+            {msg}
+          </div>
+        ))}
+      </div>
+      <div
+        onClick={clearRepairLog}
+        style={{ color: '#4096ff', fontSize: 11, cursor: 'pointer', padding: '2px 6px' }}
+      >
+        Clear log
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
+// Prepare Sub-Tab Panel (Defeaturing or CFD Prep)
+// ============================================================
+const PrepareSubTabPanel: React.FC = () => {
+  const prepareSubTab = useAppStore((s) => s.prepareSubTab);
+  const setPrepareSubTab = useAppStore((s) => s.setPrepareSubTab);
+
+  return (
+    <>
+      <div style={{ display: 'flex', borderBottom: '1px solid #252540', background: '#141428' }}>
+        {([
+          { key: 'defeaturing' as const, label: 'Defeaturing' },
+          { key: 'cfdprep' as const, label: 'CFD Prep' },
+        ]).map((t) => (
+          <div
+            key={t.key}
+            onClick={() => setPrepareSubTab(t.key)}
+            style={{
+              padding: '5px 12px',
+              fontSize: 11,
+              cursor: 'pointer',
+              color: prepareSubTab === t.key ? '#fff' : '#667',
+              borderBottom: prepareSubTab === t.key ? '2px solid #4096ff' : '2px solid transparent',
+              userSelect: 'none',
+              flex: 1,
+              textAlign: 'center',
+              fontWeight: prepareSubTab === t.key ? 600 : 400,
+            }}
+          >
+            {t.label}
+          </div>
+        ))}
+      </div>
+      {prepareSubTab === 'defeaturing' && (
+        <CollapsiblePanel title="Defeaturing" defaultOpen>
+          <DefeaturingPanel />
+        </CollapsiblePanel>
+      )}
+      {prepareSubTab === 'cfdprep' && (
+        <CollapsiblePanel title="CFD Prep" defaultOpen>
+          <CfdPrepPanel />
+        </CollapsiblePanel>
+      )}
+    </>
+  );
+};
+
+// ============================================================
 // Main LeftPanelStack
 // ============================================================
 const LeftPanelStack: React.FC = () => {
@@ -393,15 +479,18 @@ const LeftPanelStack: React.FC = () => {
           </CollapsiblePanel>
 
           {(activeRibbonTab === 'prepare') && (
-            <CollapsiblePanel title="CFD Prep" defaultOpen>
-              <CfdPrepPanel />
-            </CollapsiblePanel>
+            <PrepareSubTabPanel />
           )}
 
           {(activeRibbonTab === 'repair') && (
-            <CollapsiblePanel title="Defeaturing" defaultOpen>
-              <DefeaturingPanel />
-            </CollapsiblePanel>
+            <>
+              <CollapsiblePanel title="Defeaturing" defaultOpen>
+                <DefeaturingPanel />
+              </CollapsiblePanel>
+              <CollapsiblePanel title="Repair Log" defaultOpen={false}>
+                <RepairLogPanel />
+              </CollapsiblePanel>
+            </>
           )}
 
           <CollapsiblePanel title="Properties" defaultOpen>

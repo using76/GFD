@@ -566,6 +566,9 @@ const CadScene: React.FC = () => {
 
   return (
     <group>
+      {/* Section plane clipping */}
+      <SectionPlaneClip />
+
       {/* Regular shapes */}
       {shapes
         .filter((s) => s.id !== selectedShapeId)
