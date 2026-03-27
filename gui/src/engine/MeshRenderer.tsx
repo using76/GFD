@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { useAppStore } from '../store/useAppStore';
 
@@ -77,34 +77,58 @@ export default function MeshRenderer() {
   const fieldData = useAppStore((s) => s.fieldData);
   const contourConfig = useAppStore((s) => s.contourConfig);
 
+  // Track geometry ref for dynamic color updates
+  const geomRef = useRef<THREE.BufferGeometry | null>(null);
+
   const geometry = useMemo(() => {
     if (!meshDisplayData) return null;
+    if (!meshDisplayData.positions || meshDisplayData.positions.length === 0) return null;
+    if (!meshDisplayData.indices || meshDisplayData.indices.length === 0) return null;
+
     const geom = new THREE.BufferGeometry();
-    geom.setAttribute(
-      'position',
-      new THREE.BufferAttribute(new Float32Array(meshDisplayData.positions), 3)
-    );
-    geom.setIndex(new THREE.BufferAttribute(new Uint32Array(meshDisplayData.indices), 1));
+    // Copy data to ensure Three.js owns the arrays
+    const posCopy = new Float32Array(meshDisplayData.positions);
+    const idxCopy = new Uint32Array(meshDisplayData.indices);
+
+    geom.setAttribute('position', new THREE.BufferAttribute(posCopy, 3));
+    geom.setIndex(new THREE.BufferAttribute(idxCopy, 1));
     geom.computeVertexNormals();
+
+    geomRef.current = geom;
     return geom;
   }, [meshDisplayData]);
 
-  // Apply contour colors to the geometry when a field is active
-  useMemo(() => {
-    if (!geometry || !meshDisplayData || !activeField) {
-      if (geometry) geometry.deleteAttribute('color');
+  // Apply or remove contour colors when field data or active field changes
+  useEffect(() => {
+    const geom = geomRef.current;
+    if (!geom || !meshDisplayData) return;
+
+    if (!activeField || renderMode !== 'contour') {
+      // Remove vertex colors when not in contour mode
+      if (geom.hasAttribute('color')) {
+        geom.deleteAttribute('color');
+        geom.attributes.position.needsUpdate = true;
+      }
       return;
     }
+
     const field = fieldData.find((f) => f.name === activeField);
     if (!field) {
-      geometry.deleteAttribute('color');
+      if (geom.hasAttribute('color')) {
+        geom.deleteAttribute('color');
+      }
       return;
     }
+
     const fMin = contourConfig.autoRange ? field.min : contourConfig.min;
     const fMax = contourConfig.autoRange ? field.max : contourConfig.max;
     const colors = buildContourColors(meshDisplayData.nodeCount, field.values, fMin, fMax);
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  }, [geometry, meshDisplayData, activeField, fieldData, contourConfig]);
+    geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    // Mark for update
+    const colorAttr = geom.getAttribute('color') as THREE.BufferAttribute;
+    if (colorAttr) colorAttr.needsUpdate = true;
+  }, [geometry, meshDisplayData, activeField, fieldData, contourConfig, renderMode]);
 
   // No mesh loaded: show demo geometry
   if (!geometry) {
@@ -116,7 +140,7 @@ export default function MeshRenderer() {
     );
   }
 
-  const hasContour = renderMode === 'contour' && activeField && geometry.getAttribute('color');
+  const hasContour = renderMode === 'contour' && activeField && geometry.hasAttribute('color');
 
   return (
     <group>
@@ -124,7 +148,7 @@ export default function MeshRenderer() {
       {renderMode !== 'wireframe' && (
         <mesh geometry={geometry} userData={{ selectable: true }}>
           {hasContour ? (
-            <meshStandardMaterial vertexColors side={THREE.DoubleSide} />
+            <meshBasicMaterial vertexColors side={THREE.DoubleSide} />
           ) : (
             <meshStandardMaterial
               color="#4080c0"
@@ -139,7 +163,14 @@ export default function MeshRenderer() {
       {/* Wireframe overlay */}
       {(renderMode === 'wireframe' || renderMode === 'solid') && (
         <mesh geometry={geometry}>
-          <meshBasicMaterial color="#80a0ff" wireframe />
+          <meshBasicMaterial color="#80a0ff" wireframe transparent opacity={renderMode === 'wireframe' ? 0.8 : 0.3} />
+        </mesh>
+      )}
+
+      {/* Contour mode: subtle wireframe overlay for cell edges */}
+      {renderMode === 'contour' && hasContour && (
+        <mesh geometry={geometry}>
+          <meshBasicMaterial color="#000000" wireframe transparent opacity={0.08} />
         </mesh>
       )}
     </group>

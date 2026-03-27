@@ -253,13 +253,18 @@ const SectionOptions: React.FC = () => {
   const sectionPlane = useAppStore((s) => s.sectionPlane);
   const setSectionPlane = useAppStore((s) => s.setSectionPlane);
 
-  const setNormal = (axis: 'xy' | 'xz' | 'yz') => {
+  const setNormal = (planeAxis: 'xy' | 'xz' | 'yz') => {
     const normals: Record<string, [number, number, number]> = {
       xy: [0, 0, 1],
       xz: [0, 1, 0],
       yz: [1, 0, 0],
     };
-    setSectionPlane({ normal: normals[axis], enabled: true });
+    const axisMap: Record<string, 'x' | 'y' | 'z'> = {
+      xy: 'z',
+      xz: 'y',
+      yz: 'x',
+    };
+    setSectionPlane({ normal: normals[planeAxis], axis: axisMap[planeAxis], enabled: true });
   };
 
   return (

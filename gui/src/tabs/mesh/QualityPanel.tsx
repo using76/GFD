@@ -43,12 +43,30 @@ const QualityPanel: React.FC = () => {
       </div>
 
       <Row gutter={[8, 8]}>
-        <Col span={12}>
+        <Col span={8}>
           <Card size="small">
             <Statistic
-              title="Cell Count"
+              title="Cells"
               value={quality.cellCount}
-              valueStyle={{ fontSize: 16 }}
+              valueStyle={{ fontSize: 14 }}
+            />
+          </Card>
+        </Col>
+        <Col span={8}>
+          <Card size="small">
+            <Statistic
+              title="Faces"
+              value={quality.faceCount}
+              valueStyle={{ fontSize: 14 }}
+            />
+          </Card>
+        </Col>
+        <Col span={8}>
+          <Card size="small">
+            <Statistic
+              title="Nodes"
+              value={quality.nodeCount}
+              valueStyle={{ fontSize: 14 }}
             />
           </Card>
         </Col>
@@ -58,7 +76,7 @@ const QualityPanel: React.FC = () => {
               title="Min Orthogonality"
               value={quality.minOrthogonality}
               precision={3}
-              valueStyle={{ fontSize: 16 }}
+              valueStyle={{ fontSize: 14, color: quality.minOrthogonality > 0.8 ? '#52c41a' : '#faad14' }}
             />
           </Card>
         </Col>
@@ -68,7 +86,7 @@ const QualityPanel: React.FC = () => {
               title="Max Skewness"
               value={quality.maxSkewness}
               precision={3}
-              valueStyle={{ fontSize: 16 }}
+              valueStyle={{ fontSize: 14, color: quality.maxSkewness < 0.3 ? '#52c41a' : '#faad14' }}
             />
           </Card>
         </Col>
@@ -78,7 +96,7 @@ const QualityPanel: React.FC = () => {
               title="Max Aspect Ratio"
               value={quality.maxAspectRatio}
               precision={2}
-              valueStyle={{ fontSize: 16 }}
+              valueStyle={{ fontSize: 14, color: quality.maxAspectRatio < 5 ? '#52c41a' : '#faad14' }}
             />
           </Card>
         </Col>

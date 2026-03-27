@@ -664,6 +664,8 @@ const CadScene: React.FC = () => {
   const shapes = useAppStore((s) => s.shapes);
   const selectedShapeId = useAppStore((s) => s.selectedShapeId);
   const booleanOps = useAppStore((s) => s.booleanOps);
+  const exploded = useAppStore((s) => s.exploded);
+  const explodeFactor = useAppStore((s) => s.explodeFactor);
 
   const selectedShape = shapes.find((s) => s.id === selectedShapeId);
 
@@ -678,6 +680,9 @@ const CadScene: React.FC = () => {
     return ids;
   }, [booleanOps]);
 
+  // Compute scene center for exploded view
+  const sceneCenter = useMemo(() => computeSceneCenter(shapes), [shapes]);
+
   return (
     <group>
       {/* Section plane clipping */}
@@ -686,17 +691,28 @@ const CadScene: React.FC = () => {
       {/* Regular shapes */}
       {shapes
         .filter((s) => s.id !== selectedShapeId)
-        .map((shape) => (
-          <ShapeMesh
-            key={shape.id}
-            shape={shape}
-            isBooleanTool={booleanToolIds.has(shape.id)}
-          />
-        ))}
+        .map((shape) => {
+          const pos = exploded && shape.group !== 'enclosure'
+            ? getExplodedPosition(shape.position, sceneCenter, explodeFactor)
+            : undefined;
+          return (
+            <ShapeMesh
+              key={shape.id}
+              shape={shape}
+              isBooleanTool={booleanToolIds.has(shape.id)}
+              explodedPosition={pos}
+            />
+          );
+        })}
       {selectedShape && (
         <SelectedShapeWithTransform
           key={selectedShape.id}
           shape={selectedShape}
+          explodedPosition={
+            exploded && selectedShape.group !== 'enclosure'
+              ? getExplodedPosition(selectedShape.position, sceneCenter, explodeFactor)
+              : undefined
+          }
         />
       )}
 

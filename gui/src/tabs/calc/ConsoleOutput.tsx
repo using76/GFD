@@ -1,6 +1,16 @@
 import React, { useEffect, useRef } from 'react';
 import { useAppStore } from '../../store/useAppStore';
 
+function getLineColor(line: string): string {
+  if (line.includes('[GFD]') && (line.includes('===') || line.includes('---'))) return '#445';
+  if (line.includes('[GFD]') && line.includes('CONVERGED')) return '#52c41a';
+  if (line.includes('[GFD]')) return '#1668dc';
+  if (line.includes('WARNING') || line.includes('warning')) return '#faad14';
+  if (line.includes('ERROR') || line.includes('error') || line.includes('Error')) return '#ff4d4f';
+  if (line.includes('[Iter')) return '#a0a0b0';
+  return '#c0c0c0';
+}
+
 const ConsoleOutput: React.FC = () => {
   const consoleLines = useAppStore((s) => s.consoleLines);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -18,10 +28,10 @@ const ConsoleOutput: React.FC = () => {
         width: '100%',
         height: '100%',
         overflow: 'auto',
-        background: '#0d0d0d',
+        background: '#0a0a10',
         fontFamily: "'Cascadia Code', 'Fira Code', 'Consolas', monospace",
-        fontSize: 12,
-        lineHeight: 1.6,
+        fontSize: 11,
+        lineHeight: 1.5,
         padding: 8,
         color: '#c0c0c0',
       }}
@@ -33,13 +43,10 @@ const ConsoleOutput: React.FC = () => {
           <div
             key={i}
             style={{
-              color: line.startsWith('[GFD]')
-                ? '#1668dc'
-                : line.includes('error') || line.includes('Error')
-                ? '#ff4d4f'
-                : '#c0c0c0',
+              color: getLineColor(line),
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-all',
+              fontWeight: line.includes('CONVERGED') ? 700 : 400,
             }}
           >
             {line}

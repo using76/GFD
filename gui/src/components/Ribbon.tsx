@@ -347,7 +347,16 @@ const DisplayRibbon: React.FC = () => {
       <RibbonButton icon={<EyeOutlined />} label="Transparent" active={transparencyMode} onClick={() => { setTransparencyMode(!transparencyMode); message.info(transparencyMode ? 'Transparency off' : 'Transparency on (opacity 0.3)'); }} />
       <GroupSep label="Render" />
 
-      <RibbonButton icon={<CompressOutlined />} label="Section" active={sectionPlane.enabled} onClick={() => { setSectionPlane({ enabled: !sectionPlane.enabled }); message.info(sectionPlane.enabled ? 'Section view off' : 'Section view on'); }} />
+      <RibbonButton icon={<CompressOutlined />} label="Section" active={sectionPlane.enabled} onClick={() => {
+        const newEnabled = !sectionPlane.enabled;
+        setSectionPlane({ enabled: newEnabled });
+        if (newEnabled) {
+          useAppStore.getState().setActiveTool('section');
+        } else {
+          useAppStore.getState().setActiveTool('select');
+        }
+        message.info(sectionPlane.enabled ? 'Section view off' : 'Section view on');
+      }} />
       <RibbonButton icon={<ExpandOutlined />} label="Exploded" active={exploded} onClick={() => {
         setExploded(!exploded);
         message.info(exploded ? 'Exploded view off' : 'Exploded view on');
@@ -402,7 +411,7 @@ const MeasureRibbon: React.FC = () => {
         setActiveTool(next ? 'measure' : 'select');
         if (next) message.info('Click a face to measure area');
       }} />
-      <RibbonButton icon={<BlockOutlined />} label="Volume" onClick={() => { if (selectedShapeId) { const s = shapes.find(x=>x.id===selectedShapeId); const d = s?.dimensions||{}; const v = (d.width||1)*(d.height||1)*(d.depth||1); message.success(`Volume of "${s?.name}": ${v.toFixed(4)} m³`); } else { message.warning('Select a shape to measure volume.'); } }} />
+      <RibbonButton icon={<BlockOutlined />} label="Volume" onClick={() => { const st = useAppStore.getState(); const sid = st.selectedShapeId; if (sid) { const s = st.shapes.find(x=>x.id===sid); const d = s?.dimensions||{}; const v = (d.width||1)*(d.height||1)*(d.depth||1); message.success(`Volume of "${s?.name}": ${v.toFixed(4)} m^3`); } else { message.warning('Select a shape to measure volume.'); } }} />
       <RibbonButton icon={<ColumnWidthOutlined />} label="Length" onClick={() => { message.success('Length: select edges in 3D to measure.'); }} />
       <RibbonButton icon={<DeleteOutlined />} label="Clear" onClick={() => { clearMeasureLabels(); message.info('Measurements cleared'); }} />
       <GroupSep label="Measure" />

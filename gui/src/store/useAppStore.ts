@@ -81,6 +81,8 @@ export interface MeshQuality {
   maxSkewness: number;
   maxAspectRatio: number;
   cellCount: number;
+  faceCount: number;
+  nodeCount: number;
   histogram: number[];
 }
 
@@ -492,18 +494,26 @@ export const useAppStore = create<AppState>((set, get) => ({
     // Simulate async mesh generation
     setTimeout(() => {
       const nx = 20, ny = 20;
+      const domainSize = 4; // domain spans [0, domainSize] in X and Z
       const zones: MeshZone[] = [
         { id: 'vol-1', name: 'fluid', kind: 'volume' },
-        { id: 'surf-1', name: 'inlet', kind: 'surface' },
-        { id: 'surf-2', name: 'outlet', kind: 'surface' },
-        { id: 'surf-3', name: 'wall-top', kind: 'surface' },
-        { id: 'surf-4', name: 'wall-bottom', kind: 'surface' },
+        { id: 'surf-xmin', name: 'xmin (inlet)', kind: 'surface' },
+        { id: 'surf-xmax', name: 'xmax (outlet)', kind: 'surface' },
+        { id: 'surf-ymin', name: 'ymin (wall)', kind: 'surface' },
+        { id: 'surf-ymax', name: 'ymax (wall)', kind: 'surface' },
       ];
+      const nodeCount = (nx + 1) * (ny + 1);
+      const cellCount = nx * ny;
+      const internalFaces = (nx - 1) * ny + nx * (ny - 1);
+      const boundaryFaces = 2 * nx + 2 * ny;
+      const faceCount = internalFaces + boundaryFaces;
       const quality: MeshQuality = {
         minOrthogonality: 0.85 + Math.random() * 0.1,
         maxSkewness: 0.15 + Math.random() * 0.1,
         maxAspectRatio: 2.5 + Math.random() * 1.5,
-        cellCount: nx * ny,
+        cellCount,
+        faceCount,
+        nodeCount,
         histogram: Array.from({ length: 10 }, (_, i) => {
           // Biased toward high quality
           if (i >= 8) return 0.3 + Math.random() * 0.2;
@@ -526,11 +536,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           temperature: 300,
         }));
 
-      // Generate mesh display data: a simple quad grid turned into triangles
-      const nodeCount = (nx + 1) * (ny + 1);
+      // Generate mesh display data: a 20x20 quad grid turned into triangles
+      // Domain spans [0, domainSize] in X and Z, Y = 0 (flat on XZ plane)
       const positions = new Float32Array(nodeCount * 3);
-      const dx = 1.0 / nx;
-      const dy = 1.0 / ny;
+      const dx = domainSize / nx;
+      const dy = domainSize / ny;
       for (let j = 0; j <= ny; j++) {
         for (let i = 0; i <= nx; i++) {
           const idx = (j * (nx + 1) + i) * 3;
@@ -539,7 +549,6 @@ export const useAppStore = create<AppState>((set, get) => ({
           positions[idx + 2] = j * dy;
         }
       }
-      const cellCount = nx * ny;
       const triIndices = new Uint32Array(cellCount * 6);
       for (let j = 0; j < ny; j++) {
         for (let i = 0; i < nx; i++) {
@@ -593,7 +602,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     method: 'SIMPLE',
     relaxPressure: 0.3,
     relaxVelocity: 0.7,
-    maxIterations: 1000,
+    maxIterations: 200,
     tolerance: 1e-6,
   },
   selectedBoundaryId: null,
@@ -629,27 +638,53 @@ export const useAppStore = create<AppState>((set, get) => ({
   startSolver: () => {
     const state = get();
     if (state.solverStatus === 'running') return;
+    const now = new Date().toLocaleTimeString();
+    const method = state.solverSettings.method;
+    const isResume = state.solverStatus === 'paused';
+    const initLines = isResume
+      ? [...state.consoleLines, `[${now}] [GFD] Solver resumed...`]
+      : [
+          `[${now}] [GFD] ============================================`,
+          `[${now}] [GFD]  GFD Solver v0.1.0 - ${method} algorithm`,
+          `[${now}] [GFD] ============================================`,
+          `[${now}] [GFD] Mesh: ${state.meshDisplayData?.cellCount ?? 0} cells, ${state.meshDisplayData?.nodeCount ?? 0} nodes`,
+          `[${now}] [GFD] Flow: ${state.physicsModels.flow}, Turbulence: ${state.physicsModels.turbulence}`,
+          `[${now}] [GFD] Material: ${state.material.name} (rho=${state.material.density}, mu=${state.material.viscosity.toExponential(3)})`,
+          `[${now}] [GFD] Max iterations: ${state.solverSettings.maxIterations}, Tolerance: ${state.solverSettings.tolerance.toExponential(1)}`,
+          `[${now}] [GFD] Initializing fields...`,
+          `[${now}] [GFD] Solver started.`,
+          `[${now}] [GFD] ---`,
+        ];
     set({
       solverStatus: 'running',
-      consoleLines: state.solverStatus === 'idle'
-        ? ['[GFD] Solver started...']
-        : [...state.consoleLines, '[GFD] Solver resumed...'],
+      residuals: isResume ? state.residuals : [],
+      currentIteration: isResume ? state.currentIteration : 0,
+      consoleLines: initLines,
     });
     solverInterval = setInterval(() => {
       const s = get();
       if (s.solverStatus !== 'running') return;
       const iter = s.currentIteration + 1;
-      const decay = Math.exp(-iter * 0.005);
+      // Realistic convergence: fast initial drop, then slower exponential decay
+      const phase1 = Math.exp(-iter * 0.025); // fast drop first 80 iters
+      const phase2 = Math.exp(-iter * 0.008); // slower tail
+      const decay = iter < 80 ? phase1 : phase2 * 0.15;
       const point: ResidualPoint = {
         iteration: iter,
-        continuity: 1e-1 * decay * (0.8 + 0.4 * Math.random()),
-        xMomentum: 5e-2 * decay * (0.8 + 0.4 * Math.random()),
-        yMomentum: 5e-2 * decay * (0.8 + 0.4 * Math.random()),
-        energy: 1e-2 * decay * (0.8 + 0.4 * Math.random()),
+        continuity: 1e-1 * decay * (0.85 + 0.3 * Math.random()),
+        xMomentum: 5e-2 * decay * (0.85 + 0.3 * Math.random()),
+        yMomentum: 5e-2 * decay * (0.85 + 0.3 * Math.random()),
+        energy: 1e-2 * decay * (0.85 + 0.3 * Math.random()),
       };
-      const line = `[Iter ${iter}] continuity=${point.continuity.toExponential(3)} x-mom=${point.xMomentum.toExponential(3)} y-mom=${point.yMomentum.toExponential(3)} energy=${point.energy.toExponential(3)}`;
+      const ts = new Date().toLocaleTimeString();
+      const line = `[${ts}] [Iter ${String(iter).padStart(4)}] continuity=${point.continuity.toExponential(3)}  x-mom=${point.xMomentum.toExponential(3)}  y-mom=${point.yMomentum.toExponential(3)}  energy=${point.energy.toExponential(3)}`;
       const maxIter = s.solverSettings.maxIterations;
-      if (iter >= maxIter) {
+
+      // Check convergence: either max iterations reached or all residuals below tolerance
+      const tol = s.solverSettings.tolerance;
+      const converged = point.continuity < tol && point.xMomentum < tol && point.yMomentum < tol && point.energy < tol;
+
+      if (iter >= maxIter || converged) {
         if (solverInterval) clearInterval(solverInterval);
         solverInterval = null;
 
@@ -658,13 +693,25 @@ export const useAppStore = create<AppState>((set, get) => ({
         const fields: FieldData[] = [];
         if (meshData) {
           const nNodes = meshData.nodeCount;
+          // Compute normalized coordinates (domain might not be [0,1])
+          let xMin = Infinity, xMax = -Infinity, zMin = Infinity, zMax = -Infinity;
+          for (let i = 0; i < nNodes; i++) {
+            const x = meshData.positions[i * 3];
+            const z = meshData.positions[i * 3 + 2];
+            if (x < xMin) xMin = x;
+            if (x > xMax) xMax = x;
+            if (z < zMin) zMin = z;
+            if (z > zMax) zMax = z;
+          }
+          const xRange = xMax - xMin || 1;
+          const zRange = zMax - zMin || 1;
 
           // Pressure field: gradient from left to right
           const pressureValues = new Float32Array(nNodes);
           let pMin = Infinity, pMax = -Infinity;
           for (let i = 0; i < nNodes; i++) {
-            const x = meshData.positions[i * 3];
-            const z = meshData.positions[i * 3 + 2];
+            const x = (meshData.positions[i * 3] - xMin) / xRange;
+            const z = (meshData.positions[i * 3 + 2] - zMin) / zRange;
             const v = 100 * (1 - x) + 20 * Math.sin(Math.PI * z) + 5 * Math.random();
             pressureValues[i] = v;
             if (v < pMin) pMin = v;
@@ -676,8 +723,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           const velValues = new Float32Array(nNodes);
           let vMin = Infinity, vMax = -Infinity;
           for (let i = 0; i < nNodes; i++) {
-            const x = meshData.positions[i * 3];
-            const z = meshData.positions[i * 3 + 2];
+            const x = (meshData.positions[i * 3] - xMin) / xRange;
+            const z = (meshData.positions[i * 3 + 2] - zMin) / zRange;
             const vx = Math.sin(Math.PI * x) * Math.cos(Math.PI * z);
             const vz = -Math.cos(Math.PI * x) * Math.sin(Math.PI * z);
             const mag = Math.sqrt(vx * vx + vz * vz);
@@ -691,8 +738,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           const tempValues = new Float32Array(nNodes);
           let tMin = Infinity, tMax = -Infinity;
           for (let i = 0; i < nNodes; i++) {
-            const x = meshData.positions[i * 3];
-            const z = meshData.positions[i * 3 + 2];
+            const x = (meshData.positions[i * 3] - xMin) / xRange;
+            const z = (meshData.positions[i * 3 + 2] - zMin) / zRange;
             const t = 400 - 100 * x + 15 * Math.sin(2 * Math.PI * z) + 3 * Math.random();
             tempValues[i] = t;
             if (t < tMin) tMin = t;
@@ -701,10 +748,22 @@ export const useAppStore = create<AppState>((set, get) => ({
           fields.push({ name: 'temperature', values: tempValues, min: tMin, max: tMax });
         }
 
+        const finishTs = new Date().toLocaleTimeString();
+        const finishMsg = converged
+          ? `[${finishTs}] [GFD] Solution CONVERGED after ${iter} iterations (all residuals < ${tol.toExponential(1)}).`
+          : `[${finishTs}] [GFD] Reached max iterations (${maxIter}). Final continuity residual: ${point.continuity.toExponential(3)}`;
+
         set({
           currentIteration: iter,
           residuals: [...s.residuals, point],
-          consoleLines: [...s.consoleLines, line, `[GFD] Converged after ${iter} iterations.`],
+          consoleLines: [
+            ...s.consoleLines,
+            line,
+            `[${finishTs}] [GFD] ---`,
+            finishMsg,
+            `[${finishTs}] [GFD] Field data generated: pressure, velocity, temperature`,
+            `[${finishTs}] [GFD] Switch to Results tab to view contours.`,
+          ],
           solverStatus: 'finished',
           fieldData: fields,
           activeField: fields.length > 0 ? 'pressure' : null,
@@ -716,7 +775,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           consoleLines: [...s.consoleLines, line],
         });
       }
-    }, 100);
+    }, 50);
   },
   pauseSolver: () => {
     if (solverInterval) clearInterval(solverInterval);

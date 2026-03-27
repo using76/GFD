@@ -20,6 +20,9 @@ export default function StatusBar() {
   const meshDisplayData = useAppStore((s) => s.meshDisplayData);
   const selectedEntity = useAppStore((s) => s.selectedEntity);
   const activeTool = useAppStore((s) => s.activeTool);
+  const selectionFilter = useAppStore((s) => s.selectionFilter);
+  const exploded = useAppStore((s) => s.exploded);
+  const transparencyMode = useAppStore((s) => s.transparencyMode);
 
   const statusIcon =
     solverStatus === 'running' ? (
@@ -76,6 +79,22 @@ export default function StatusBar() {
         <Text style={{ fontSize: 11, color: '#667' }}>
           Tool: {activeTool}
         </Text>
+
+        <Text style={{ fontSize: 11, color: '#667' }}>
+          Select: {selectionFilter}
+        </Text>
+
+        {exploded && (
+          <Tag color="orange" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+            Exploded
+          </Tag>
+        )}
+
+        {transparencyMode && (
+          <Tag color="blue" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+            Transparent
+          </Tag>
+        )}
       </Space>
 
       {/* Right section: mesh info + selection filter + GPU tag */}
