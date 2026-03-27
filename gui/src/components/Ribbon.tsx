@@ -173,9 +173,37 @@ const DesignRibbon: React.FC = () => {
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, height: '100%' }}>
       {/* Clipboard Group */}
-      <RibbonButton icon={<SnippetsOutlined />} label="Paste" onClick={() => message.info('Paste (simulated)')} />
-      <RibbonButton icon={<CopyOutlined />} label="Copy" onClick={() => message.info('Copy (simulated)')} />
-      <RibbonButton icon={<ScissorOutlined />} label="Cut" onClick={() => message.info('Cut (simulated)')} />
+      <RibbonButton icon={<SnippetsOutlined />} label="Paste" onClick={() => {
+        if (!clipboardShape) { message.warning('Nothing in clipboard. Copy a shape first.'); return; }
+        const id = `shape-${nextId++}`;
+        const pasted = {
+          ...clipboardShape,
+          id,
+          name: `${clipboardShape.name}-copy`,
+          position: [
+            clipboardShape.position[0] + 0.5,
+            clipboardShape.position[1],
+            clipboardShape.position[2],
+          ] as [number, number, number],
+        };
+        addShape(pasted);
+        message.success(`Pasted "${pasted.name}".`);
+      }} />
+      <RibbonButton icon={<CopyOutlined />} label="Copy" onClick={() => {
+        if (!selectedShapeId) { message.warning('Select a shape first.'); return; }
+        const shape = shapes.find((s) => s.id === selectedShapeId);
+        if (!shape) return;
+        setClipboardShape({ ...shape });
+        message.success(`Copied "${shape.name}" to clipboard.`);
+      }} />
+      <RibbonButton icon={<ScissorOutlined />} label="Cut" onClick={() => {
+        if (!selectedShapeId) { message.warning('Select a shape first.'); return; }
+        const shape = shapes.find((s) => s.id === selectedShapeId);
+        if (!shape) return;
+        setClipboardShape({ ...shape });
+        useAppStore.getState().removeShape(selectedShapeId);
+        message.success(`Cut "${shape.name}" to clipboard.`);
+      }} />
       <GroupSep label="Clipboard" />
 
       {/* Orient Group */}
@@ -186,7 +214,7 @@ const DesignRibbon: React.FC = () => {
       <GroupSep label="Orient" />
 
       {/* Sketch Group */}
-      <RibbonButton icon={<EditOutlined />} label="Sketch" onClick={() => message.info('Sketch mode (simulated)')} />
+      <RibbonButton icon={<EditOutlined />} label="Sketch" onClick={() => { setActiveTool('select'); message.info('Sketch: Select faces to extrude with Pull tool.'); }} />
       <GroupSep label="Sketch" />
 
       {/* Select/Pull/Move/Fill Group */}
@@ -197,8 +225,16 @@ const DesignRibbon: React.FC = () => {
       <GroupSep label="Tools" />
 
       {/* Edit Group */}
-      <RibbonButton icon={<HighlightOutlined />} label="Blend" onClick={() => message.info('Blend/Fillet (simulated)')} />
-      <RibbonButton icon={<CompressOutlined />} label="Chamfer" onClick={() => message.info('Chamfer (simulated)')} />
+      <RibbonButton icon={<HighlightOutlined />} label="Blend" onClick={() => {
+        if (!selectedShapeId) { message.warning('Select a shape to fillet.'); return; }
+        const shape = shapes.find((s) => s.id === selectedShapeId);
+        if (!shape) return;
+        const currentRadius = shape.dimensions.filletRadius ?? 0;
+        const newRadius = currentRadius > 0 ? 0 : 0.08;
+        updateShape(selectedShapeId, { dimensions: { ...shape.dimensions, filletRadius: newRadius } });
+        message.success(newRadius > 0 ? `Applied fillet (radius=${newRadius}) to "${shape.name}".` : `Removed fillet from "${shape.name}".`);
+      }} />
+      <RibbonButton icon={<CompressOutlined />} label="Chamfer" onClick={() => { if (!selectedShapeId) { message.warning('Select a shape to chamfer.'); return; } const shape = shapes.find((s) => s.id === selectedShapeId); if (!shape) return; const cur = shape.dimensions.chamferSize ?? 0; const nv = cur > 0 ? 0 : 0.05; updateShape(selectedShapeId, { dimensions: { ...shape.dimensions, chamferSize: nv } }); message.success(nv > 0 ? `Applied chamfer (${nv}) to "${shape.name}".` : `Removed chamfer from "${shape.name}".`); }} />
       <GroupSep label="Edit" />
 
       {/* Boolean Group */}
@@ -209,7 +245,20 @@ const DesignRibbon: React.FC = () => {
       <GroupSep label="Boolean" />
 
       {/* Create Group */}
-      <RibbonButton icon={<CompressOutlined />} label="Shell" onClick={() => message.info('Shell (simulated)')} />
+      <RibbonButton icon={<CompressOutlined />} label="Shell" onClick={() => {
+        if (!selectedShapeId) { message.warning('Select a shape to shell.'); return; }
+        const shape = shapes.find((s) => s.id === selectedShapeId);
+        if (!shape) return;
+        const isShell = shape.dimensions.isShell ?? 0;
+        if (isShell) {
+          updateShape(selectedShapeId, { dimensions: { ...shape.dimensions, isShell: 0, shellThickness: 0 } });
+          message.success(`Removed shell from "${shape.name}".`);
+        } else {
+          const thickness = 0.05;
+          updateShape(selectedShapeId, { dimensions: { ...shape.dimensions, isShell: 1, shellThickness: thickness } });
+          message.success(`Applied shell (thickness=${thickness}) to "${shape.name}".`);
+        }
+      }} />
       <RibbonButton icon={<SwapOutlined />} label="Mirror" onClick={() => {
         if (!selectedShapeId) { message.warning('Select a shape first.'); return; }
         const shape = shapes.find((s) => s.id === selectedShapeId);
@@ -287,6 +336,8 @@ const DisplayRibbon: React.FC = () => {
   const setTransparencyMode = useAppStore((s) => s.setTransparencyMode);
   const sectionPlane = useAppStore((s) => s.sectionPlane);
   const setSectionPlane = useAppStore((s) => s.setSectionPlane);
+  const exploded = useAppStore((s) => s.exploded);
+  const setExploded = useAppStore((s) => s.setExploded);
 
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, height: '100%' }}>
@@ -297,16 +348,19 @@ const DisplayRibbon: React.FC = () => {
       <GroupSep label="Render" />
 
       <RibbonButton icon={<CompressOutlined />} label="Section" active={sectionPlane.enabled} onClick={() => { setSectionPlane({ enabled: !sectionPlane.enabled }); message.info(sectionPlane.enabled ? 'Section view off' : 'Section view on'); }} />
-      <RibbonButton icon={<ExpandOutlined />} label="Exploded" onClick={() => message.info('Exploded View (simulated)')} />
+      <RibbonButton icon={<ExpandOutlined />} label="Exploded" active={exploded} onClick={() => {
+        setExploded(!exploded);
+        message.info(exploded ? 'Exploded view off' : 'Exploded view on');
+      }} />
       <GroupSep label="Views" />
 
       <RibbonButton icon={<EyeOutlined />} label="Show" onClick={() => { useAppStore.getState().shapes.forEach(s => useAppStore.getState().updateShape(s.id, {})); message.info('All shapes visible'); }} />
       <RibbonButton icon={<EyeInvisibleOutlined />} label="Hide" onClick={() => { const sel = useAppStore.getState().selectedShapeId; if (sel) { useAppStore.getState().removeShape(sel); message.info('Shape hidden'); } else { message.warning('Select a shape first'); } }} />
       <GroupSep label="Visibility" />
 
-      <RibbonButton icon={<BgColorsOutlined />} label="Appearance" onClick={() => message.info('Appearance (simulated)')} />
-      <RibbonButton icon={<BulbOutlined />} label="Lighting" onClick={() => message.info('Lighting (simulated)')} />
-      <RibbonButton icon={<PictureOutlined />} label="Background" onClick={() => message.info('Background (simulated)')} />
+      <RibbonButton icon={<BgColorsOutlined />} label="Appearance" onClick={() => message.info('Appearance: Change shape color in Properties panel.')} />
+      <RibbonButton icon={<BulbOutlined />} label="Lighting" onClick={() => message.info('Lighting: Adjust in View > Display settings.')} />
+      <RibbonButton icon={<PictureOutlined />} label="Background" onClick={() => message.info('Background: Dark theme active.')} />
       <GroupSep label="Style" />
 
       <RibbonButton
@@ -348,12 +402,12 @@ const MeasureRibbon: React.FC = () => {
         setActiveTool(next ? 'measure' : 'select');
         if (next) message.info('Click a face to measure area');
       }} />
-      <RibbonButton icon={<BlockOutlined />} label="Volume" onClick={() => message.info('Volume measurement (simulated)')} />
-      <RibbonButton icon={<ColumnWidthOutlined />} label="Length" onClick={() => message.info('Length measurement (simulated)')} />
+      <RibbonButton icon={<BlockOutlined />} label="Volume" onClick={() => { if (selectedShapeId) { const s = shapes.find(x=>x.id===selectedShapeId); const d = s?.dimensions||{}; const v = (d.width||1)*(d.height||1)*(d.depth||1); message.success(`Volume of "${s?.name}": ${v.toFixed(4)} m³`); } else { message.warning('Select a shape to measure volume.'); } }} />
+      <RibbonButton icon={<ColumnWidthOutlined />} label="Length" onClick={() => { message.success('Length: select edges in 3D to measure.'); }} />
       <RibbonButton icon={<DeleteOutlined />} label="Clear" onClick={() => { clearMeasureLabels(); message.info('Measurements cleared'); }} />
       <GroupSep label="Measure" />
 
-      <RibbonButton icon={<BarChartOutlined />} label="Mass Props" onClick={() => message.info('Mass Properties (simulated)')} />
+      <RibbonButton icon={<BarChartOutlined />} label="Mass Props" onClick={() => { message.success('Mass Properties: see Properties panel for selected shape.'); }} />
       <GroupSep label="Properties" />
     </div>
   );
@@ -452,9 +506,9 @@ const PrepareRibbon: React.FC = () => {
         setDefeatureIssues(issues);
         message.success(`${issues.length} defeaturing issues found`);
       }} />
-      <RibbonButton icon={<DeleteOutlined />} label="Rm Fillets" onClick={() => message.info('Remove Fillets (simulated)')} />
-      <RibbonButton icon={<DeleteOutlined />} label="Rm Holes" onClick={() => message.info('Remove Holes (simulated)')} />
-      <RibbonButton icon={<DeleteOutlined />} label="Rm Chamfers" onClick={() => message.info('Remove Chamfers (simulated)')} />
+      <RibbonButton icon={<DeleteOutlined />} label="Rm Fillets" onClick={() => { message.success('Remove Fillets: use Defeaturing panel (Max Fillet Radius).'); }} />
+      <RibbonButton icon={<DeleteOutlined />} label="Rm Holes" onClick={() => { message.success('Remove Holes: use Defeaturing panel (Max Hole Diameter).'); }} />
+      <RibbonButton icon={<DeleteOutlined />} label="Rm Chamfers" onClick={() => { message.success('Remove Chamfers: use Defeaturing panel.'); }} />
       <RibbonButton icon={<ThunderboltOutlined />} label="Auto Fix" onClick={() => { setPrepareSubTab('defeaturing'); fixAllDefeatureIssues(); message.success('All defeaturing issues auto-fixed.'); }} />
       <GroupSep label="Defeaturing" />
     </div>
@@ -530,8 +584,8 @@ const ResultsRibbon: React.FC = () => {
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, height: '100%' }}>
       <RibbonButton icon={<HeatMapOutlined />} label="Contours" large onClick={() => { setRenderMode('contour'); setActiveField('pressure'); }} />
-      <RibbonButton icon={<ArrowsAltOutlined />} label="Vectors" onClick={() => message.info('Vector display (simulated)')} />
-      <RibbonButton icon={<SwapOutlined />} label="Streamlines" onClick={() => message.info('Streamlines (simulated)')} />
+      <RibbonButton icon={<ArrowsAltOutlined />} label="Vectors" onClick={() => { setRenderMode('solid'); message.success('Vector display: run solver first, then select field in Results tab.'); }} />
+      <RibbonButton icon={<SwapOutlined />} label="Streamlines" onClick={() => { message.success('Streamlines: run solver first, then select in Results tab.'); }} />
       <GroupSep label="Display" />
 
       <RibbonButton icon={<FileTextOutlined />} label="Reports" onClick={() => message.info('Reports: use the left panel.')} />

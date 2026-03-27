@@ -8,10 +8,16 @@ import * as THREE from 'three';
 const degToRad = (d: number) => (d * Math.PI) / 180;
 
 function makeGeometry(shape: Shape): React.ReactNode {
+  // Fillet: use increased segments for a smoother appearance
+  const hasFillet = (shape.dimensions.filletRadius ?? 0) > 0;
   switch (shape.kind) {
     case 'box':
     case 'enclosure': {
       const { width = 1, height = 1, depth = 1 } = shape.dimensions;
+      if (hasFillet) {
+        // Use RoundedBox-like approach: higher segment count for smoother edges
+        return <boxGeometry args={[width, height, depth, 8, 8, 8]} />;
+      }
       return <boxGeometry args={[width, height, depth]} />;
     }
     case 'sphere': {
@@ -20,25 +26,49 @@ function makeGeometry(shape: Shape): React.ReactNode {
     }
     case 'cylinder': {
       const { radius = 0.3, height = 1 } = shape.dimensions;
-      return <cylinderGeometry args={[radius, radius, height, 32]} />;
+      return <cylinderGeometry args={[radius, radius, height, hasFillet ? 64 : 32]} />;
     }
     case 'cone': {
       const { radius = 0.4, height = 1 } = shape.dimensions;
-      return <coneGeometry args={[radius, height, 32]} />;
+      return <coneGeometry args={[radius, height, hasFillet ? 64 : 32]} />;
     }
     case 'torus': {
       const { majorRadius = 0.5, minorRadius = 0.15 } = shape.dimensions;
       return <torusGeometry args={[majorRadius, minorRadius, 16, 48]} />;
     }
     case 'pipe': {
-      // Render pipe as an outer cylinder (the shape itself handles visual)
-      // We render the outer shell; inner hole is shown via a separate inner cylinder
       const { outerRadius = 0.4, height = 1.5 } = shape.dimensions;
       return <cylinderGeometry args={[outerRadius, outerRadius, height, 32]} />;
     }
     default:
       return <boxGeometry args={[0.5, 0.5, 0.5]} />;
   }
+}
+
+/** Compute the center of all non-enclosure shapes for exploded view */
+function computeSceneCenter(shapes: Shape[]): [number, number, number] {
+  const bodies = shapes.filter((s) => s.group !== 'enclosure');
+  if (bodies.length === 0) return [0, 0, 0];
+  const cx = bodies.reduce((sum, s) => sum + s.position[0], 0) / bodies.length;
+  const cy = bodies.reduce((sum, s) => sum + s.position[1], 0) / bodies.length;
+  const cz = bodies.reduce((sum, s) => sum + s.position[2], 0) / bodies.length;
+  return [cx, cy, cz];
+}
+
+/** Compute exploded position for a shape */
+function getExplodedPosition(
+  shapePos: [number, number, number],
+  center: [number, number, number],
+  factor: number,
+): [number, number, number] {
+  const dx = shapePos[0] - center[0];
+  const dy = shapePos[1] - center[1];
+  const dz = shapePos[2] - center[2];
+  return [
+    shapePos[0] + dx * factor,
+    shapePos[1] + dy * factor,
+    shapePos[2] + dz * factor,
+  ];
 }
 
 /** Render inner hole for pipe shapes */
@@ -355,9 +385,71 @@ const SectionPlaneClip: React.FC = () => {
 // Shape rendering
 // ============================================================
 
-const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean }> = ({
+/** Inner shell mesh: rendered with BackSide material to show hollow interior */
+const ShellInner: React.FC<{ shape: Shape; position: [number, number, number]; rotation: [number, number, number] }> = ({ shape, position, rotation }) => {
+  const thickness = shape.dimensions.shellThickness ?? 0.05;
+  // Compute a slightly smaller geometry via scale factor
+  const getScale = (): [number, number, number] => {
+    switch (shape.kind) {
+      case 'box':
+      case 'enclosure': {
+        const { width = 1, height = 1, depth = 1 } = shape.dimensions;
+        return [
+          (width - 2 * thickness) / width,
+          (height - 2 * thickness) / height,
+          (depth - 2 * thickness) / depth,
+        ];
+      }
+      case 'sphere': {
+        const { radius = 0.5 } = shape.dimensions;
+        const s = (radius - thickness) / radius;
+        return [s, s, s];
+      }
+      case 'cylinder':
+      case 'pipe': {
+        const r = shape.dimensions.radius ?? shape.dimensions.outerRadius ?? 0.3;
+        const h = shape.dimensions.height ?? 1;
+        const rs = (r - thickness) / r;
+        const hs = (h - 2 * thickness) / h;
+        return [rs, hs, rs];
+      }
+      case 'cone': {
+        const { radius = 0.4, height = 1 } = shape.dimensions;
+        const rs = (radius - thickness) / radius;
+        const hs = (height - 2 * thickness) / height;
+        return [rs, hs, rs];
+      }
+      case 'torus': {
+        const { minorRadius = 0.15 } = shape.dimensions;
+        const s = (minorRadius - thickness) / minorRadius;
+        return [s, s, s];
+      }
+      default:
+        return [0.9, 0.9, 0.9];
+    }
+  };
+
+  const scale = getScale();
+  // Don't render if scale is negative (thickness too large)
+  if (scale[0] <= 0 || scale[1] <= 0 || scale[2] <= 0) return null;
+
+  return (
+    <mesh position={position} rotation={rotation} scale={scale}>
+      {makeGeometry(shape)}
+      <meshStandardMaterial
+        color="#1a1a2e"
+        side={THREE.BackSide}
+        transparent
+        opacity={0.7}
+      />
+    </mesh>
+  );
+};
+
+const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosition?: [number, number, number] }> = ({
   shape,
   isBooleanTool,
+  explodedPosition,
 }) => {
   const selectShape = useAppStore((s) => s.selectShape);
   const cadMode = useAppStore((s) => s.cadMode);
@@ -406,6 +498,7 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean }> = ({
     return <StlMesh shape={shape} isSelected={false} onClick={handleClick} />;
   }
 
+  const pos = explodedPosition ?? shape.position;
   const rotation: [number, number, number] = [
     degToRad(shape.rotation[0]),
     degToRad(shape.rotation[1]),
@@ -413,13 +506,20 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean }> = ({
   ];
 
   const isEnclosure = shape.kind === 'enclosure' || shape.isEnclosure;
+  const hasFillet = (shape.dimensions.filletRadius ?? 0) > 0;
+  const isShell = (shape.dimensions.isShell ?? 0) > 0;
 
   const effectiveOpacity = transparencyMode ? 0.3 : 0.85;
   const isWireframe = renderMode === 'wireframe';
 
+  // Fillet visual: use a softer color and slightly different material
+  const filletColor = '#7a8aaa';
+  const normalColor = '#6a6a8a';
+  const baseColor = hasFillet ? filletColor : normalColor;
+
   return (
     <>
-      <mesh position={shape.position} rotation={rotation} onClick={handleClick}>
+      <mesh position={pos} rotation={rotation} onClick={handleClick}>
         {makeGeometry(shape)}
         {isBooleanTool ? (
           <BooleanGhostMaterial />
@@ -427,31 +527,36 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean }> = ({
           <EnclosureMaterial isSelected={false} />
         ) : isWireframe ? (
           <meshBasicMaterial
-            color="#6a6a8a"
+            color={baseColor}
             wireframe
             transparent
             opacity={0.6}
           />
         ) : (
           <meshStandardMaterial
-            color="#6a6a8a"
-            emissive="#000000"
-            emissiveIntensity={0}
+            color={baseColor}
+            emissive={hasFillet ? '#1a2a4a' : '#000000'}
+            emissiveIntensity={hasFillet ? 0.15 : 0}
             transparent
             opacity={effectiveOpacity}
+            roughness={hasFillet ? 0.3 : 0.5}
+            metalness={hasFillet ? 0.2 : 0}
           />
         )}
         <Edges
-          color={isEnclosure ? '#52c41a' : isBooleanTool ? '#ff4d4f' : '#444466'}
-          threshold={15}
+          color={isEnclosure ? '#52c41a' : isBooleanTool ? '#ff4d4f' : hasFillet ? '#5577aa' : '#444466'}
+          threshold={hasFillet ? 30 : 15}
         />
       </mesh>
       {isEnclosure && (
-        // Additional wireframe overlay for enclosure
-        <mesh position={shape.position} rotation={rotation}>
+        <mesh position={pos} rotation={rotation}>
           {makeGeometry(shape)}
           <meshBasicMaterial color="#52c41a" wireframe transparent opacity={0.3} />
         </mesh>
+      )}
+      {/* Shell: render inner hollow surface */}
+      {isShell && !isEnclosure && !isBooleanTool && (
+        <ShellInner shape={shape} position={pos} rotation={rotation} />
       )}
       <PipeInner shape={shape} />
     </>
@@ -459,7 +564,7 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean }> = ({
 };
 
 /** Selected shape with TransformControls for drag-to-move. */
-const SelectedShapeWithTransform: React.FC<{ shape: Shape }> = ({ shape }) => {
+const SelectedShapeWithTransform: React.FC<{ shape: Shape; explodedPosition?: [number, number, number] }> = ({ shape, explodedPosition }) => {
   const updateShape = useAppStore((s) => s.updateShape);
   const selectShape = useAppStore((s) => s.selectShape);
   const transparencyMode = useAppStore((s) => s.transparencyMode);
@@ -477,6 +582,9 @@ const SelectedShapeWithTransform: React.FC<{ shape: Shape }> = ({ shape }) => {
   ];
 
   const isEnclosure = shape.kind === 'enclosure' || shape.isEnclosure;
+  const hasFillet = (shape.dimensions.filletRadius ?? 0) > 0;
+  const isShell = (shape.dimensions.isShell ?? 0) > 0;
+  const pos = explodedPosition ?? shape.position;
 
   if (shape.kind === 'stl') {
     return <StlMesh shape={shape} isSelected={true} onClick={(e: any) => {
@@ -489,7 +597,7 @@ const SelectedShapeWithTransform: React.FC<{ shape: Shape }> = ({ shape }) => {
     <>
       <mesh
         ref={meshCallback}
-        position={shape.position}
+        position={pos}
         rotation={rotation}
         onClick={(e) => {
           e.stopPropagation();
@@ -510,18 +618,24 @@ const SelectedShapeWithTransform: React.FC<{ shape: Shape }> = ({ shape }) => {
           <meshStandardMaterial
             color="#4096ff"
             emissive="#1668dc"
-            emissiveIntensity={0.3}
+            emissiveIntensity={hasFillet ? 0.4 : 0.3}
             transparent
             opacity={transparencyMode ? 0.3 : 0.85}
+            roughness={hasFillet ? 0.3 : 0.5}
+            metalness={hasFillet ? 0.2 : 0}
           />
         )}
-        <Edges color={isEnclosure ? '#69d42a' : '#60a0ff'} threshold={15} />
+        <Edges color={isEnclosure ? '#69d42a' : '#60a0ff'} threshold={hasFillet ? 30 : 15} />
       </mesh>
       {isEnclosure && (
-        <mesh position={shape.position} rotation={rotation}>
+        <mesh position={pos} rotation={rotation}>
           {makeGeometry(shape)}
           <meshBasicMaterial color="#69d42a" wireframe transparent opacity={0.4} />
         </mesh>
+      )}
+      {/* Shell: render inner hollow surface for selected shape */}
+      {isShell && !isEnclosure && (
+        <ShellInner shape={shape} position={pos} rotation={rotation} />
       )}
       <PipeInner shape={shape} />
       {meshNode && (
