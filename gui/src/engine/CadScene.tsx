@@ -1,7 +1,8 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useRef } from 'react';
 import { Edges, TransformControls } from '@react-three/drei';
+import { useFrame } from '@react-three/fiber';
 import { useAppStore } from '../store/useAppStore';
-import type { Shape } from '../store/useAppStore';
+import type { Shape, DefeatureIssue, DefeatureIssueKind, NamedSelection } from '../store/useAppStore';
 import * as THREE from 'three';
 
 const degToRad = (d: number) => (d * Math.PI) / 180;
@@ -135,6 +136,165 @@ const BooleanGhostMaterial: React.FC = () => (
     wireframe
   />
 );
+
+// ============================================================
+// Defeaturing 3D Markers
+// ============================================================
+
+const issueMarkerColors: Record<DefeatureIssueKind, string> = {
+  small_face: '#ff4d4f',
+  short_edge: '#fa8c16',
+  small_hole: '#ffd700',
+  sliver_face: '#eb2f96',
+  gap: '#13c2c2',
+};
+
+/** Pulsing sphere marker for a single defeaturing issue */
+const IssueMarker: React.FC<{ issue: DefeatureIssue }> = ({ issue }) => {
+  const selectIssue = useAppStore((s) => s.selectIssue);
+  const selectedIssueId = useAppStore((s) => s.selectedIssueId);
+  const isSelected = selectedIssueId === issue.id;
+  const meshRef = useRef<THREE.Mesh>(null);
+
+  // Pulse animation for selected marker
+  useFrame(({ clock }) => {
+    if (meshRef.current) {
+      if (isSelected) {
+        const scale = 1.0 + Math.sin(clock.getElapsedTime() * 4) * 0.3;
+        meshRef.current.scale.setScalar(scale);
+      } else {
+        // Subtle breathing for non-selected
+        const scale = 1.0 + Math.sin(clock.getElapsedTime() * 2) * 0.1;
+        meshRef.current.scale.setScalar(scale);
+      }
+    }
+  });
+
+  const color = issueMarkerColors[issue.kind];
+
+  const handleClick = useCallback(
+    (e: any) => {
+      e.stopPropagation();
+      selectIssue(issue.id);
+    },
+    [issue.id, selectIssue]
+  );
+
+  return (
+    <group position={issue.position}>
+      {/* Main marker */}
+      <mesh ref={meshRef} onClick={handleClick}>
+        {issue.kind === 'small_face' && (
+          <sphereGeometry args={[0.03, 16, 16]} />
+        )}
+        {issue.kind === 'short_edge' && (
+          <boxGeometry args={[0.05, 0.005, 0.005]} />
+        )}
+        {issue.kind === 'small_hole' && (
+          <torusGeometry args={[0.02, 0.004, 8, 16]} />
+        )}
+        {issue.kind === 'sliver_face' && (
+          <octahedronGeometry args={[0.025, 0]} />
+        )}
+        {issue.kind === 'gap' && (
+          <boxGeometry args={[0.04, 0.004, 0.004]} />
+        )}
+        <meshBasicMaterial
+          color={color}
+          transparent
+          opacity={isSelected ? 0.95 : 0.7}
+        />
+      </mesh>
+
+      {/* Outer glow ring for selected */}
+      {isSelected && (
+        <mesh>
+          <ringGeometry args={[0.04, 0.06, 24]} />
+          <meshBasicMaterial
+            color={color}
+            transparent
+            opacity={0.4}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      )}
+    </group>
+  );
+};
+
+/** Renders all unfixed defeaturing issue markers in 3D */
+const DefeatureMarkers: React.FC = () => {
+  const issues = useAppStore((s) => s.defeatureIssues);
+
+  const unfixed = useMemo(
+    () => issues.filter((i) => !i.fixed),
+    [issues]
+  );
+
+  if (unfixed.length === 0) return null;
+
+  return (
+    <group>
+      {unfixed.map((issue) => (
+        <IssueMarker key={issue.id} issue={issue} />
+      ))}
+    </group>
+  );
+};
+
+// ============================================================
+// Named Selection Overlays for CFD Prep
+// ============================================================
+
+/** Semi-transparent colored face overlay for a named selection */
+const SelectionOverlay: React.FC<{ selection: NamedSelection }> = ({ selection }) => {
+  const hoveredSelectionName = useAppStore((s) => s.hoveredSelectionName);
+  const isHovered = hoveredSelectionName === selection.name;
+
+  // Compute rotation quaternion from the normal vector
+  const rotation = useMemo(() => {
+    const up = new THREE.Vector3(0, 0, 1); // plane faces +Z by default
+    const normal = new THREE.Vector3(...selection.normal);
+    const quaternion = new THREE.Quaternion().setFromUnitVectors(up, normal);
+    const euler = new THREE.Euler().setFromQuaternion(quaternion);
+    return [euler.x, euler.y, euler.z] as [number, number, number];
+  }, [selection.normal]);
+
+  return (
+    <mesh
+      position={selection.center}
+      rotation={rotation}
+    >
+      <planeGeometry args={[selection.width, selection.height]} />
+      <meshBasicMaterial
+        color={selection.color}
+        transparent
+        opacity={isHovered ? 0.5 : 0.2}
+        side={THREE.DoubleSide}
+        depthWrite={false}
+      />
+    </mesh>
+  );
+};
+
+/** Renders all named selection overlays in 3D */
+const NamedSelectionOverlays: React.FC = () => {
+  const namedSelections = useAppStore((s) => s.namedSelections);
+
+  if (namedSelections.length === 0) return null;
+
+  return (
+    <group>
+      {namedSelections.map((ns) => (
+        <SelectionOverlay key={ns.name} selection={ns} />
+      ))}
+    </group>
+  );
+};
+
+// ============================================================
+// Shape rendering
+// ============================================================
 
 const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean }> = ({
   shape,
@@ -326,6 +486,7 @@ const CadScene: React.FC = () => {
 
   return (
     <group>
+      {/* Regular shapes */}
       {shapes
         .filter((s) => s.id !== selectedShapeId)
         .map((shape) => (
@@ -341,6 +502,12 @@ const CadScene: React.FC = () => {
           shape={selectedShape}
         />
       )}
+
+      {/* Defeaturing issue markers in 3D */}
+      <DefeatureMarkers />
+
+      {/* Named selection overlays for CFD prep */}
+      <NamedSelectionOverlays />
     </group>
   );
 };

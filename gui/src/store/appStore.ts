@@ -9,6 +9,8 @@ export type {
   StlData,
   DefeatureIssueKind,
   DefeatureIssue,
+  NamedSelectionType,
+  NamedSelection,
   MeshDisplayData,
   FieldData,
   CameraMode,

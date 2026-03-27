@@ -40,6 +40,22 @@ export interface DefeatureIssue {
   description: string;
   size: number;
   fixed: boolean;
+  position: [number, number, number];
+  shapeId: string;
+}
+
+// ---- Named Selection types ----
+export type NamedSelectionType = 'inlet' | 'outlet' | 'wall' | 'symmetry' | 'interface' | 'custom';
+
+export interface NamedSelection {
+  name: string;
+  type: NamedSelectionType;
+  faces: number[];
+  center: [number, number, number];
+  normal: [number, number, number];
+  width: number;
+  height: number;
+  color: string;
 }
 
 // ---- Mesh types ----
@@ -173,6 +189,7 @@ interface AppState {
   selectedShapeId: string | null;
   booleanOps: BooleanOperation[];
   defeatureIssues: DefeatureIssue[];
+  selectedIssueId: string | null;
   cadMode: 'select' | 'boolean_select_target' | 'boolean_select_tool' | 'symmetry_cut';
   pendingBooleanOp: BooleanOp | null;
   pendingBooleanTargetId: string | null;
@@ -188,6 +205,25 @@ interface AppState {
   setDefeatureIssues: (issues: DefeatureIssue[]) => void;
   fixDefeatureIssue: (id: string) => void;
   fixAllDefeatureIssues: () => void;
+  selectIssue: (id: string | null) => void;
+  undoLastFix: () => void;
+
+  // CFD Prep
+  namedSelections: NamedSelection[];
+  cfdPrepStep: number;
+  enclosureCreated: boolean;
+  fluidExtracted: boolean;
+  topologyShared: boolean;
+  hoveredSelectionName: string | null;
+  setNamedSelections: (selections: NamedSelection[]) => void;
+  addNamedSelection: (selection: NamedSelection) => void;
+  removeNamedSelection: (name: string) => void;
+  updateNamedSelection: (name: string, patch: Partial<NamedSelection>) => void;
+  setCfdPrepStep: (step: number) => void;
+  setEnclosureCreated: (v: boolean) => void;
+  setFluidExtracted: (v: boolean) => void;
+  setTopologyShared: (v: boolean) => void;
+  setHoveredSelectionName: (name: string | null) => void;
 
   // Mesh
   meshZones: MeshZone[];
@@ -260,6 +296,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   selectedShapeId: null,
   booleanOps: [],
   defeatureIssues: [],
+  selectedIssueId: null,
   cadMode: 'select',
   pendingBooleanOp: null,
   pendingBooleanTargetId: null,
@@ -283,7 +320,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setCadMode: (mode) => set({ cadMode: mode }),
   setPendingBooleanOp: (op) => set({ pendingBooleanOp: op }),
   setPendingBooleanTargetId: (id) => set({ pendingBooleanTargetId: id }),
-  setDefeatureIssues: (issues) => set({ defeatureIssues: issues }),
+  setDefeatureIssues: (issues) => set({ defeatureIssues: issues, selectedIssueId: null }),
   fixDefeatureIssue: (id) =>
     set((s) => ({
       defeatureIssues: s.defeatureIssues.map((issue) =>
@@ -294,6 +331,48 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({
       defeatureIssues: s.defeatureIssues.map((issue) => ({ ...issue, fixed: true })),
     })),
+  selectIssue: (id) => set({ selectedIssueId: id }),
+  undoLastFix: () =>
+    set((s) => {
+      // Find the last fixed issue and undo it
+      const fixedIndices: number[] = [];
+      s.defeatureIssues.forEach((issue, idx) => {
+        if (issue.fixed) fixedIndices.push(idx);
+      });
+      if (fixedIndices.length === 0) return s;
+      const lastFixedIdx = fixedIndices[fixedIndices.length - 1];
+      return {
+        defeatureIssues: s.defeatureIssues.map((issue, idx) =>
+          idx === lastFixedIdx ? { ...issue, fixed: false } : issue
+        ),
+      };
+    }),
+
+  // CFD Prep
+  namedSelections: [],
+  cfdPrepStep: 0,
+  enclosureCreated: false,
+  fluidExtracted: false,
+  topologyShared: false,
+  hoveredSelectionName: null,
+  setNamedSelections: (selections) => set({ namedSelections: selections }),
+  addNamedSelection: (selection) =>
+    set((s) => ({ namedSelections: [...s.namedSelections, selection] })),
+  removeNamedSelection: (name) =>
+    set((s) => ({
+      namedSelections: s.namedSelections.filter((ns) => ns.name !== name),
+    })),
+  updateNamedSelection: (name, patch) =>
+    set((s) => ({
+      namedSelections: s.namedSelections.map((ns) =>
+        ns.name === name ? { ...ns, ...patch } : ns
+      ),
+    })),
+  setCfdPrepStep: (step) => set({ cfdPrepStep: step }),
+  setEnclosureCreated: (v) => set({ enclosureCreated: v }),
+  setFluidExtracted: (v) => set({ fluidExtracted: v }),
+  setTopologyShared: (v) => set({ topologyShared: v }),
+  setHoveredSelectionName: (name) => set({ hoveredSelectionName: name }),
 
   // Mesh
   meshZones: [],

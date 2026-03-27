@@ -353,13 +353,13 @@ const PrimitiveToolbar: React.FC = () => {
       icon: <BugOutlined />,
       label: 'Analyze',
       onClick: () => {
-        // Simulate defeaturing analysis
+        // Simulate defeaturing analysis with 3D positions
         const issues = [
-          { id: 'df-1', kind: 'small_face' as const, description: 'Face area 0.001 mm^2 on box-shape-1', size: 0.001, fixed: false },
-          { id: 'df-2', kind: 'short_edge' as const, description: 'Edge length 0.05 mm on cylinder-shape-2', size: 0.05, fixed: false },
-          { id: 'df-3', kind: 'small_hole' as const, description: 'Hole diameter 0.2 mm on box-shape-1', size: 0.2, fixed: false },
-          { id: 'df-4', kind: 'sliver_face' as const, description: 'Sliver face AR=50 on sphere-shape-3', size: 50, fixed: false },
-          { id: 'df-5', kind: 'gap' as const, description: 'Gap 0.01 mm between box-shape-1 and cylinder-shape-2', size: 0.01, fixed: false },
+          { id: 'df-1', kind: 'small_face' as const, description: 'Face area 0.001 mm^2 on box-shape-1', size: 0.001, fixed: false, position: [0.5, 0.3, 0.1] as [number, number, number], shapeId: 'shape-1' },
+          { id: 'df-2', kind: 'short_edge' as const, description: 'Edge length 0.05 mm on cylinder-shape-2', size: 0.05, fixed: false, position: [-0.3, 0.5, 0.2] as [number, number, number], shapeId: 'shape-2' },
+          { id: 'df-3', kind: 'small_hole' as const, description: 'Hole diameter 0.2 mm on box-shape-1', size: 0.2, fixed: false, position: [0.4, -0.2, 0.5] as [number, number, number], shapeId: 'shape-1' },
+          { id: 'df-4', kind: 'sliver_face' as const, description: 'Sliver face AR=50 on sphere-shape-3', size: 50, fixed: false, position: [-0.1, 0.4, -0.3] as [number, number, number], shapeId: 'shape-3' },
+          { id: 'df-5', kind: 'gap' as const, description: 'Gap 0.01 mm between box-shape-1 and cylinder-shape-2', size: 0.01, fixed: false, position: [0.6, 0.0, 0.0] as [number, number, number], shapeId: 'shape-1' },
         ];
         useAppStore.getState().setDefeatureIssues(issues);
         message.success(`Defeaturing analysis complete: ${issues.length} issues found.`);
