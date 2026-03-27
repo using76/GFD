@@ -4,6 +4,11 @@ export { useAppStore } from './useAppStore';
 export type {
   Shape,
   ShapeKind,
+  BooleanOp,
+  BooleanOperation,
+  StlData,
+  DefeatureIssueKind,
+  DefeatureIssue,
   MeshDisplayData,
   FieldData,
   CameraMode,

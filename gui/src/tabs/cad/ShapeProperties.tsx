@@ -1,9 +1,31 @@
 import React from 'react';
-import { Typography, Button, Divider } from 'antd';
+import { Typography, Button, Divider, Tag } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 import PropertyGrid from '../../components/PropertyGrid';
 import type { PropertyField } from '../../components/PropertyGrid';
 import { useAppStore } from '../../store/useAppStore';
+
+/** Dimension field definitions per shape kind */
+const kindDimensionLabels: Record<string, Record<string, string>> = {
+  box: { width: 'Width', height: 'Height', depth: 'Depth' },
+  sphere: { radius: 'Radius' },
+  cylinder: { radius: 'Radius', height: 'Height' },
+  cone: { radius: 'Base Radius', height: 'Height' },
+  torus: { majorRadius: 'Major Radius', minorRadius: 'Minor Radius' },
+  pipe: { outerRadius: 'Outer Radius', innerRadius: 'Inner Radius', height: 'Height' },
+  enclosure: { width: 'Width', height: 'Height', depth: 'Depth' },
+};
+
+const kindTagColors: Record<string, string> = {
+  box: 'blue',
+  sphere: 'green',
+  cylinder: 'orange',
+  cone: 'magenta',
+  torus: 'purple',
+  pipe: 'cyan',
+  stl: 'gold',
+  enclosure: 'lime',
+};
 
 const ShapeProperties: React.FC = () => {
   const selectedShapeId = useAppStore((s) => s.selectedShapeId);
@@ -23,21 +45,25 @@ const ShapeProperties: React.FC = () => {
     );
   }
 
+  const isStl = shape.kind === 'stl';
+
   const baseFields: PropertyField[] = [
     { key: 'name', label: 'Name', type: 'string' },
     { key: 'position', label: 'Position', type: 'vector3', step: 0.1 },
     { key: 'rotation', label: 'Rotation (deg)', type: 'vector3', step: 1 },
   ];
 
-  const dimFields: PropertyField[] = Object.keys(shape.dimensions).map(
-    (k) => ({
-      key: `dim_${k}`,
-      label: k.charAt(0).toUpperCase() + k.slice(1),
-      type: 'number' as const,
-      min: 0.001,
-      step: 0.1,
-    })
-  );
+  // Build dimension fields using kind-specific labels
+  const labelMap = kindDimensionLabels[shape.kind] ?? {};
+  const dimFields: PropertyField[] = isStl
+    ? []
+    : Object.keys(shape.dimensions).map((k) => ({
+        key: `dim_${k}`,
+        label: labelMap[k] ?? k.charAt(0).toUpperCase() + k.slice(1),
+        type: 'number' as const,
+        min: 0.001,
+        step: 0.1,
+      }));
 
   const values: Record<string, unknown> = {
     name: shape.name,
@@ -65,12 +91,51 @@ const ShapeProperties: React.FC = () => {
 
   return (
     <div>
+      <div style={{ padding: '8px 12px', borderBottom: '1px solid #303030' }}>
+        <Tag color={kindTagColors[shape.kind] ?? 'default'}>
+          {shape.kind.toUpperCase()}
+        </Tag>
+        {shape.isEnclosure && (
+          <Tag color="lime" style={{ marginLeft: 4 }}>
+            ENCLOSURE
+          </Tag>
+        )}
+        {shape.booleanRef && (
+          <Tag color="gold" style={{ marginLeft: 4 }}>
+            BOOLEAN
+          </Tag>
+        )}
+      </div>
+
       <PropertyGrid
-        title={`${shape.kind.toUpperCase()} Properties`}
+        title={`${shape.kind.charAt(0).toUpperCase() + shape.kind.slice(1)} Properties`}
         fields={[...baseFields, ...dimFields]}
         values={values}
         onChange={handleChange}
       />
+
+      {/* STL-specific read-only info */}
+      {isStl && shape.stlData && (
+        <div style={{ padding: '0 12px 8px' }}>
+          <Divider style={{ margin: '4px 0 8px' }} />
+          <div style={{ fontSize: 12, color: '#999' }}>
+            <div>
+              <strong>Vertices:</strong> {shape.stlData.vertices.length / 3}
+            </div>
+            <div>
+              <strong>Triangles:</strong> {shape.stlData.faceCount}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Pipe validation hint */}
+      {shape.kind === 'pipe' && (
+        <div style={{ padding: '0 12px 8px', fontSize: 11, color: '#faad14' }}>
+          Inner radius must be smaller than outer radius.
+        </div>
+      )}
+
       <Divider style={{ margin: '4px 12px' }} />
       <div style={{ padding: '0 12px 12px' }}>
         <Button

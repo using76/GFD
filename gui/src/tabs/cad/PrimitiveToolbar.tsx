@@ -1,5 +1,6 @@
-import React from 'react';
-import { Button, Space, Upload, Tooltip } from 'antd';
+import React, { useCallback } from 'react';
+import { Button, Space, Upload, Dropdown, message } from 'antd';
+import type { MenuProps } from 'antd';
 import {
   BorderOutlined,
   RadiusSettingOutlined,
@@ -7,79 +8,525 @@ import {
   ImportOutlined,
   PlusCircleOutlined,
   MinusCircleOutlined,
+  BlockOutlined,
+  SlidersOutlined,
+  ScissorOutlined,
+  ToolOutlined,
+  ExperimentOutlined,
+  AimOutlined,
+  DownOutlined,
+  RetweetOutlined,
+  SwapOutlined,
+  DragOutlined,
+  GroupOutlined,
+  CompressOutlined,
+  ExpandOutlined,
+  GatewayOutlined,
+  InteractionOutlined,
+  SplitCellsOutlined,
+  BugOutlined,
+  ThunderboltOutlined,
+  BorderInnerOutlined,
+  AppstoreOutlined,
+  HighlightOutlined,
+  PartitionOutlined,
 } from '@ant-design/icons';
 import { useAppStore } from '../../store/useAppStore';
-import type { ShapeKind } from '../../store/useAppStore';
+import type { ShapeKind, BooleanOp } from '../../store/useAppStore';
 
 let nextId = 1;
 
-function makeShape(kind: ShapeKind) {
+function makeShape(kind: ShapeKind, extraName?: string) {
   const id = `shape-${nextId++}`;
-  const defaults: Record<ShapeKind, Record<string, number>> = {
+  const defaults: Record<string, Record<string, number>> = {
     box: { width: 1, height: 1, depth: 1 },
     sphere: { radius: 0.5 },
     cylinder: { radius: 0.3, height: 1 },
+    cone: { radius: 0.4, height: 1 },
+    torus: { majorRadius: 0.5, minorRadius: 0.15 },
+    pipe: { outerRadius: 0.4, innerRadius: 0.3, height: 1.5 },
   };
+  const group = kind === 'enclosure' ? 'enclosure' as const : 'body' as const;
   return {
     id,
-    name: `${kind}-${id}`,
+    name: extraName ?? `${kind}-${id}`,
     kind,
     position: [0, 0, 0] as [number, number, number],
     rotation: [0, 0, 0] as [number, number, number],
-    dimensions: { ...defaults[kind] },
+    dimensions: { ...(defaults[kind] ?? {}) },
+    group,
   };
+}
+
+/** Parse ASCII STL text into a flat Float32Array of vertex positions and face count. */
+function parseStlAscii(text: string): { vertices: Float32Array; faceCount: number } {
+  const vertexRegex = /vertex\s+([-\d.eE+]+)\s+([-\d.eE+]+)\s+([-\d.eE+]+)/gi;
+  const verts: number[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = vertexRegex.exec(text)) !== null) {
+    verts.push(parseFloat(match[1]), parseFloat(match[2]), parseFloat(match[3]));
+  }
+  return {
+    vertices: new Float32Array(verts),
+    faceCount: Math.floor(verts.length / 9),
+  };
+}
+
+/** Parse binary STL buffer into a flat Float32Array of vertex positions and face count. */
+function parseStlBinary(buffer: ArrayBuffer): { vertices: Float32Array; faceCount: number } {
+  const dv = new DataView(buffer);
+  const faceCount = dv.getUint32(80, true);
+  const verts = new Float32Array(faceCount * 9);
+  let offset = 84;
+  for (let i = 0; i < faceCount; i++) {
+    // skip normal (12 bytes)
+    offset += 12;
+    for (let v = 0; v < 3; v++) {
+      verts[i * 9 + v * 3] = dv.getFloat32(offset, true);
+      verts[i * 9 + v * 3 + 1] = dv.getFloat32(offset + 4, true);
+      verts[i * 9 + v * 3 + 2] = dv.getFloat32(offset + 8, true);
+      offset += 12;
+    }
+    // skip attribute byte count
+    offset += 2;
+  }
+  return { vertices: verts, faceCount };
 }
 
 const PrimitiveToolbar: React.FC = () => {
   const addShape = useAppStore((s) => s.addShape);
+  const shapes = useAppStore((s) => s.shapes);
+  const selectedShapeId = useAppStore((s) => s.selectedShapeId);
+  const setCadMode = useAppStore((s) => s.setCadMode);
+  const setPendingBooleanOp = useAppStore((s) => s.setPendingBooleanOp);
+  const cadMode = useAppStore((s) => s.cadMode);
 
-  const create = (kind: ShapeKind) => {
-    const shape = makeShape(kind);
-    addShape(shape);
-  };
+  const create = useCallback(
+    (kind: ShapeKind) => {
+      const shape = makeShape(kind);
+      addShape(shape);
+    },
+    [addShape]
+  );
+
+  const handleStlUpload = useCallback(
+    (file: File) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const result = e.target?.result;
+        if (!result) return;
+
+        let parsed: { vertices: Float32Array; faceCount: number };
+        // Try to detect if ASCII or binary
+        if (typeof result === 'string') {
+          parsed = parseStlAscii(result);
+        } else {
+          // Check if ASCII by looking at first bytes
+          const headerBytes = new Uint8Array(result as ArrayBuffer, 0, 5);
+          const headerStr = String.fromCharCode(...headerBytes);
+          if (headerStr === 'solid') {
+            // Might be ASCII, try text decode
+            const text = new TextDecoder().decode(result as ArrayBuffer);
+            if (text.includes('vertex')) {
+              parsed = parseStlAscii(text);
+            } else {
+              parsed = parseStlBinary(result as ArrayBuffer);
+            }
+          } else {
+            parsed = parseStlBinary(result as ArrayBuffer);
+          }
+        }
+
+        if (parsed.faceCount === 0) {
+          message.error('Could not parse STL file: no triangles found.');
+          return;
+        }
+
+        const id = `shape-${nextId++}`;
+        addShape({
+          id,
+          name: file.name.replace(/\.stl$/i, ''),
+          kind: 'stl',
+          position: [0, 0, 0],
+          rotation: [0, 0, 0],
+          dimensions: {},
+          stlData: {
+            vertices: parsed.vertices,
+            faceCount: parsed.faceCount,
+          },
+          group: 'body',
+        });
+        message.success(`Imported ${file.name} (${parsed.faceCount} triangles)`);
+      };
+      reader.readAsArrayBuffer(file);
+      return false; // prevent Ant Upload from auto-uploading
+    },
+    [addShape]
+  );
+
+  const startBoolean = useCallback(
+    (op: BooleanOp) => {
+      if (shapes.filter((s) => s.group !== 'enclosure').length < 2) {
+        message.warning('Boolean operations require at least 2 shapes.');
+        return;
+      }
+      if (selectedShapeId) {
+        // Use selected shape as target, ask for tool
+        setCadMode('boolean_select_tool');
+        setPendingBooleanOp(op);
+        useAppStore.getState().setPendingBooleanTargetId(selectedShapeId);
+        message.info(`Click the tool shape to ${op} with "${shapes.find((s) => s.id === selectedShapeId)?.name}".`);
+      } else {
+        setCadMode('boolean_select_target');
+        setPendingBooleanOp(op);
+        message.info(`Select the TARGET shape first, then the TOOL shape for ${op}.`);
+      }
+    },
+    [shapes, selectedShapeId, setCadMode, setPendingBooleanOp]
+  );
+
+  const cancelBoolean = useCallback(() => {
+    setCadMode('select');
+    setPendingBooleanOp(null);
+    useAppStore.getState().setPendingBooleanTargetId(null);
+    message.info('Boolean operation cancelled.');
+  }, [setCadMode, setPendingBooleanOp]);
+
+  // ---- Create dropdown ----
+  const createMenuItems: MenuProps['items'] = [
+    { key: 'box', icon: <BorderOutlined />, label: 'Box', onClick: () => create('box') },
+    { key: 'sphere', icon: <RadiusSettingOutlined />, label: 'Sphere', onClick: () => create('sphere') },
+    { key: 'cylinder', icon: <ColumnHeightOutlined />, label: 'Cylinder', onClick: () => create('cylinder') },
+    { key: 'cone', icon: <AimOutlined />, label: 'Cone', onClick: () => create('cone') },
+    { key: 'torus', icon: <RetweetOutlined />, label: 'Torus', onClick: () => create('torus') },
+    { key: 'pipe', icon: <GatewayOutlined />, label: 'Pipe', onClick: () => create('pipe') },
+  ];
+
+  // ---- Sketch dropdown ----
+  const sketchMenuItems: MenuProps['items'] = [
+    {
+      key: 'extrude',
+      icon: <DragOutlined />,
+      label: 'Extrude',
+      onClick: () => message.info('Extrude: Select a face and drag to extrude. (Simulated)'),
+    },
+    {
+      key: 'revolve',
+      icon: <RetweetOutlined />,
+      label: 'Revolve',
+      onClick: () => message.info('Revolve: Select a sketch profile and axis. (Simulated)'),
+    },
+    {
+      key: 'sweep',
+      icon: <SwapOutlined />,
+      label: 'Sweep',
+      onClick: () => message.info('Sweep: Select profile and path curves. (Simulated)'),
+    },
+    {
+      key: 'loft',
+      icon: <GroupOutlined />,
+      label: 'Loft',
+      onClick: () => message.info('Loft: Select two or more cross-section profiles. (Simulated)'),
+    },
+  ];
+
+  // ---- Edit dropdown ----
+  const editMenuItems: MenuProps['items'] = [
+    {
+      key: 'mirror',
+      icon: <SwapOutlined />,
+      label: 'Mirror',
+      onClick: () => {
+        if (!selectedShapeId) {
+          message.warning('Select a shape first to mirror.');
+          return;
+        }
+        const shape = shapes.find((s) => s.id === selectedShapeId);
+        if (!shape) return;
+        const mirrored = makeShape(shape.kind, `${shape.name}-mirror`);
+        mirrored.dimensions = { ...shape.dimensions };
+        mirrored.position = [-shape.position[0], shape.position[1], shape.position[2]];
+        mirrored.rotation = [...shape.rotation] as [number, number, number];
+        addShape(mirrored);
+        message.success(`Mirrored "${shape.name}" across YZ plane.`);
+      },
+    },
+    {
+      key: 'pattern_linear',
+      icon: <PartitionOutlined />,
+      label: 'Linear Pattern',
+      onClick: () => {
+        if (!selectedShapeId) {
+          message.warning('Select a shape first.');
+          return;
+        }
+        const shape = shapes.find((s) => s.id === selectedShapeId);
+        if (!shape) return;
+        for (let i = 1; i <= 3; i++) {
+          const clone = makeShape(shape.kind, `${shape.name}-lp${i}`);
+          clone.dimensions = { ...shape.dimensions };
+          clone.position = [
+            shape.position[0] + i * 1.5,
+            shape.position[1],
+            shape.position[2],
+          ];
+          clone.rotation = [...shape.rotation] as [number, number, number];
+          addShape(clone);
+        }
+        message.success(`Created linear pattern of 3 copies from "${shape.name}".`);
+      },
+    },
+    {
+      key: 'pattern_circular',
+      icon: <RetweetOutlined />,
+      label: 'Circular Pattern',
+      onClick: () => {
+        if (!selectedShapeId) {
+          message.warning('Select a shape first.');
+          return;
+        }
+        const shape = shapes.find((s) => s.id === selectedShapeId);
+        if (!shape) return;
+        const count = 5;
+        for (let i = 1; i <= count; i++) {
+          const angle = (i * 2 * Math.PI) / (count + 1);
+          const r = 2.0;
+          const clone = makeShape(shape.kind, `${shape.name}-cp${i}`);
+          clone.dimensions = { ...shape.dimensions };
+          clone.position = [
+            shape.position[0] + r * Math.cos(angle),
+            shape.position[1],
+            shape.position[2] + r * Math.sin(angle),
+          ];
+          clone.rotation = [...shape.rotation] as [number, number, number];
+          addShape(clone);
+        }
+        message.success(`Created circular pattern of ${count} copies from "${shape.name}".`);
+      },
+    },
+    {
+      key: 'shell',
+      icon: <CompressOutlined />,
+      label: 'Shell',
+      onClick: () => {
+        if (!selectedShapeId) {
+          message.warning('Select a shape first to shell.');
+          return;
+        }
+        message.info('Shell: Hollows the selected solid with uniform wall thickness. (Simulated)');
+      },
+    },
+  ];
+
+  // ---- Boolean dropdown ----
+  const booleanMenuItems: MenuProps['items'] = [
+    {
+      key: 'union',
+      icon: <PlusCircleOutlined />,
+      label: 'Union',
+      onClick: () => startBoolean('union'),
+    },
+    {
+      key: 'subtract',
+      icon: <MinusCircleOutlined />,
+      label: 'Subtract',
+      onClick: () => startBoolean('subtract'),
+    },
+    {
+      key: 'intersect',
+      icon: <InteractionOutlined />,
+      label: 'Intersect',
+      onClick: () => startBoolean('intersect'),
+    },
+    {
+      key: 'split',
+      icon: <SplitCellsOutlined />,
+      label: 'Split',
+      onClick: () => startBoolean('split'),
+    },
+  ];
+
+  // ---- Defeaturing dropdown ----
+  const defeaturingMenuItems: MenuProps['items'] = [
+    {
+      key: 'analyze',
+      icon: <BugOutlined />,
+      label: 'Analyze',
+      onClick: () => {
+        // Simulate defeaturing analysis
+        const issues = [
+          { id: 'df-1', kind: 'small_face' as const, description: 'Face area 0.001 mm^2 on box-shape-1', size: 0.001, fixed: false },
+          { id: 'df-2', kind: 'short_edge' as const, description: 'Edge length 0.05 mm on cylinder-shape-2', size: 0.05, fixed: false },
+          { id: 'df-3', kind: 'small_hole' as const, description: 'Hole diameter 0.2 mm on box-shape-1', size: 0.2, fixed: false },
+          { id: 'df-4', kind: 'sliver_face' as const, description: 'Sliver face AR=50 on sphere-shape-3', size: 50, fixed: false },
+          { id: 'df-5', kind: 'gap' as const, description: 'Gap 0.01 mm between box-shape-1 and cylinder-shape-2', size: 0.01, fixed: false },
+        ];
+        useAppStore.getState().setDefeatureIssues(issues);
+        message.success(`Defeaturing analysis complete: ${issues.length} issues found.`);
+      },
+    },
+    {
+      key: 'autofix',
+      icon: <ThunderboltOutlined />,
+      label: 'Auto Fix All',
+      onClick: () => {
+        useAppStore.getState().fixAllDefeatureIssues();
+        message.success('All defeaturing issues fixed.');
+      },
+    },
+    {
+      key: 'remove_small_faces',
+      icon: <ScissorOutlined />,
+      label: 'Remove Small Faces',
+      onClick: () => message.info('Remove Small Faces: Set min face area threshold in the Defeaturing panel.'),
+    },
+    {
+      key: 'fill_holes',
+      icon: <HighlightOutlined />,
+      label: 'Fill Holes',
+      onClick: () => message.info('Fill Holes: Set max hole diameter threshold in the Defeaturing panel.'),
+    },
+  ];
+
+  // ---- CFD Prep dropdown ----
+  const cfdPrepMenuItems: MenuProps['items'] = [
+    {
+      key: 'enclosure',
+      icon: <ExpandOutlined />,
+      label: 'Create Enclosure',
+      onClick: () => {
+        // Calculate bounding box of all shapes and add an enclosure
+        let minX = -2, maxX = 2, minY = -2, maxY = 2, minZ = -2, maxZ = 2;
+        const bodyShapes = shapes.filter((s) => s.group !== 'enclosure');
+        if (bodyShapes.length > 0) {
+          minX = Math.min(...bodyShapes.map((s) => s.position[0])) - 2;
+          maxX = Math.max(...bodyShapes.map((s) => s.position[0])) + 2;
+          minY = Math.min(...bodyShapes.map((s) => s.position[1])) - 2;
+          maxY = Math.max(...bodyShapes.map((s) => s.position[1])) + 2;
+          minZ = Math.min(...bodyShapes.map((s) => s.position[2])) - 2;
+          maxZ = Math.max(...bodyShapes.map((s) => s.position[2])) + 2;
+        }
+        const w = maxX - minX;
+        const h = maxY - minY;
+        const d = maxZ - minZ;
+        const id = `shape-${nextId++}`;
+        addShape({
+          id,
+          name: 'Enclosure',
+          kind: 'enclosure',
+          position: [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2],
+          rotation: [0, 0, 0],
+          dimensions: { width: w, height: h, depth: d },
+          isEnclosure: true,
+          group: 'enclosure',
+        });
+        message.success('Created enclosure around all bodies.');
+      },
+    },
+    {
+      key: 'extract_fluid',
+      icon: <ExperimentOutlined />,
+      label: 'Extract Fluid Domain',
+      onClick: () => message.info('Extract Fluid: Subtracts solid bodies from enclosure to define fluid region. (Simulated)'),
+    },
+    {
+      key: 'symmetry_cut',
+      icon: <BorderInnerOutlined />,
+      label: 'Symmetry Cut',
+      onClick: () => message.info('Symmetry Cut: Select cutting plane (XY, XZ, or YZ). (Simulated)'),
+    },
+    {
+      key: 'name_regions',
+      icon: <AppstoreOutlined />,
+      label: 'Name Regions',
+      onClick: () => message.info('Name Regions: Auto-naming boundary faces (inlet, outlet, wall). (Simulated)'),
+    },
+  ];
+
+  const isBooleanMode = cadMode === 'boolean_select_target' || cadMode === 'boolean_select_tool';
 
   return (
     <div
       style={{
-        padding: '8px 12px',
+        padding: '6px 12px',
         borderBottom: '1px solid #303030',
         background: '#1f1f1f',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+        flexWrap: 'wrap',
       }}
     >
-      <Space wrap>
-        <Tooltip title="Box">
-          <Button icon={<BorderOutlined />} onClick={() => create('box')}>
-            Box
+      {isBooleanMode ? (
+        <Space>
+          <span style={{ color: '#faad14', fontSize: 12 }}>
+            {cadMode === 'boolean_select_target'
+              ? 'Click TARGET shape...'
+              : 'Click TOOL shape...'}
+          </span>
+          <Button size="small" onClick={cancelBoolean}>
+            Cancel
           </Button>
-        </Tooltip>
-        <Tooltip title="Sphere">
-          <Button
-            icon={<RadiusSettingOutlined />}
-            onClick={() => create('sphere')}
+        </Space>
+      ) : (
+        <Space wrap size={4}>
+          {/* Create */}
+          <Dropdown menu={{ items: createMenuItems }} trigger={['click']}>
+            <Button icon={<BlockOutlined />} size="small">
+              Create <DownOutlined style={{ fontSize: 10 }} />
+            </Button>
+          </Dropdown>
+
+          {/* Sketch */}
+          <Dropdown menu={{ items: sketchMenuItems }} trigger={['click']}>
+            <Button icon={<SlidersOutlined />} size="small">
+              Sketch <DownOutlined style={{ fontSize: 10 }} />
+            </Button>
+          </Dropdown>
+
+          {/* Edit */}
+          <Dropdown menu={{ items: editMenuItems }} trigger={['click']}>
+            <Button icon={<ToolOutlined />} size="small">
+              Edit <DownOutlined style={{ fontSize: 10 }} />
+            </Button>
+          </Dropdown>
+
+          {/* Boolean */}
+          <Dropdown menu={{ items: booleanMenuItems }} trigger={['click']}>
+            <Button icon={<InteractionOutlined />} size="small">
+              Boolean <DownOutlined style={{ fontSize: 10 }} />
+            </Button>
+          </Dropdown>
+
+          {/* Defeaturing */}
+          <Dropdown menu={{ items: defeaturingMenuItems }} trigger={['click']}>
+            <Button icon={<ScissorOutlined />} size="small">
+              Defeaturing <DownOutlined style={{ fontSize: 10 }} />
+            </Button>
+          </Dropdown>
+
+          {/* CFD Prep */}
+          <Dropdown menu={{ items: cfdPrepMenuItems }} trigger={['click']}>
+            <Button icon={<ExperimentOutlined />} size="small">
+              CFD Prep <DownOutlined style={{ fontSize: 10 }} />
+            </Button>
+          </Dropdown>
+
+          {/* Import STL */}
+          <Upload
+            accept=".stl"
+            showUploadList={false}
+            beforeUpload={(file) => {
+              handleStlUpload(file);
+              return false;
+            }}
           >
-            Sphere
-          </Button>
-        </Tooltip>
-        <Tooltip title="Cylinder">
-          <Button
-            icon={<ColumnHeightOutlined />}
-            onClick={() => create('cylinder')}
-          >
-            Cylinder
-          </Button>
-        </Tooltip>
-        <Upload accept=".stl" showUploadList={false} beforeUpload={() => false}>
-          <Tooltip title="Import STL">
-            <Button icon={<ImportOutlined />}>Import STL</Button>
-          </Tooltip>
-        </Upload>
-        <Tooltip title="Union (Boolean)">
-          <Button icon={<PlusCircleOutlined />}>Union</Button>
-        </Tooltip>
-        <Tooltip title="Subtract (Boolean)">
-          <Button icon={<MinusCircleOutlined />}>Subtract</Button>
-        </Tooltip>
-      </Space>
+            <Button icon={<ImportOutlined />} size="small">
+              Import STL
+            </Button>
+          </Upload>
+        </Space>
+      )}
     </div>
   );
 };

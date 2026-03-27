@@ -1,7 +1,22 @@
 import { create } from 'zustand';
 
 // ---- Shape types for CAD ----
-export type ShapeKind = 'box' | 'sphere' | 'cylinder';
+export type ShapeKind = 'box' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'pipe' | 'stl' | 'enclosure';
+
+export type BooleanOp = 'union' | 'subtract' | 'intersect' | 'split';
+
+export interface BooleanOperation {
+  id: string;
+  name: string;
+  op: BooleanOp;
+  targetId: string;
+  toolId: string;
+}
+
+export interface StlData {
+  vertices: Float32Array;
+  faceCount: number;
+}
 
 export interface Shape {
   id: string;
@@ -9,7 +24,22 @@ export interface Shape {
   kind: ShapeKind;
   position: [number, number, number];
   rotation: [number, number, number];
-  dimensions: Record<string, number>; // box: width/height/depth, sphere: radius, cylinder: radius/height
+  dimensions: Record<string, number>;
+  stlData?: StlData;           // present when kind === 'stl'
+  booleanRef?: string;         // id of BooleanOperation that produced this compound shape
+  isEnclosure?: boolean;       // true for CFD prep enclosures
+  group?: 'body' | 'boolean' | 'enclosure'; // tree grouping
+}
+
+// ---- Defeaturing types ----
+export type DefeatureIssueKind = 'small_face' | 'short_edge' | 'small_hole' | 'sliver_face' | 'gap';
+
+export interface DefeatureIssue {
+  id: string;
+  kind: DefeatureIssueKind;
+  description: string;
+  size: number;
+  fixed: boolean;
 }
 
 // ---- Mesh types ----
@@ -141,10 +171,23 @@ interface AppState {
   // CAD
   shapes: Shape[];
   selectedShapeId: string | null;
+  booleanOps: BooleanOperation[];
+  defeatureIssues: DefeatureIssue[];
+  cadMode: 'select' | 'boolean_select_target' | 'boolean_select_tool' | 'symmetry_cut';
+  pendingBooleanOp: BooleanOp | null;
+  pendingBooleanTargetId: string | null;
   addShape: (shape: Shape) => void;
   updateShape: (id: string, patch: Partial<Shape>) => void;
   removeShape: (id: string) => void;
   selectShape: (id: string | null) => void;
+  addBooleanOp: (op: BooleanOperation) => void;
+  removeBooleanOp: (id: string) => void;
+  setCadMode: (mode: AppState['cadMode']) => void;
+  setPendingBooleanOp: (op: BooleanOp | null) => void;
+  setPendingBooleanTargetId: (id: string | null) => void;
+  setDefeatureIssues: (issues: DefeatureIssue[]) => void;
+  fixDefeatureIssue: (id: string) => void;
+  fixAllDefeatureIssues: () => void;
 
   // Mesh
   meshZones: MeshZone[];
@@ -215,6 +258,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   // CAD
   shapes: [],
   selectedShapeId: null,
+  booleanOps: [],
+  defeatureIssues: [],
+  cadMode: 'select',
+  pendingBooleanOp: null,
+  pendingBooleanTargetId: null,
   addShape: (shape) => set((s) => ({ shapes: [...s.shapes, shape] })),
   updateShape: (id, patch) =>
     set((s) => ({
@@ -224,8 +272,28 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({
       shapes: s.shapes.filter((sh) => sh.id !== id),
       selectedShapeId: s.selectedShapeId === id ? null : s.selectedShapeId,
+      booleanOps: s.booleanOps.filter((op) => op.targetId !== id && op.toolId !== id),
     })),
   selectShape: (id) => set({ selectedShapeId: id }),
+  addBooleanOp: (op) => set((s) => ({ booleanOps: [...s.booleanOps, op] })),
+  removeBooleanOp: (id) =>
+    set((s) => ({
+      booleanOps: s.booleanOps.filter((op) => op.id !== id),
+    })),
+  setCadMode: (mode) => set({ cadMode: mode }),
+  setPendingBooleanOp: (op) => set({ pendingBooleanOp: op }),
+  setPendingBooleanTargetId: (id) => set({ pendingBooleanTargetId: id }),
+  setDefeatureIssues: (issues) => set({ defeatureIssues: issues }),
+  fixDefeatureIssue: (id) =>
+    set((s) => ({
+      defeatureIssues: s.defeatureIssues.map((issue) =>
+        issue.id === id ? { ...issue, fixed: true } : issue
+      ),
+    })),
+  fixAllDefeatureIssues: () =>
+    set((s) => ({
+      defeatureIssues: s.defeatureIssues.map((issue) => ({ ...issue, fixed: true })),
+    })),
 
   // Mesh
   meshZones: [],
