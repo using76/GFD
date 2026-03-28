@@ -23,6 +23,9 @@ export default function StatusBar() {
   const selectionFilter = useAppStore((s) => s.selectionFilter);
   const exploded = useAppStore((s) => s.exploded);
   const transparencyMode = useAppStore((s) => s.transparencyMode);
+  const repairIssues = useAppStore((s) => s.repairIssues);
+  const measureLabels = useAppStore((s) => s.measureLabels);
+  const measureMode = useAppStore((s) => s.measureMode);
 
   const statusIcon =
     solverStatus === 'running' ? (
@@ -94,6 +97,24 @@ export default function StatusBar() {
           <Tag color="blue" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
             Transparent
           </Tag>
+        )}
+
+        {repairIssues.filter(i => !i.fixed).length > 0 && (
+          <Tag color="orange" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+            Repair: {repairIssues.filter(i => !i.fixed).length}
+          </Tag>
+        )}
+
+        {measureMode && (
+          <Tag color="cyan" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+            Measuring
+          </Tag>
+        )}
+
+        {measureLabels.length > 0 && (
+          <Text style={{ fontSize: 11, color: '#889' }}>
+            Meas: {measureLabels.length}
+          </Text>
         )}
       </Space>
 

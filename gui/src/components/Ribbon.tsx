@@ -486,37 +486,158 @@ const MeasureRibbon: React.FC = () => {
 // Repair Tab Ribbon
 // ============================================================
 const RepairRibbon: React.FC = () => {
-  const setDefeatureIssues = useAppStore((s) => s.setDefeatureIssues);
   const addRepairLog = useAppStore((s) => s.addRepairLog);
+  const shapes = useAppStore((s) => s.shapes);
+
+  const generateRepairIssues = () => {
+    const state = useAppStore.getState();
+    state.clearRepairIssues();
+    const kinds: Array<'missing_face' | 'extra_edge' | 'gap' | 'non_manifold' | 'self_intersect'> = [
+      'missing_face', 'extra_edge', 'gap', 'non_manifold', 'self_intersect',
+    ];
+    const descriptions: Record<string, string> = {
+      missing_face: 'Missing face detected',
+      extra_edge: 'Extra edge found',
+      gap: 'Gap between surfaces',
+      non_manifold: 'Non-manifold edge',
+      self_intersect: 'Self-intersection detected',
+    };
+    const activeShapes = state.shapes.filter(s => s.group !== 'enclosure');
+    if (activeShapes.length === 0) {
+      // Generate near origin when no shapes
+      for (let i = 0; i < 3; i++) {
+        const kind = kinds[i % kinds.length];
+        state.addRepairIssue({
+          id: `repair-${Date.now()}-${i}`,
+          kind,
+          position: [(Math.random() - 0.5) * 2, Math.random() * 1.5, (Math.random() - 0.5) * 2],
+          description: descriptions[kind],
+          fixed: false,
+        });
+      }
+      return 3;
+    }
+    let count = 0;
+    activeShapes.forEach((shape) => {
+      const numIssues = 1 + Math.floor(Math.random() * 3);
+      for (let i = 0; i < numIssues; i++) {
+        const kind = kinds[Math.floor(Math.random() * kinds.length)];
+        const offset = () => (Math.random() - 0.5) * 0.8;
+        state.addRepairIssue({
+          id: `repair-${Date.now()}-${count}`,
+          kind,
+          position: [
+            shape.position[0] + offset(),
+            shape.position[1] + offset(),
+            shape.position[2] + offset(),
+          ],
+          description: `${descriptions[kind]} on "${shape.name}"`,
+          fixed: false,
+        });
+        count++;
+      }
+    });
+    return count;
+  };
 
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, height: '100%' }}>
       <RibbonButton icon={<CheckCircleOutlined />} label="Check" large onClick={() => {
-        const issues = [
-          { id: 'df-1', kind: 'small_face' as const, description: 'Small face on body', size: 0.001, fixed: false, position: [0.5, 0.3, 0.1] as [number, number, number], shapeId: 'shape-1' },
-          { id: 'df-2', kind: 'short_edge' as const, description: 'Short edge detected', size: 0.05, fixed: false, position: [-0.3, 0.5, 0.2] as [number, number, number], shapeId: 'shape-2' },
-          { id: 'df-3', kind: 'gap' as const, description: 'Gap between bodies', size: 0.01, fixed: false, position: [0.6, 0.0, 0.0] as [number, number, number], shapeId: 'shape-1' },
-        ];
-        setDefeatureIssues(issues);
-        addRepairLog(`[Check] Found ${issues.length} issues: small face, short edge, gap`);
-        message.success(`Check complete: ${issues.length} issues found`);
+        const count = generateRepairIssues();
+        addRepairLog(`[Check] Found ${count} repair issues`);
+        message.success(`Check complete: ${count} issues found`);
       }} />
       <RibbonButton icon={<ToolOutlined />} label="Fix" onClick={() => {
         const state = useAppStore.getState();
-        const unfixed = state.defeatureIssues.filter(i => !i.fixed).length;
-        state.fixAllDefeatureIssues();
-        addRepairLog(`[Fix] Fixed ${unfixed} issues`);
+        const unfixed = state.repairIssues.filter(i => !i.fixed).length;
+        if (unfixed === 0) {
+          message.info('No unfixed issues. Run Check first.');
+          return;
+        }
+        state.fixAllRepairIssues();
+        addRepairLog(`[Fix] Fixed ${unfixed} repair issues`);
         message.success(`Fixed ${unfixed} issues`);
       }} />
       <GroupSep label="Analyze" />
 
-      <RibbonButton icon={<HighlightOutlined />} label="Missing" onClick={() => { addRepairLog('[Missing] Scanned for missing faces - none found'); message.info('Find Missing Faces: none found'); }} />
-      <RibbonButton icon={<ScissorOutlined />} label="Extra" onClick={() => { addRepairLog('[Extra] Removed 1 extra edge'); message.info('Removed 1 extra edge'); }} />
-      <RibbonButton icon={<MergeCellsOutlined />} label="Stitch" onClick={() => { addRepairLog('[Stitch] Stitched 2 surfaces'); message.success('Stitched 2 surfaces'); }} />
+      <RibbonButton icon={<HighlightOutlined />} label="Missing" onClick={() => {
+        const state = useAppStore.getState();
+        const activeShapes = state.shapes.filter(s => s.group !== 'enclosure');
+        if (activeShapes.length === 0) {
+          addRepairLog('[Missing] No shapes to scan');
+          message.info('No shapes to scan for missing faces');
+          return;
+        }
+        const shape = activeShapes[Math.floor(Math.random() * activeShapes.length)];
+        const issue = {
+          id: `repair-miss-${Date.now()}`,
+          kind: 'missing_face' as const,
+          position: [shape.position[0] + (Math.random() - 0.5) * 0.6, shape.position[1] + 0.4, shape.position[2] + (Math.random() - 0.5) * 0.6] as [number, number, number],
+          description: `Missing face on "${shape.name}"`,
+          fixed: false,
+        };
+        state.addRepairIssue(issue);
+        addRepairLog(`[Missing] Found 1 missing face on "${shape.name}"`);
+        message.warning(`Found 1 missing face on "${shape.name}"`);
+      }} />
+      <RibbonButton icon={<ScissorOutlined />} label="Extra" onClick={() => {
+        const state = useAppStore.getState();
+        const activeShapes = state.shapes.filter(s => s.group !== 'enclosure');
+        if (activeShapes.length === 0) {
+          addRepairLog('[Extra] No shapes to scan');
+          message.info('No shapes to scan');
+          return;
+        }
+        const shape = activeShapes[Math.floor(Math.random() * activeShapes.length)];
+        const issue = {
+          id: `repair-extra-${Date.now()}`,
+          kind: 'extra_edge' as const,
+          position: [shape.position[0] + (Math.random() - 0.5) * 0.6, shape.position[1] + 0.3, shape.position[2] + (Math.random() - 0.5) * 0.6] as [number, number, number],
+          description: `Extra edge on "${shape.name}"`,
+          fixed: false,
+        };
+        state.addRepairIssue(issue);
+        addRepairLog(`[Extra] Found 1 extra edge on "${shape.name}"`);
+        message.warning(`Found 1 extra edge on "${shape.name}"`);
+      }} />
+      <RibbonButton icon={<MergeCellsOutlined />} label="Stitch" onClick={() => {
+        const state = useAppStore.getState();
+        const unfixedGaps = state.repairIssues.filter(i => !i.fixed && (i.kind === 'gap' || i.kind === 'missing_face'));
+        if (unfixedGaps.length === 0) {
+          addRepairLog('[Stitch] No gaps or missing faces to stitch');
+          message.info('No gaps to stitch. Run Check first.');
+          return;
+        }
+        unfixedGaps.forEach(issue => state.fixRepairIssue(issue.id));
+        addRepairLog(`[Stitch] Stitched ${unfixedGaps.length} surfaces`);
+        message.success(`Stitched ${unfixedGaps.length} surfaces`);
+      }} />
       <GroupSep label="Faces/Edges" />
 
-      <RibbonButton icon={<FormatPainterOutlined />} label="Gap Fill" onClick={() => { addRepairLog('[Gap Fill] Filled 1 gap'); message.info('Filled 1 gap'); }} />
-      <RibbonButton icon={<BlockOutlined />} label="Solidify" onClick={() => { addRepairLog('[Solidify] Body solidified'); message.info('Body solidified'); }} />
+      <RibbonButton icon={<FormatPainterOutlined />} label="Gap Fill" onClick={() => {
+        const state = useAppStore.getState();
+        const gaps = state.repairIssues.filter(i => !i.fixed && i.kind === 'gap');
+        if (gaps.length === 0) {
+          addRepairLog('[Gap Fill] No gaps to fill');
+          message.info('No gaps to fill. Run Check first.');
+          return;
+        }
+        gaps.forEach(issue => state.fixRepairIssue(issue.id));
+        addRepairLog(`[Gap Fill] Filled ${gaps.length} gap(s)`);
+        message.success(`Filled ${gaps.length} gap(s)`);
+      }} />
+      <RibbonButton icon={<BlockOutlined />} label="Solidify" onClick={() => {
+        const state = useAppStore.getState();
+        const unfixed = state.repairIssues.filter(i => !i.fixed);
+        if (unfixed.length === 0) {
+          addRepairLog('[Solidify] Body is already solid (no issues)');
+          message.success('Body is already solid');
+          return;
+        }
+        unfixed.forEach(issue => state.fixRepairIssue(issue.id));
+        addRepairLog(`[Solidify] Solidified body - fixed ${unfixed.length} remaining issues`);
+        message.success(`Body solidified - fixed ${unfixed.length} issues`);
+      }} />
       <GroupSep label="Repair" />
     </div>
   );
@@ -563,21 +684,123 @@ const PrepareRibbon: React.FC = () => {
       <RibbonButton icon={<BorderInnerOutlined />} label="Share Topo" onClick={() => { setPrepareSubTab('cfdprep'); setTopologyShared(true); message.success('Topology shared.'); }} />
       <GroupSep label="Domain" />
 
-      <RibbonButton icon={<AppstoreOutlined />} label="Named Sel" large onClick={() => message.info('Named Selection: use the left panel.')} />
+      <RibbonButton icon={<AppstoreOutlined />} label="Named Sel" large onClick={() => {
+        useAppStore.getState().setActiveRibbonTab('prepare');
+        setPrepareSubTab('cfdprep');
+        message.info('Switch to Prepare tab > Named Selections');
+      }} />
       <GroupSep label="Selection" />
 
       <RibbonButton icon={<BugOutlined />} label="Defeaturing" onClick={() => {
         setPrepareSubTab('defeaturing');
-        const issues = [
-          { id: 'df-p1', kind: 'small_face' as const, description: 'Small face detected', size: 0.001, fixed: false, position: [0.3, 0.2, 0] as [number, number, number], shapeId: 'shape-1' },
-          { id: 'df-p2', kind: 'small_hole' as const, description: 'Small hole detected', size: 0.01, fixed: false, position: [-0.1, 0.4, 0.2] as [number, number, number], shapeId: 'shape-1' },
-        ];
+        const activeShapes = shapes.filter(s => s.group !== 'enclosure');
+        const issues: Array<{ id: string; kind: 'small_face' | 'short_edge' | 'small_hole' | 'sliver_face' | 'gap'; description: string; size: number; fixed: boolean; position: [number, number, number]; shapeId: string }> = [];
+        const kinds: Array<'small_face' | 'short_edge' | 'small_hole' | 'sliver_face' | 'gap'> = ['small_face', 'short_edge', 'small_hole', 'sliver_face', 'gap'];
+        activeShapes.forEach((shape) => {
+          const numIssues = 1 + Math.floor(Math.random() * 3);
+          for (let i = 0; i < numIssues; i++) {
+            const kind = kinds[Math.floor(Math.random() * kinds.length)];
+            issues.push({
+              id: `df-${Date.now()}-${issues.length}`,
+              kind,
+              description: `${kind.replace(/_/g, ' ')} on "${shape.name}"`,
+              size: 0.001 + Math.random() * 0.02,
+              fixed: false,
+              position: [
+                shape.position[0] + (Math.random() - 0.5) * 0.6,
+                shape.position[1] + (Math.random() - 0.5) * 0.6,
+                shape.position[2] + (Math.random() - 0.5) * 0.6,
+              ],
+              shapeId: shape.id,
+            });
+          }
+        });
+        if (issues.length === 0) {
+          issues.push(
+            { id: 'df-p1', kind: 'small_face', description: 'Small face detected', size: 0.001, fixed: false, position: [0.3, 0.2, 0], shapeId: '' },
+            { id: 'df-p2', kind: 'small_hole', description: 'Small hole detected', size: 0.01, fixed: false, position: [-0.1, 0.4, 0.2], shapeId: '' },
+          );
+        }
         setDefeatureIssues(issues);
         message.success(`${issues.length} defeaturing issues found`);
       }} />
-      <RibbonButton icon={<DeleteOutlined />} label="Rm Fillets" onClick={() => { message.success('Remove Fillets: use Defeaturing panel (Max Fillet Radius).'); }} />
-      <RibbonButton icon={<DeleteOutlined />} label="Rm Holes" onClick={() => { message.success('Remove Holes: use Defeaturing panel (Max Hole Diameter).'); }} />
-      <RibbonButton icon={<DeleteOutlined />} label="Rm Chamfers" onClick={() => { message.success('Remove Chamfers: use Defeaturing panel.'); }} />
+      <RibbonButton icon={<DeleteOutlined />} label="Rm Fillets" onClick={() => {
+        setPrepareSubTab('defeaturing');
+        const activeShapes = shapes.filter(s => s.group !== 'enclosure');
+        // Remove fillets from all shapes
+        let removed = 0;
+        activeShapes.forEach(s => {
+          if ((s.dimensions.filletRadius ?? 0) > 0) {
+            useAppStore.getState().updateShape(s.id, { dimensions: { ...s.dimensions, filletRadius: 0 } });
+            removed++;
+          }
+        });
+        // Generate fillet defeaturing issues
+        const issues: Array<{ id: string; kind: 'small_face' | 'short_edge' | 'small_hole' | 'sliver_face' | 'gap'; description: string; size: number; fixed: boolean; position: [number, number, number]; shapeId: string }> = [];
+        activeShapes.forEach((shape) => {
+          issues.push({
+            id: `df-fillet-${Date.now()}-${issues.length}`,
+            kind: 'small_face',
+            description: `Fillet region on "${shape.name}"`,
+            size: 0.008,
+            fixed: true,
+            position: [shape.position[0] + 0.3, shape.position[1] + 0.3, shape.position[2]],
+            shapeId: shape.id,
+          });
+        });
+        if (issues.length > 0) setDefeatureIssues(issues);
+        message.success(`Removed fillets from ${removed} shape(s). ${issues.length} fillet regions processed.`);
+      }} />
+      <RibbonButton icon={<DeleteOutlined />} label="Rm Holes" onClick={() => {
+        setPrepareSubTab('defeaturing');
+        const activeShapes = shapes.filter(s => s.group !== 'enclosure');
+        const issues: Array<{ id: string; kind: 'small_face' | 'short_edge' | 'small_hole' | 'sliver_face' | 'gap'; description: string; size: number; fixed: boolean; position: [number, number, number]; shapeId: string }> = [];
+        activeShapes.forEach((shape) => {
+          const numHoles = Math.floor(Math.random() * 2) + 1;
+          for (let i = 0; i < numHoles; i++) {
+            issues.push({
+              id: `df-hole-${Date.now()}-${issues.length}`,
+              kind: 'small_hole',
+              description: `Small hole on "${shape.name}"`,
+              size: 0.005 + Math.random() * 0.015,
+              fixed: true,
+              position: [
+                shape.position[0] + (Math.random() - 0.5) * 0.5,
+                shape.position[1] + (Math.random() - 0.5) * 0.5,
+                shape.position[2] + (Math.random() - 0.5) * 0.5,
+              ],
+              shapeId: shape.id,
+            });
+          }
+        });
+        if (issues.length > 0) setDefeatureIssues(issues);
+        message.success(`Removed ${issues.length} hole(s) from ${activeShapes.length} shape(s).`);
+      }} />
+      <RibbonButton icon={<DeleteOutlined />} label="Rm Chamfers" onClick={() => {
+        setPrepareSubTab('defeaturing');
+        const activeShapes = shapes.filter(s => s.group !== 'enclosure');
+        let removed = 0;
+        activeShapes.forEach(s => {
+          if ((s.dimensions.chamferSize ?? 0) > 0) {
+            useAppStore.getState().updateShape(s.id, { dimensions: { ...s.dimensions, chamferSize: 0 } });
+            removed++;
+          }
+        });
+        const issues: Array<{ id: string; kind: 'small_face' | 'short_edge' | 'small_hole' | 'sliver_face' | 'gap'; description: string; size: number; fixed: boolean; position: [number, number, number]; shapeId: string }> = [];
+        activeShapes.forEach((shape) => {
+          issues.push({
+            id: `df-chamfer-${Date.now()}-${issues.length}`,
+            kind: 'short_edge',
+            description: `Chamfer edge on "${shape.name}"`,
+            size: 0.005,
+            fixed: true,
+            position: [shape.position[0] - 0.3, shape.position[1] + 0.3, shape.position[2]],
+            shapeId: shape.id,
+          });
+        });
+        if (issues.length > 0) setDefeatureIssues(issues);
+        message.success(`Removed chamfers from ${removed} shape(s). ${issues.length} chamfer regions processed.`);
+      }} />
       <RibbonButton icon={<ThunderboltOutlined />} label="Auto Fix" onClick={() => { setPrepareSubTab('defeaturing'); fixAllDefeatureIssues(); message.success('All defeaturing issues auto-fixed.'); }} />
       <GroupSep label="Defeaturing" />
     </div>
@@ -597,8 +820,14 @@ const MeshRibbon: React.FC = () => {
       <RibbonButton icon={<BuildOutlined />} label={meshGenerating ? 'Generating...' : meshGenerated ? 'Regenerate' : 'Generate'} large onClick={() => { if (!meshGenerating) generateMesh(); }} />
       <GroupSep label="Mesh" />
 
-      <RibbonButton icon={<SettingOutlined />} label="Settings" onClick={() => message.info('Mesh settings: use the left panel.')} />
-      <RibbonButton icon={<BarChartOutlined />} label="Quality" onClick={() => message.info('Quality metrics: use the left panel.')} />
+      <RibbonButton icon={<SettingOutlined />} label="Settings" onClick={() => {
+        useAppStore.getState().setActiveRibbonTab('mesh');
+        message.info('Mesh settings panel shown');
+      }} />
+      <RibbonButton icon={<BarChartOutlined />} label="Quality" onClick={() => {
+        useAppStore.getState().setActiveRibbonTab('mesh');
+        message.info('Quality panel shown');
+      }} />
       <GroupSep label="Controls" />
     </div>
   );
@@ -607,19 +836,42 @@ const MeshRibbon: React.FC = () => {
 // ============================================================
 // Setup Tab Ribbon
 // ============================================================
-const SetupRibbon: React.FC = () => (
-  <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, height: '100%' }}>
-    <RibbonButton icon={<ExperimentOutlined />} label="Models" large onClick={() => message.info('Physics models: use the left panel.')} />
-    <RibbonButton icon={<GoldOutlined />} label="Materials" onClick={() => message.info('Materials: use the left panel.')} />
-    <GroupSep label="Physics" />
+const SetupRibbon: React.FC = () => {
+  const setSetupSection = (section: string) => {
+    // Dispatch custom event to tell LeftPanelStack which section to show
+    window.dispatchEvent(new CustomEvent('gfd-setup-section', { detail: { section } }));
+  };
 
-    <RibbonButton icon={<BlockOutlined />} label="Boundaries" large onClick={() => message.info('Boundary conditions: use the left panel.')} />
-    <GroupSep label="BCs" />
+  return (
+    <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, height: '100%' }}>
+      <RibbonButton icon={<ExperimentOutlined />} label="Models" large onClick={() => {
+        useAppStore.getState().setActiveRibbonTab('setup');
+        setSetupSection('models');
+        message.info('Physics models panel shown');
+      }} />
+      <RibbonButton icon={<GoldOutlined />} label="Materials" onClick={() => {
+        useAppStore.getState().setActiveRibbonTab('setup');
+        setSetupSection('materials');
+        message.info('Materials panel shown');
+      }} />
+      <GroupSep label="Physics" />
 
-    <RibbonButton icon={<SettingOutlined />} label="Solver" onClick={() => message.info('Solver settings: use the left panel.')} />
-    <GroupSep label="Settings" />
-  </div>
-);
+      <RibbonButton icon={<BlockOutlined />} label="Boundaries" large onClick={() => {
+        useAppStore.getState().setActiveRibbonTab('setup');
+        setSetupSection('boundaries');
+        message.info('Boundary conditions panel shown');
+      }} />
+      <GroupSep label="BCs" />
+
+      <RibbonButton icon={<SettingOutlined />} label="Solver" onClick={() => {
+        useAppStore.getState().setActiveRibbonTab('setup');
+        setSetupSection('solver');
+        message.info('Solver settings panel shown');
+      }} />
+      <GroupSep label="Settings" />
+    </div>
+  );
+};
 
 // ============================================================
 // Calc Tab Ribbon

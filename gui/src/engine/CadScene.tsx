@@ -2,7 +2,7 @@ import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { Edges, TransformControls } from '@react-three/drei';
 import { useFrame, useThree } from '@react-three/fiber';
 import { useAppStore } from '../store/useAppStore';
-import type { Shape, DefeatureIssue, DefeatureIssueKind, NamedSelection } from '../store/useAppStore';
+import type { Shape, DefeatureIssue, DefeatureIssueKind, NamedSelection, RepairIssue, RepairIssueKind, MeasureLabel } from '../store/useAppStore';
 import * as THREE from 'three';
 
 const degToRad = (d: number) => (d * Math.PI) / 180;
@@ -318,6 +318,192 @@ const NamedSelectionOverlays: React.FC = () => {
       {namedSelections.map((ns) => (
         <SelectionOverlay key={ns.name} selection={ns} />
       ))}
+    </group>
+  );
+};
+
+// ============================================================
+// Repair Issue 3D Markers
+// ============================================================
+
+const repairMarkerColors: Record<RepairIssueKind, string> = {
+  missing_face: '#ff8c00',
+  extra_edge: '#ffd700',
+  gap: '#00e5ff',
+  non_manifold: '#ff4d4f',
+  self_intersect: '#eb2f96',
+};
+
+/** Pulsing marker for a single repair issue */
+const RepairIssueMarker: React.FC<{ issue: RepairIssue }> = ({ issue }) => {
+  const selectRepairIssue = useAppStore((s) => s.selectRepairIssue);
+  const selectedRepairIssueId = useAppStore((s) => s.selectedRepairIssueId);
+  const isSelected = selectedRepairIssueId === issue.id;
+  const meshRef = useRef<THREE.Mesh>(null);
+
+  useFrame(({ clock }) => {
+    if (meshRef.current) {
+      if (isSelected) {
+        const scale = 1.0 + Math.sin(clock.getElapsedTime() * 4) * 0.3;
+        meshRef.current.scale.setScalar(scale);
+      } else {
+        const scale = 1.0 + Math.sin(clock.getElapsedTime() * 2) * 0.1;
+        meshRef.current.scale.setScalar(scale);
+      }
+    }
+  });
+
+  const color = repairMarkerColors[issue.kind];
+
+  const handleClick = useCallback(
+    (e: any) => {
+      e.stopPropagation();
+      selectRepairIssue(issue.id);
+    },
+    [issue.id, selectRepairIssue]
+  );
+
+  return (
+    <group position={issue.position}>
+      <mesh ref={meshRef} onClick={handleClick}>
+        {issue.kind === 'missing_face' && (
+          <planeGeometry args={[0.08, 0.08]} />
+        )}
+        {issue.kind === 'extra_edge' && (
+          <boxGeometry args={[0.08, 0.004, 0.004]} />
+        )}
+        {issue.kind === 'gap' && (
+          <boxGeometry args={[0.06, 0.003, 0.003]} />
+        )}
+        {issue.kind === 'non_manifold' && (
+          <octahedronGeometry args={[0.03, 0]} />
+        )}
+        {issue.kind === 'self_intersect' && (
+          <sphereGeometry args={[0.03, 12, 12]} />
+        )}
+        <meshBasicMaterial
+          color={color}
+          transparent
+          opacity={isSelected ? 0.95 : 0.7}
+          side={issue.kind === 'missing_face' ? THREE.DoubleSide : undefined}
+        />
+      </mesh>
+
+      {/* Outer glow ring for selected */}
+      {isSelected && (
+        <mesh>
+          <ringGeometry args={[0.05, 0.07, 24]} />
+          <meshBasicMaterial
+            color={color}
+            transparent
+            opacity={0.4}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      )}
+    </group>
+  );
+};
+
+/** Renders all unfixed repair issue markers in 3D */
+const RepairMarkers: React.FC = () => {
+  const issues = useAppStore((s) => s.repairIssues);
+
+  const unfixed = useMemo(
+    () => issues.filter((i) => !i.fixed),
+    [issues]
+  );
+
+  if (unfixed.length === 0) return null;
+
+  return (
+    <group>
+      {unfixed.map((issue) => (
+        <RepairIssueMarker key={issue.id} issue={issue} />
+      ))}
+    </group>
+  );
+};
+
+// ============================================================
+// Measure 3D elements (points + lines)
+// ============================================================
+
+/** Renders a measurement point as a red sphere in 3D */
+const MeasurePoint3D: React.FC<{ position: [number, number, number] }> = ({ position }) => (
+  <mesh position={position}>
+    <sphereGeometry args={[0.03, 12, 12]} />
+    <meshBasicMaterial color="#ff4444" />
+  </mesh>
+);
+
+/** Renders a line between two 3D points for distance measurement using small cylinder */
+const MeasureLine3D: React.FC<{ start: [number, number, number]; end: [number, number, number] }> = ({ start, end }) => {
+  // Compute midpoint and distance
+  const midpoint = useMemo<[number, number, number]>(() => [
+    (start[0] + end[0]) / 2,
+    (start[1] + end[1]) / 2,
+    (start[2] + end[2]) / 2,
+  ], [start, end]);
+
+  const { rotation, length } = useMemo(() => {
+    const s = new THREE.Vector3(...start);
+    const e = new THREE.Vector3(...end);
+    const dir = e.clone().sub(s);
+    const len = dir.length();
+    // Align cylinder (which extends along Y) to the direction vector
+    const axis = new THREE.Vector3(0, 1, 0);
+    const quat = new THREE.Quaternion().setFromUnitVectors(axis, dir.normalize());
+    const euler = new THREE.Euler().setFromQuaternion(quat);
+    return { rotation: [euler.x, euler.y, euler.z] as [number, number, number], length: len };
+  }, [start, end]);
+
+  return (
+    <group>
+      <MeasurePoint3D position={start} />
+      <MeasurePoint3D position={end} />
+      {/* Thin cylinder as measurement line */}
+      <mesh position={midpoint} rotation={rotation}>
+        <cylinderGeometry args={[0.005, 0.005, length, 4]} />
+        <meshBasicMaterial color="#4096ff" transparent opacity={0.8} />
+      </mesh>
+      {/* Small sphere at midpoint to mark label anchor */}
+      <mesh position={midpoint}>
+        <sphereGeometry args={[0.02, 8, 8]} />
+        <meshBasicMaterial color="#4096ff" transparent opacity={0.6} />
+      </mesh>
+    </group>
+  );
+};
+
+/** Renders all active measure points and completed measurement lines */
+const MeasureElements: React.FC = () => {
+  const measurePoints = useAppStore((s) => s.measurePoints);
+  const measureLabels = useAppStore((s) => s.measureLabels);
+
+  return (
+    <group>
+      {/* In-progress measurement points */}
+      {measurePoints.map((pt, i) => (
+        <MeasurePoint3D key={`mpt-${i}`} position={pt.worldPos} />
+      ))}
+
+      {/* Completed measurement lines */}
+      {measureLabels.map((label) => {
+        if (label.endPosition) {
+          return (
+            <MeasureLine3D
+              key={label.id}
+              start={label.position}
+              end={label.endPosition}
+            />
+          );
+        }
+        // Single point labels (angle vertex, area click)
+        return (
+          <MeasurePoint3D key={label.id} position={label.position} />
+        );
+      })}
     </group>
   );
 };
@@ -720,6 +906,12 @@ const CadScene: React.FC = () => {
 
       {/* Defeaturing issue markers in 3D */}
       <DefeatureMarkers />
+
+      {/* Repair issue markers in 3D */}
+      <RepairMarkers />
+
+      {/* Measure points and lines in 3D */}
+      <MeasureElements />
 
       {/* Named selection overlays for CFD prep */}
       <NamedSelectionOverlays />

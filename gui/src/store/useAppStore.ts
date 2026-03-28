@@ -188,13 +188,32 @@ export interface SectionPlane {
   offset: number;
 }
 
+// ---- Repair Issue types (Repair tab) ----
+export type RepairIssueKind = 'missing_face' | 'extra_edge' | 'gap' | 'non_manifold' | 'self_intersect';
+
+export interface RepairIssue {
+  id: string;
+  kind: RepairIssueKind;
+  position: [number, number, number];
+  description: string;
+  fixed: boolean;
+}
+
 // ---- Measure types ----
 export type MeasureMode = 'distance' | 'angle' | 'area' | null;
+
+export interface MeasurePoint {
+  worldPos: [number, number, number];
+  screenPos: [number, number];
+}
 
 export interface MeasureLabel {
   id: string;
   text: string;
   position: [number, number, number];
+  endPosition?: [number, number, number]; // for distance lines
+  screenPos?: [number, number]; // screen position for overlay
+  screenEndPos?: [number, number]; // screen end position for overlay
 }
 
 // ---- Ribbon / Tool types ----
@@ -330,6 +349,9 @@ interface AppState {
   // Measure
   measureMode: MeasureMode;
   setMeasureMode: (mode: MeasureMode) => void;
+  measurePoints: MeasurePoint[];
+  addMeasurePoint: (point: MeasurePoint) => void;
+  clearMeasurePoints: () => void;
   measureLabels: MeasureLabel[];
   addMeasureLabel: (label: MeasureLabel) => void;
   clearMeasureLabels: () => void;
@@ -338,6 +360,15 @@ interface AppState {
   repairLog: string[];
   addRepairLog: (msg: string) => void;
   clearRepairLog: () => void;
+
+  // Repair issues (3D markers)
+  repairIssues: RepairIssue[];
+  addRepairIssue: (issue: RepairIssue) => void;
+  clearRepairIssues: () => void;
+  fixRepairIssue: (id: string) => void;
+  fixAllRepairIssues: () => void;
+  selectedRepairIssueId: string | null;
+  selectRepairIssue: (id: string | null) => void;
 
   // Clipboard (copy/paste)
   clipboardShape: Shape | null;
@@ -851,17 +882,39 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Measure
   measureMode: null,
-  setMeasureMode: (mode) => set({ measureMode: mode }),
+  setMeasureMode: (mode) => set({ measureMode: mode, measurePoints: [] }),
+  measurePoints: [],
+  addMeasurePoint: (point) =>
+    set((s) => ({ measurePoints: [...s.measurePoints, point] })),
+  clearMeasurePoints: () => set({ measurePoints: [] }),
   measureLabels: [],
   addMeasureLabel: (label) =>
     set((s) => ({ measureLabels: [...s.measureLabels, label] })),
-  clearMeasureLabels: () => set({ measureLabels: [] }),
+  clearMeasureLabels: () => set({ measureLabels: [], measurePoints: [] }),
 
   // Repair log
   repairLog: [],
   addRepairLog: (msg) =>
     set((s) => ({ repairLog: [...s.repairLog, msg] })),
   clearRepairLog: () => set({ repairLog: [] }),
+
+  // Repair issues (3D markers)
+  repairIssues: [],
+  addRepairIssue: (issue) =>
+    set((s) => ({ repairIssues: [...s.repairIssues, issue] })),
+  clearRepairIssues: () => set({ repairIssues: [], selectedRepairIssueId: null }),
+  fixRepairIssue: (id) =>
+    set((s) => ({
+      repairIssues: s.repairIssues.map((issue) =>
+        issue.id === id ? { ...issue, fixed: true } : issue
+      ),
+    })),
+  fixAllRepairIssues: () =>
+    set((s) => ({
+      repairIssues: s.repairIssues.map((issue) => ({ ...issue, fixed: true })),
+    })),
+  selectedRepairIssueId: null,
+  selectRepairIssue: (id) => set({ selectedRepairIssueId: id }),
 
   // Clipboard
   clipboardShape: null,

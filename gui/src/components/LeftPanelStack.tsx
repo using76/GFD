@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   DownOutlined,
   RightOutlined,
@@ -24,10 +24,13 @@ import {
   ArrowsAltOutlined,
   SwapOutlined,
   FileTextOutlined,
+  CheckCircleOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import { Tree } from 'antd';
 import type { TreeDataNode } from 'antd';
 import { useAppStore } from '../store/useAppStore';
+import type { RepairIssueKind } from '../store/useAppStore';
 import ToolOptions from './ToolOptions';
 import ShapeProperties from '../tabs/cad/ShapeProperties';
 import DefeaturingPanel from '../tabs/cad/DefeaturingPanel';
@@ -384,6 +387,280 @@ const RepairLogPanel: React.FC = () => {
 };
 
 // ============================================================
+// Repair Issues Panel (list of 3D repair markers)
+// ============================================================
+const RepairIssuesPanel: React.FC = () => {
+  const repairIssues = useAppStore((s) => s.repairIssues);
+  const selectedRepairIssueId = useAppStore((s) => s.selectedRepairIssueId);
+  const selectRepairIssue = useAppStore((s) => s.selectRepairIssue);
+  const fixRepairIssue = useAppStore((s) => s.fixRepairIssue);
+  const clearRepairIssues = useAppStore((s) => s.clearRepairIssues);
+
+  const unfixed = repairIssues.filter(i => !i.fixed);
+  const fixed = repairIssues.filter(i => i.fixed);
+
+  const kindColors: Record<RepairIssueKind, string> = {
+    missing_face: '#ff8c00',
+    extra_edge: '#ffd700',
+    gap: '#00e5ff',
+    non_manifold: '#ff4d4f',
+    self_intersect: '#eb2f96',
+  };
+
+  const kindLabels: Record<RepairIssueKind, string> = {
+    missing_face: 'Missing Face',
+    extra_edge: 'Extra Edge',
+    gap: 'Gap',
+    non_manifold: 'Non-Manifold',
+    self_intersect: 'Self-Intersect',
+  };
+
+  if (repairIssues.length === 0) {
+    return <div style={{ padding: 12, color: '#667', fontSize: 11 }}>No repair issues. Click "Check" in the ribbon to scan.</div>;
+  }
+
+  return (
+    <div style={{ padding: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+        <span style={{ color: '#aab', fontSize: 11, fontWeight: 600 }}>
+          {unfixed.length} issue{unfixed.length !== 1 ? 's' : ''} remaining
+        </span>
+        {repairIssues.length > 0 && (
+          <span
+            onClick={clearRepairIssues}
+            style={{ color: '#4096ff', fontSize: 11, cursor: 'pointer' }}
+          >
+            Clear all
+          </span>
+        )}
+      </div>
+
+      <div style={{ maxHeight: 250, overflow: 'auto' }}>
+        {unfixed.map((issue) => (
+          <div
+            key={issue.id}
+            onClick={() => selectRepairIssue(issue.id)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '4px 6px',
+              fontSize: 11,
+              cursor: 'pointer',
+              background: selectedRepairIssueId === issue.id ? '#2a2a5a' : 'transparent',
+              borderBottom: '1px solid #1a1a30',
+              borderLeft: `3px solid ${kindColors[issue.kind]}`,
+            }}
+            onMouseEnter={(e) => { if (selectedRepairIssueId !== issue.id) e.currentTarget.style.background = '#1a1a3a'; }}
+            onMouseLeave={(e) => { if (selectedRepairIssueId !== issue.id) e.currentTarget.style.background = 'transparent'; }}
+          >
+            <WarningOutlined style={{ color: kindColors[issue.kind], fontSize: 12 }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ color: '#ccd' }}>{kindLabels[issue.kind]}</div>
+              <div style={{ color: '#667', fontSize: 10 }}>{issue.description}</div>
+            </div>
+            <span
+              onClick={(e) => { e.stopPropagation(); fixRepairIssue(issue.id); }}
+              style={{
+                color: '#52c41a',
+                fontSize: 10,
+                cursor: 'pointer',
+                padding: '1px 4px',
+                border: '1px solid #52c41a',
+                borderRadius: 3,
+              }}
+            >
+              Fix
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {fixed.length > 0 && (
+        <div style={{ marginTop: 6 }}>
+          <div style={{ color: '#52c41a', fontSize: 10, fontWeight: 600, padding: '2px 0' }}>
+            <CheckCircleOutlined /> {fixed.length} fixed
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================
+// Measure Results Panel
+// ============================================================
+const MeasureResultsPanel: React.FC = () => {
+  const measureLabels = useAppStore((s) => s.measureLabels);
+  const clearMeasureLabels = useAppStore((s) => s.clearMeasureLabels);
+
+  if (measureLabels.length === 0) {
+    return <div style={{ padding: 12, color: '#667', fontSize: 11 }}>No measurements yet. Use distance/angle/area tools.</div>;
+  }
+
+  return (
+    <div style={{ padding: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+        <span style={{ color: '#aab', fontSize: 11, fontWeight: 600 }}>
+          {measureLabels.length} measurement{measureLabels.length !== 1 ? 's' : ''}
+        </span>
+        <span
+          onClick={clearMeasureLabels}
+          style={{ color: '#4096ff', fontSize: 11, cursor: 'pointer' }}
+        >
+          Clear all
+        </span>
+      </div>
+
+      <div style={{ maxHeight: 200, overflow: 'auto' }}>
+        {measureLabels.map((label, i) => (
+          <div
+            key={label.id}
+            style={{
+              padding: '4px 6px',
+              fontSize: 11,
+              color: '#ccd',
+              borderBottom: '1px solid #1a1a30',
+              borderLeft: '3px solid #4096ff',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            <span style={{ color: '#667', fontSize: 10, minWidth: 16 }}>#{i + 1}</span>
+            <span style={{ fontWeight: 500 }}>{label.text}</span>
+            {label.endPosition && (
+              <span style={{ color: '#556', fontSize: 10, marginLeft: 'auto' }}>
+                ({label.position[0].toFixed(1)}, {label.position[2].toFixed(1)}) - ({label.endPosition[0].toFixed(1)}, {label.endPosition[2].toFixed(1)})
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
+// Display Settings Panel
+// ============================================================
+const DisplaySettingsPanel: React.FC = () => {
+  const renderMode = useAppStore((s) => s.renderMode);
+  const setRenderMode = useAppStore((s) => s.setRenderMode);
+  const transparencyMode = useAppStore((s) => s.transparencyMode);
+  const setTransparencyMode = useAppStore((s) => s.setTransparencyMode);
+  const lightingIntensity = useAppStore((s) => s.lightingIntensity);
+  const setLightingIntensity = useAppStore((s) => s.setLightingIntensity);
+  const backgroundMode = useAppStore((s) => s.backgroundMode);
+  const setBackgroundMode = useAppStore((s) => s.setBackgroundMode);
+  const sectionPlane = useAppStore((s) => s.sectionPlane);
+  const setSectionPlane = useAppStore((s) => s.setSectionPlane);
+  const cameraMode = useAppStore((s) => s.cameraMode);
+  const setCameraMode = useAppStore((s) => s.setCameraMode);
+
+  return (
+    <div style={{ padding: 10, fontSize: 12 }}>
+      <div style={{ color: '#889', fontSize: 11, marginBottom: 6, fontWeight: 500 }}>Render Mode</div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 10 }}>
+        {(['wireframe', 'solid', 'contour'] as const).map((mode) => (
+          <div
+            key={mode}
+            onClick={() => setRenderMode(mode)}
+            style={{
+              padding: '3px 8px',
+              fontSize: 11,
+              cursor: 'pointer',
+              borderRadius: 3,
+              border: renderMode === mode ? '1px solid #4096ff' : '1px solid #303050',
+              background: renderMode === mode ? '#2a2a5a' : '#1a1a30',
+              color: renderMode === mode ? '#fff' : '#889',
+            }}
+          >
+            {mode.charAt(0).toUpperCase() + mode.slice(1)}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ color: '#889', fontSize: 11, marginBottom: 4, fontWeight: 500 }}>Options</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', color: '#aab', fontSize: 11 }}>
+          <input type="checkbox" checked={transparencyMode} onChange={(e) => setTransparencyMode(e.target.checked)} />
+          Transparency
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', color: '#aab', fontSize: 11 }}>
+          <input type="checkbox" checked={sectionPlane.enabled} onChange={(e) => setSectionPlane({ enabled: e.target.checked })} />
+          Section Plane
+        </label>
+      </div>
+
+      <div style={{ color: '#889', fontSize: 11, marginBottom: 4, fontWeight: 500 }}>Lighting: {(lightingIntensity * 100).toFixed(0)}%</div>
+      <input
+        type="range"
+        min={0.25}
+        max={2.0}
+        step={0.05}
+        value={lightingIntensity}
+        onChange={(e) => setLightingIntensity(Number(e.target.value))}
+        style={{ width: '100%', marginBottom: 10 }}
+      />
+
+      <div style={{ color: '#889', fontSize: 11, marginBottom: 4, fontWeight: 500 }}>Background</div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 10 }}>
+        {(['dark', 'light', 'gradient'] as const).map((mode) => (
+          <div
+            key={mode}
+            onClick={() => setBackgroundMode(mode)}
+            style={{
+              padding: '3px 8px',
+              fontSize: 11,
+              cursor: 'pointer',
+              borderRadius: 3,
+              border: backgroundMode === mode ? '1px solid #4096ff' : '1px solid #303050',
+              background: backgroundMode === mode ? '#2a2a5a' : '#1a1a30',
+              color: backgroundMode === mode ? '#fff' : '#889',
+            }}
+          >
+            {mode.charAt(0).toUpperCase() + mode.slice(1)}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ color: '#889', fontSize: 11, marginBottom: 4, fontWeight: 500 }}>Camera</div>
+      <div style={{ display: 'flex', gap: 4 }}>
+        <div
+          onClick={() => setCameraMode({ type: 'perspective' })}
+          style={{
+            padding: '3px 8px',
+            fontSize: 11,
+            cursor: 'pointer',
+            borderRadius: 3,
+            border: cameraMode.type === 'perspective' ? '1px solid #4096ff' : '1px solid #303050',
+            background: cameraMode.type === 'perspective' ? '#2a2a5a' : '#1a1a30',
+            color: cameraMode.type === 'perspective' ? '#fff' : '#889',
+          }}
+        >
+          Perspective
+        </div>
+        <div
+          onClick={() => setCameraMode({ type: 'orthographic' })}
+          style={{
+            padding: '3px 8px',
+            fontSize: 11,
+            cursor: 'pointer',
+            borderRadius: 3,
+            border: cameraMode.type === 'orthographic' ? '1px solid #4096ff' : '1px solid #303050',
+            background: cameraMode.type === 'orthographic' ? '#2a2a5a' : '#1a1a30',
+            color: cameraMode.type === 'orthographic' ? '#fff' : '#889',
+          }}
+        >
+          Orthographic
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
 // Prepare Sub-Tab Panel (Defeaturing or CFD Prep)
 // ============================================================
 const PrepareSubTabPanel: React.FC = () => {
@@ -441,8 +718,23 @@ const LeftPanelStack: React.FC = () => {
   const [calcView, setCalcView] = useState('residuals');
   const [resultsSection, setResultsSection] = useState('contours');
 
-  // Determine which panels to show based on active ribbon tab
-  const isDesignGroup = activeRibbonTab === 'design' || activeRibbonTab === 'display' || activeRibbonTab === 'measure' || activeRibbonTab === 'repair' || activeRibbonTab === 'prepare';
+  // Listen for setup section change events from ribbon buttons
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.section) {
+        setSetupSection(detail.section);
+      }
+    };
+    window.addEventListener('gfd-setup-section', handler);
+    return () => window.removeEventListener('gfd-setup-section', handler);
+  }, []);
+
+  const isDesign = activeRibbonTab === 'design';
+  const isDisplay = activeRibbonTab === 'display';
+  const isMeasure = activeRibbonTab === 'measure';
+  const isRepair = activeRibbonTab === 'repair';
+  const isPrepare = activeRibbonTab === 'prepare';
   const isMesh = activeRibbonTab === 'mesh';
   const isSetup = activeRibbonTab === 'setup';
   const isCalc = activeRibbonTab === 'calc';
@@ -467,8 +759,8 @@ const LeftPanelStack: React.FC = () => {
   return (
     <div style={{ height: '100%', overflow: 'auto', background: '#111122' }}>
 
-      {/* ============ Design group panels ============ */}
-      {isDesignGroup && (
+      {/* ============ Design tab: Structure + Tool Options + Properties + Defeaturing + CFD Prep ============ */}
+      {isDesign && (
         <>
           <CollapsiblePanel title="Structure" defaultOpen>
             <StructureSubTabs />
@@ -478,22 +770,89 @@ const LeftPanelStack: React.FC = () => {
             <ToolOptions />
           </CollapsiblePanel>
 
-          {(activeRibbonTab === 'prepare') && (
-            <PrepareSubTabPanel />
-          )}
-
-          {(activeRibbonTab === 'repair') && (
-            <>
-              <CollapsiblePanel title="Defeaturing" defaultOpen>
-                <DefeaturingPanel />
-              </CollapsiblePanel>
-              <CollapsiblePanel title="Repair Log" defaultOpen={false}>
-                <RepairLogPanel />
-              </CollapsiblePanel>
-            </>
-          )}
-
           <CollapsiblePanel title="Properties" defaultOpen>
+            <ShapeProperties />
+          </CollapsiblePanel>
+
+          <CollapsiblePanel title="Defeaturing" defaultOpen={false}>
+            <DefeaturingPanel />
+          </CollapsiblePanel>
+
+          <CollapsiblePanel title="CFD Prep" defaultOpen={false}>
+            <CfdPrepPanel />
+          </CollapsiblePanel>
+        </>
+      )}
+
+      {/* ============ Display tab: Display Settings ============ */}
+      {isDisplay && (
+        <>
+          <CollapsiblePanel title="Structure" defaultOpen>
+            <StructureSubTabs />
+          </CollapsiblePanel>
+
+          <CollapsiblePanel title="Display Settings" defaultOpen>
+            <DisplaySettingsPanel />
+          </CollapsiblePanel>
+
+          <CollapsiblePanel title="Properties" defaultOpen={false}>
+            <ShapeProperties />
+          </CollapsiblePanel>
+        </>
+      )}
+
+      {/* ============ Measure tab: Measure tool + Results list ============ */}
+      {isMeasure && (
+        <>
+          <CollapsiblePanel title="Structure" defaultOpen>
+            <StructureSubTabs />
+          </CollapsiblePanel>
+
+          <CollapsiblePanel title={`Options - ${activeTool.charAt(0).toUpperCase() + activeTool.slice(1)}`} defaultOpen>
+            <ToolOptions />
+          </CollapsiblePanel>
+
+          <CollapsiblePanel title="Measurement Results" defaultOpen>
+            <MeasureResultsPanel />
+          </CollapsiblePanel>
+
+          <CollapsiblePanel title="Properties" defaultOpen={false}>
+            <ShapeProperties />
+          </CollapsiblePanel>
+        </>
+      )}
+
+      {/* ============ Repair tab: Repair Issues + Defeaturing + Repair Log ============ */}
+      {isRepair && (
+        <>
+          <CollapsiblePanel title="Structure" defaultOpen>
+            <StructureSubTabs />
+          </CollapsiblePanel>
+
+          <CollapsiblePanel title="Repair Issues" defaultOpen>
+            <RepairIssuesPanel />
+          </CollapsiblePanel>
+
+          <CollapsiblePanel title="Defeaturing" defaultOpen={false}>
+            <DefeaturingPanel />
+          </CollapsiblePanel>
+
+          <CollapsiblePanel title="Repair Log" defaultOpen>
+            <RepairLogPanel />
+          </CollapsiblePanel>
+        </>
+      )}
+
+      {/* ============ Prepare tab: Named Selections + Defeaturing ============ */}
+      {isPrepare && (
+        <>
+          <CollapsiblePanel title="Structure" defaultOpen>
+            <StructureSubTabs />
+          </CollapsiblePanel>
+
+          <PrepareSubTabPanel />
+
+          <CollapsiblePanel title="Properties" defaultOpen={false}>
             <ShapeProperties />
           </CollapsiblePanel>
         </>
@@ -510,7 +869,7 @@ const LeftPanelStack: React.FC = () => {
             <MeshSettings />
           </CollapsiblePanel>
 
-          <CollapsiblePanel title="Quality" defaultOpen={false}>
+          <CollapsiblePanel title="Quality" defaultOpen>
             <QualityPanel />
           </CollapsiblePanel>
         </>
