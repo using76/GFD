@@ -34,9 +34,25 @@ function createWindow() {
 }
 
 function spawnGfdBackend() {
+  // Try gfd-server binary first, then gfd with server subcommand
+  const serverBinary = path.join(__dirname, '..', '..', 'target', 'release', 'gfd-server');
   const gfdBinary = path.join(__dirname, '..', '..', 'target', 'release', 'gfd');
+
+  // Check which binary exists
+  const fs = require('fs');
+  let binary, args;
+  if (fs.existsSync(serverBinary + '.exe') || fs.existsSync(serverBinary)) {
+    binary = serverBinary;
+    args = [];
+  } else {
+    // GUI works without backend (browser simulation mode)
+    console.log('[GFD] No backend binary found. GUI running in simulation mode.');
+    console.log('[GFD] Build with: cargo build --release --bin gfd-server');
+    return;
+  }
+
   try {
-    gfdProcess = spawn(gfdBinary, ['serve'], {
+    gfdProcess = spawn(binary, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
