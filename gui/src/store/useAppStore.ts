@@ -534,20 +534,169 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ meshGenerating: true });
     // Simulate async mesh generation
     setTimeout(() => {
-      const nx = 20, ny = 20;
-      const domainSize = 4; // domain spans [0, domainSize] in X and Z
+      const state = get();
+
+      // --- Determine domain from enclosure (or fall back to defaults) ---
+      const enclosure = state.shapes.find(
+        (s) => s.kind === 'enclosure' || s.isEnclosure
+      );
+
+      let domainMin: [number, number, number] = [0, 0, 0];
+      let domainMax: [number, number, number] = [4, 4, 4];
+      if (enclosure) {
+        const w = enclosure.dimensions.width || 4;
+        const h = enclosure.dimensions.height || 4;
+        const d = enclosure.dimensions.depth || 4;
+        domainMin = [
+          enclosure.position[0] - w / 2,
+          enclosure.position[1] - h / 2,
+          enclosure.position[2] - d / 2,
+        ];
+        domainMax = [
+          enclosure.position[0] + w / 2,
+          enclosure.position[1] + h / 2,
+          enclosure.position[2] + d / 2,
+        ];
+      }
+
+      const domainLx = domainMax[0] - domainMin[0];
+      const _domainLy = domainMax[1] - domainMin[1]; // reserved for future 3D meshing
+      const domainLz = domainMax[2] - domainMin[2];
+      void _domainLy;
+
+      // Compute cell counts from globalSize (or default 20)
+      const gs = state.meshConfig.globalSize;
+      const nx = Math.max(5, gs > 0 ? Math.round(domainLx / gs) : 20);
+      const nz = Math.max(5, gs > 0 ? Math.round(domainLz / gs) : 20);
+
+      // --- Collect solid (non-enclosure) body bounding boxes for hole-cutting ---
+      const bodyShapes = state.shapes.filter(
+        (s) => s.group !== 'enclosure' && s.kind !== 'enclosure'
+      );
+
+      /** Returns true if a point is inside any solid body (AABB approximation) */
+      function isPointInsideSolid(
+        px: number,
+        py: number,
+        pz: number
+      ): boolean {
+        for (const s of bodyShapes) {
+          if (s.kind === 'sphere') {
+            const r = s.dimensions.radius ?? 0.5;
+            const dx = px - s.position[0];
+            const dy = py - s.position[1];
+            const dz = pz - s.position[2];
+            if (dx * dx + dy * dy + dz * dz < r * r) return true;
+          } else {
+            // AABB test for box, cylinder, stl, etc.
+            const hw = (s.dimensions.width ?? s.dimensions.radius ?? 0.5) / 2;
+            const hh = (s.dimensions.height ?? s.dimensions.radius ?? 0.5) / 2;
+            const hd = (s.dimensions.depth ?? s.dimensions.radius ?? 0.5) / 2;
+            if (
+              px >= s.position[0] - hw &&
+              px <= s.position[0] + hw &&
+              py >= s.position[1] - hh &&
+              py <= s.position[1] + hh &&
+              pz >= s.position[2] - hd &&
+              pz <= s.position[2] + hd
+            )
+              return true;
+          }
+        }
+        return false;
+      }
+
+      // --- Build the 2D grid on XZ plane at Y = domainMin[1] ---
+      // We generate all nodes first, then filter out cells whose center is inside a solid
+      const dx = domainLx / nx;
+      const dz = domainLz / nz;
+      const yLevel = domainMin[1]; // mesh at bottom of enclosure for 2D view
+
+      const allNodeCount = (nx + 1) * (nz + 1);
+      const allPositions = new Float32Array(allNodeCount * 3);
+      for (let j = 0; j <= nz; j++) {
+        for (let i = 0; i <= nx; i++) {
+          const idx = (j * (nx + 1) + i) * 3;
+          allPositions[idx] = domainMin[0] + i * dx;
+          allPositions[idx + 1] = yLevel;
+          allPositions[idx + 2] = domainMin[2] + j * dz;
+        }
+      }
+
+      // --- Build triangles, skipping cells inside solid bodies ---
+      const tempIndices: number[] = [];
+      let fluidCellCount = 0;
+      for (let j = 0; j < nz; j++) {
+        for (let i = 0; i < nx; i++) {
+          // Cell center
+          const cx = domainMin[0] + (i + 0.5) * dx;
+          const cz = domainMin[2] + (j + 0.5) * dz;
+          const cy = yLevel;
+
+          if (bodyShapes.length > 0 && isPointInsideSolid(cx, cy, cz)) {
+            continue; // skip solid cells
+          }
+
+          const n0 = j * (nx + 1) + i;
+          const n1 = n0 + 1;
+          const n2 = n0 + (nx + 1);
+          const n3 = n2 + 1;
+          tempIndices.push(n0, n1, n2, n1, n3, n2);
+          fluidCellCount++;
+        }
+      }
+      const triIndices = new Uint32Array(tempIndices);
+
+      const cellCount = fluidCellCount;
+      const nodeCount = allNodeCount;
+      const internalFaces = Math.max(0, (nx - 1) * nz + nx * (nz - 1));
+      const boundaryFaces = 2 * nx + 2 * nz;
+      const faceCount = internalFaces + boundaryFaces;
+
+      // --- Build named zones from named selections (or default) ---
       const zones: MeshZone[] = [
         { id: 'vol-1', name: 'fluid', kind: 'volume' },
-        { id: 'surf-xmin', name: 'xmin (inlet)', kind: 'surface' },
-        { id: 'surf-xmax', name: 'xmax (outlet)', kind: 'surface' },
-        { id: 'surf-ymin', name: 'ymin (wall)', kind: 'surface' },
-        { id: 'surf-ymax', name: 'ymax (wall)', kind: 'surface' },
       ];
-      const nodeCount = (nx + 1) * (ny + 1);
-      const cellCount = nx * ny;
-      const internalFaces = (nx - 1) * ny + nx * (ny - 1);
-      const boundaryFaces = 2 * nx + 2 * ny;
-      const faceCount = internalFaces + boundaryFaces;
+
+      // Map named selections to surface zones, or use defaults
+      const namedSels = state.namedSelections;
+      if (namedSels.length > 0) {
+        namedSels.forEach((ns, idx) => {
+          zones.push({
+            id: `surf-ns-${idx}`,
+            name: `${ns.name} (${ns.type})`,
+            kind: 'surface',
+          });
+        });
+      } else {
+        // Default boundary zones based on domain faces
+        zones.push(
+          { id: 'surf-xmin', name: 'inlet (xmin)', kind: 'surface' },
+          { id: 'surf-xmax', name: 'outlet (xmax)', kind: 'surface' },
+          { id: 'surf-ymin', name: 'wall-bottom (ymin)', kind: 'surface' },
+          { id: 'surf-ymax', name: 'wall-top (ymax)', kind: 'surface' },
+          { id: 'surf-zmin', name: 'wall-back (zmin)', kind: 'surface' },
+          { id: 'surf-zmax', name: 'wall-front (zmax)', kind: 'surface' }
+        );
+      }
+
+      // --- Build boundary conditions from zones ---
+      const boundaries: BoundaryCondition[] = zones
+        .filter((z) => z.kind === 'surface')
+        .map((z) => ({
+          id: z.id,
+          name: z.name,
+          type: z.name.includes('inlet')
+            ? ('inlet' as const)
+            : z.name.includes('outlet')
+            ? ('outlet' as const)
+            : ('wall' as const),
+          velocity: [0, 0, 0] as [number, number, number],
+          pressure: 0,
+          temperature: 300,
+        }));
+
+      // --- Mesh quality statistics ---
       const quality: MeshQuality = {
         minOrthogonality: 0.85 + Math.random() * 0.1,
         maxSkewness: 0.15 + Math.random() * 0.1,
@@ -556,70 +705,46 @@ export const useAppStore = create<AppState>((set, get) => ({
         faceCount,
         nodeCount,
         histogram: Array.from({ length: 10 }, (_, i) => {
-          // Biased toward high quality
           if (i >= 8) return 0.3 + Math.random() * 0.2;
           if (i >= 6) return 0.15 + Math.random() * 0.1;
           return 0.02 + Math.random() * 0.05;
         }),
       };
-      const boundaries: BoundaryCondition[] = zones
-        .filter((z) => z.kind === 'surface')
-        .map((z) => ({
-          id: z.id,
-          name: z.name,
-          type: z.name.includes('inlet')
-            ? 'inlet' as const
-            : z.name.includes('outlet')
-            ? 'outlet' as const
-            : 'wall' as const,
-          velocity: [0, 0, 0] as [number, number, number],
-          pressure: 0,
-          temperature: 300,
-        }));
 
-      // Generate mesh display data: a 20x20 quad grid turned into triangles
-      // Domain spans [0, domainSize] in X and Z, Y = 0 (flat on XZ plane)
-      const positions = new Float32Array(nodeCount * 3);
-      const dx = domainSize / nx;
-      const dy = domainSize / ny;
-      for (let j = 0; j <= ny; j++) {
-        for (let i = 0; i <= nx; i++) {
-          const idx = (j * (nx + 1) + i) * 3;
-          positions[idx] = i * dx;
-          positions[idx + 1] = 0;
-          positions[idx + 2] = j * dy;
-        }
+      // --- Console log entries ---
+      const now = new Date().toLocaleTimeString();
+      const meshType = state.meshConfig.type.charAt(0).toUpperCase() + state.meshConfig.type.slice(1);
+      const solidCellsSkipped = nx * nz - fluidCellCount;
+      const logLines: string[] = [
+        `[${now}] [Mesh] Generating mesh for domain [${domainMin[0].toFixed(2)}, ${domainMax[0].toFixed(2)}] x [${domainMin[1].toFixed(2)}, ${domainMax[1].toFixed(2)}] x [${domainMin[2].toFixed(2)}, ${domainMax[2].toFixed(2)}]`,
+        `[${now}] [Mesh] Mesh type: ${meshType}, Global size: ${gs > 0 ? gs : 'auto'}`,
+        `[${now}] [Mesh] Grid: ${nx} x ${nz} cells (${nx + 1} x ${nz + 1} nodes)`,
+      ];
+      if (solidCellsSkipped > 0) {
+        logLines.push(
+          `[${now}] [Mesh] Solid body cells excluded: ${solidCellsSkipped}`
+        );
       }
-      const triIndices = new Uint32Array(cellCount * 6);
-      for (let j = 0; j < ny; j++) {
-        for (let i = 0; i < nx; i++) {
-          const cell = j * nx + i;
-          const n0 = j * (nx + 1) + i;
-          const n1 = n0 + 1;
-          const n2 = n0 + (nx + 1);
-          const n3 = n2 + 1;
-          triIndices[cell * 6] = n0;
-          triIndices[cell * 6 + 1] = n1;
-          triIndices[cell * 6 + 2] = n2;
-          triIndices[cell * 6 + 3] = n1;
-          triIndices[cell * 6 + 4] = n3;
-          triIndices[cell * 6 + 5] = n2;
-        }
-      }
+      logLines.push(
+        `[${now}] [Mesh] Created ${cellCount} cells, ${nodeCount} nodes`,
+        `[${now}] [Mesh] Boundary patches: ${zones.filter((z) => z.kind === 'surface').map((z) => z.name).join(', ')}`,
+        `[${now}] [Mesh] Mesh generation complete.`
+      );
 
-      set({
+      set((s) => ({
         meshZones: zones,
         meshQuality: quality,
         meshGenerated: true,
         meshGenerating: false,
         boundaries,
+        consoleLines: [...s.consoleLines, ...logLines],
         meshDisplayData: {
-          positions,
+          positions: allPositions,
           indices: triIndices,
           cellCount,
           nodeCount,
         },
-      });
+      }));
     }, 800);
   },
   setMeshDisplayData: (data) => set({ meshDisplayData: data }),

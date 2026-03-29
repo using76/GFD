@@ -9,6 +9,8 @@ import {
   PlusOutlined,
   DeleteOutlined,
   BgColorsOutlined,
+  BuildOutlined,
+  LoadingOutlined,
 } from '@ant-design/icons';
 import { useAppStore } from '../../store/useAppStore';
 import type { NamedSelection, NamedSelectionType } from '../../store/useAppStore';
@@ -94,6 +96,11 @@ const CfdPrepPanel: React.FC = () => {
   const setHoveredSelectionName = useAppStore((s) => s.setHoveredSelectionName);
   const cfdPrepStep = useAppStore((s) => s.cfdPrepStep);
   const setCfdPrepStep = useAppStore((s) => s.setCfdPrepStep);
+  const generateMesh = useAppStore((s) => s.generateMesh);
+  const meshGenerated = useAppStore((s) => s.meshGenerated);
+  const meshGenerating = useAppStore((s) => s.meshGenerating);
+  const setActiveTab = useAppStore((s) => s.setActiveTab);
+  const setActiveRibbonTab = useAppStore((s) => s.setActiveRibbonTab);
 
   const [padXp, setPadXp] = useState(2.0);
   const [padXn, setPadXn] = useState(1.0);
@@ -292,6 +299,22 @@ const CfdPrepPanel: React.FC = () => {
     setCfdPrepStep(4);
     message.success('Topology shared: conformal interfaces created between bodies');
   }, [enclosureCreated, setTopologyShared, setCfdPrepStep]);
+
+  // Step 5: Generate Mesh and switch to Mesh tab
+  const handleGenerateMesh = useCallback(() => {
+    if (!enclosureCreated) {
+      message.warning('Create an enclosure first.');
+      return;
+    }
+    generateMesh();
+    setCfdPrepStep(5);
+    // After a short delay (mesh generation is async), switch to mesh tab
+    setTimeout(() => {
+      setActiveTab('mesh');
+      setActiveRibbonTab('mesh');
+      message.success('Mesh generated. Switched to Mesh tab.');
+    }, 900);
+  }, [enclosureCreated, generateMesh, setCfdPrepStep, setActiveTab, setActiveRibbonTab]);
 
   const wallCount = namedSelections.filter((ns) => ns.type === 'wall').length;
 
@@ -619,6 +642,46 @@ const CfdPrepPanel: React.FC = () => {
         {topologyShared && (
           <div style={{ color: '#52c41a', fontSize: 11, marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
             <CheckCircleOutlined /> Topology shared
+          </div>
+        )}
+      </div>
+
+      {/* ====== Step 5: Generate Mesh ====== */}
+      <StepHeader step={5} title="Generate Mesh" done={meshGenerated} current={cfdPrepStep === 4} />
+      <div
+        style={{
+          background: '#111118',
+          border: '1px solid #252530',
+          borderRadius: 4,
+          padding: 8,
+          marginBottom: 8,
+          marginLeft: 10,
+          borderLeft: `2px solid ${meshGenerated ? '#52c41a' : '#333'}`,
+          opacity: enclosureCreated ? 1 : 0.5,
+          pointerEvents: enclosureCreated ? 'auto' : 'none',
+        }}
+      >
+        <div style={{ color: '#888', fontSize: 11, marginBottom: 6 }}>
+          Generate mesh within the enclosure domain and switch to Mesh tab.
+        </div>
+        <Button
+          type={meshGenerated ? 'default' : 'primary'}
+          icon={meshGenerating ? <LoadingOutlined /> : <BuildOutlined />}
+          onClick={handleGenerateMesh}
+          block
+          size="small"
+          disabled={!enclosureCreated || meshGenerating}
+          loading={meshGenerating}
+        >
+          {meshGenerating
+            ? 'Generating...'
+            : meshGenerated
+            ? 'Regenerate Mesh'
+            : 'Generate Mesh'}
+        </Button>
+        {meshGenerated && (
+          <div style={{ color: '#52c41a', fontSize: 11, marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <CheckCircleOutlined /> Mesh generated
           </div>
         )}
       </div>
