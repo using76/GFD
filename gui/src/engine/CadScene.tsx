@@ -147,11 +147,12 @@ const StlMesh: React.FC<{
 const EnclosureMaterial: React.FC<{ isSelected: boolean }> = ({ isSelected }) => (
   <meshStandardMaterial
     color={isSelected ? '#4096ff' : '#52c41a'}
-    emissive={isSelected ? '#1668dc' : '#000000'}
-    emissiveIntensity={isSelected ? 0.2 : 0}
+    emissive={isSelected ? '#1668dc' : '#103010'}
+    emissiveIntensity={isSelected ? 0.2 : 0.05}
     transparent
-    opacity={0.12}
+    opacity={0.08}
     wireframe={false}
+    depthWrite={false}
     side={THREE.DoubleSide}
     depthWrite={false}
   />
@@ -750,38 +751,64 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
         const solidRot = (shape.dimensions.subtractedSolidRotation as [number, number, number]) || [0, 0, 0];
         const rotRad: [number, number, number] = [degToRad(solidRot[0]), degToRad(solidRot[1]), degToRad(solidRot[2])];
 
-        // STL cutout: use stored stlData vertices
-        if (solidKind === 'stl' && shape.stlData && shape.stlData.vertices) {
-          const verts = shape.stlData.vertices;
-          return (
-            <mesh position={solidPos} rotation={rotRad}>
-              <bufferGeometry>
-                <bufferAttribute
-                  attach="attributes-position"
-                  args={[verts instanceof Float32Array ? verts : new Float32Array(verts as any), 3]}
-                />
-              </bufferGeometry>
-              <meshStandardMaterial color="#1a1a2e" transparent opacity={0.7} side={THREE.BackSide} />
-            </mesh>
-          );
-        }
+        // Cutout geometry (the "hole" inside the enclosure)
+        const cutoutGeometry = solidKind === 'stl' && shape.stlData && shape.stlData.vertices ? (
+          <bufferGeometry>
+            <bufferAttribute
+              attach="attributes-position"
+              args={[shape.stlData.vertices instanceof Float32Array ? shape.stlData.vertices : new Float32Array(shape.stlData.vertices as any), 3]}
+            />
+          </bufferGeometry>
+        ) : solidKind === 'sphere' ? (
+          <sphereGeometry args={[solidDims.radius || 0.5, 32, 32]} />
+        ) : solidKind === 'cylinder' ? (
+          <cylinderGeometry args={[solidDims.radius || 0.3, solidDims.radius || 0.3, solidDims.height || 1, 32]} />
+        ) : solidKind === 'cone' ? (
+          <coneGeometry args={[solidDims.radius || 0.3, solidDims.height || 1, 32]} />
+        ) : solidKind === 'torus' ? (
+          <torusGeometry args={[solidDims.majorRadius || 0.5, solidDims.minorRadius || 0.2, 16, 32]} />
+        ) : (
+          <boxGeometry args={[solidDims.width || 1, solidDims.height || 1, solidDims.depth || 1]} />
+        );
 
-        // Primitive cutout
         return (
-          <mesh position={solidPos} rotation={rotRad}>
-            {solidKind === 'sphere' ? (
-              <sphereGeometry args={[solidDims.radius || 0.5, 32, 32]} />
-            ) : solidKind === 'cylinder' ? (
-              <cylinderGeometry args={[solidDims.radius || 0.3, solidDims.radius || 0.3, solidDims.height || 1, 32]} />
-            ) : solidKind === 'cone' ? (
-              <coneGeometry args={[solidDims.radius || 0.3, solidDims.height || 1, 32]} />
-            ) : solidKind === 'torus' ? (
-              <torusGeometry args={[solidDims.majorRadius || 0.5, solidDims.minorRadius || 0.2, 16, 32]} />
-            ) : (
-              <boxGeometry args={[solidDims.width || 1, solidDims.height || 1, solidDims.depth || 1]} />
-            )}
-            <meshStandardMaterial color="#1a1a2e" transparent opacity={0.6} side={THREE.BackSide} />
-          </mesh>
+          <group>
+            {/* Inner surface of the cutout — visible from outside looking in */}
+            <mesh position={solidPos} rotation={rotRad}>
+              {cutoutGeometry}
+              <meshStandardMaterial
+                color="#ff6633"
+                emissive="#cc3300"
+                emissiveIntensity={0.3}
+                transparent
+                opacity={0.5}
+                side={THREE.BackSide}
+                depthWrite={false}
+              />
+            </mesh>
+            {/* Wireframe outline of the cutout — always visible */}
+            <mesh position={solidPos} rotation={rotRad}>
+              {solidKind === 'stl' && shape.stlData && shape.stlData.vertices ? (
+                <bufferGeometry>
+                  <bufferAttribute
+                    attach="attributes-position"
+                    args={[shape.stlData.vertices instanceof Float32Array ? shape.stlData.vertices : new Float32Array(shape.stlData.vertices as any), 3]}
+                  />
+                </bufferGeometry>
+              ) : solidKind === 'sphere' ? (
+                <sphereGeometry args={[solidDims.radius || 0.5, 32, 32]} />
+              ) : solidKind === 'cylinder' ? (
+                <cylinderGeometry args={[solidDims.radius || 0.3, solidDims.radius || 0.3, solidDims.height || 1, 32]} />
+              ) : solidKind === 'cone' ? (
+                <coneGeometry args={[solidDims.radius || 0.3, solidDims.height || 1, 32]} />
+              ) : solidKind === 'torus' ? (
+                <torusGeometry args={[solidDims.majorRadius || 0.5, solidDims.minorRadius || 0.2, 16, 32]} />
+              ) : (
+                <boxGeometry args={[solidDims.width || 1, solidDims.height || 1, solidDims.depth || 1]} />
+              )}
+              <meshBasicMaterial color="#ff8844" wireframe transparent opacity={0.8} />
+            </mesh>
+          </group>
         );
       })()}
       {/* Shell: render inner hollow surface */}
