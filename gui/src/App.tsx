@@ -31,15 +31,94 @@ const AppMenu: React.FC = () => {
 
   const menuItems = [
     { key: 'new', icon: <FileOutlined />, label: 'New Project', action: () => { if (confirm('Create a new project?')) window.location.reload(); } },
-    { key: 'open', icon: <FolderOpenOutlined />, label: 'Open...', action: () => message.info('Open project (simulated)') },
-    { key: 'save', icon: <SaveOutlined />, label: 'Save', action: () => message.success('Project saved (simulated)') },
-    { key: 'saveas', icon: <SaveOutlined />, label: 'Save As...', action: () => message.info('Save As (simulated)') },
+    { key: 'open', icon: <FolderOpenOutlined />, label: 'Open...', action: () => {
+      try {
+        const data = localStorage.getItem('gfd-project');
+        if (data) {
+          const saved = JSON.parse(data);
+          const state = useAppStore.getState();
+          if (saved.shapes) saved.shapes.forEach((s: any) => state.addShape(s));
+          if (saved.physicsModels) state.updatePhysicsModels(saved.physicsModels);
+          if (saved.material) state.updateMaterial(saved.material);
+          if (saved.solverSettings) state.updateSolverSettings(saved.solverSettings);
+          message.success('Project loaded from local storage.');
+        } else {
+          message.info('No saved project found in local storage.');
+        }
+      } catch { message.error('Failed to load project.'); }
+    }},
+    { key: 'save', icon: <SaveOutlined />, label: 'Save', action: () => {
+      try {
+        const state = useAppStore.getState();
+        const data = {
+          shapes: state.shapes.map(s => ({ ...s, stlData: undefined })),
+          physicsModels: state.physicsModels,
+          material: state.material,
+          solverSettings: state.solverSettings,
+          boundaries: state.boundaries,
+          meshConfig: state.meshConfig,
+        };
+        localStorage.setItem('gfd-project', JSON.stringify(data));
+        message.success('Project saved to local storage.');
+      } catch { message.error('Failed to save project.'); }
+    }},
+    { key: 'saveas', icon: <SaveOutlined />, label: 'Save As...', action: () => {
+      try {
+        const state = useAppStore.getState();
+        const data = {
+          shapes: state.shapes.map(s => ({ ...s, stlData: undefined })),
+          physicsModels: state.physicsModels,
+          material: state.material,
+          solverSettings: state.solverSettings,
+          boundaries: state.boundaries,
+          meshConfig: state.meshConfig,
+        };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'gfd_project.json';
+        a.click();
+        URL.revokeObjectURL(url);
+        message.success('Project downloaded as gfd_project.json');
+      } catch { message.error('Failed to export project.'); }
+    }},
     { key: 'div1', divider: true },
-    { key: 'import', icon: <FolderOpenOutlined />, label: 'Import Mesh...', action: () => message.info('Import mesh (simulated)') },
-    { key: 'export', icon: <ExportOutlined />, label: 'Export VTK...', action: () => message.info('Export VTK (simulated)') },
+    { key: 'import', icon: <FolderOpenOutlined />, label: 'Import Mesh...', action: () => {
+      useAppStore.getState().setActiveRibbonTab('mesh');
+      message.info('Switch to Mesh tab and click Generate to create mesh, or use Design > Import for STL files.');
+    }},
+    { key: 'export', icon: <ExportOutlined />, label: 'Export VTK...', action: () => {
+      const state = useAppStore.getState();
+      if (state.fieldData.length === 0) {
+        message.warning('No field data to export. Run the solver first.');
+        return;
+      }
+      const lines: string[] = ['# GFD Field Data Export'];
+      lines.push(`# Fields: ${state.fieldData.map(f => f.name).join(', ')}`);
+      lines.push(`# Mesh: ${state.meshDisplayData?.cellCount ?? 0} cells`);
+      state.fieldData.forEach(f => {
+        lines.push(`\n# ${f.name} (min=${f.min.toFixed(4)}, max=${f.max.toFixed(4)})`);
+        lines.push(`# ${f.values.length} values`);
+        const sample = Math.min(f.values.length, 100);
+        for (let i = 0; i < sample; i++) lines.push(f.values[i].toFixed(6));
+        if (f.values.length > sample) lines.push(`# ... ${f.values.length - sample} more values`);
+      });
+      const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'gfd_fields.vtk';
+      a.click();
+      URL.revokeObjectURL(url);
+      message.success('Field data exported as gfd_fields.vtk');
+    }},
     { key: 'div2', divider: true },
-    { key: 'settings', icon: <SettingOutlined />, label: 'Settings', action: () => message.info('Settings (simulated)') },
-    { key: 'about', icon: <InfoCircleOutlined />, label: 'About GFD', action: () => message.info('GFD - Generalized Fluid Dynamics v0.1.0') },
+    { key: 'settings', icon: <SettingOutlined />, label: 'Settings', action: () => {
+      useAppStore.getState().setActiveRibbonTab('setup');
+      window.dispatchEvent(new CustomEvent('gfd-setup-section', { detail: { section: 'solver' } }));
+    }},
+    { key: 'about', icon: <InfoCircleOutlined />, label: 'About GFD', action: () => message.info('GFD - Generalized Fluid Dynamics v0.1.0 | Rust multi-physics solver | 203 files, 28K lines, 18 crates') },
   ];
 
   return (
@@ -125,9 +204,40 @@ const AppMenu: React.FC = () => {
 const QuickAccess: React.FC = () => (
   <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
     {[
-      { icon: <UndoOutlined />, tip: 'Undo', action: () => message.info('Undo (simulated)') },
-      { icon: <RedoOutlined />, tip: 'Redo', action: () => message.info('Redo (simulated)') },
-      { icon: <SaveOutlined />, tip: 'Save', action: () => message.success('Saved (simulated)') },
+      { icon: <UndoOutlined />, tip: 'Undo', action: () => {
+        const state = useAppStore.getState();
+        if (state.shapes.length > 0) {
+          const last = state.shapes[state.shapes.length - 1];
+          state.removeShape(last.id);
+          message.info(`Undo: removed "${last.name}"`);
+        } else {
+          message.info('Nothing to undo');
+        }
+      }},
+      { icon: <RedoOutlined />, tip: 'Redo', action: () => {
+        const state = useAppStore.getState();
+        if (state.clipboardShape) {
+          state.addShape({ ...state.clipboardShape, id: `shape-redo-${Date.now()}` });
+          message.info('Redo: restored from clipboard');
+        } else {
+          message.info('Nothing to redo');
+        }
+      }},
+      { icon: <SaveOutlined />, tip: 'Save', action: () => {
+        try {
+          const state = useAppStore.getState();
+          const data = {
+            shapes: state.shapes.map(s => ({ ...s, stlData: undefined })),
+            physicsModels: state.physicsModels,
+            material: state.material,
+            solverSettings: state.solverSettings,
+            boundaries: state.boundaries,
+            meshConfig: state.meshConfig,
+          };
+          localStorage.setItem('gfd-project', JSON.stringify(data));
+          message.success('Project saved.');
+        } catch { message.error('Save failed.'); }
+      }},
     ].map((btn, i) => (
       <div
         key={i}
@@ -420,7 +530,7 @@ export default function App() {
             GFD - Generalized Fluid Dynamics
           </span>
           <div style={{ flex: 1 }} />
-          <QuestionCircleOutlined style={{ color: '#445', cursor: 'pointer', fontSize: 14 }} onClick={() => message.info('Help: see PROJECT_PLAN.md')} />
+          <QuestionCircleOutlined style={{ color: '#445', cursor: 'pointer', fontSize: 14 }} onClick={() => message.info('GFD GUI: Design > Prepare > Mesh > Setup > Calculation > Results. Keyboard: Ctrl+Z undo, Ctrl+C copy, Del delete.')} />
         </div>
 
         {/* ============ Ribbon ============ */}

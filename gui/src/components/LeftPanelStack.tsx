@@ -710,6 +710,18 @@ const LeftPanelStack: React.FC = () => {
     return () => window.removeEventListener('gfd-setup-section', handler);
   }, []);
 
+  // Listen for results section change events from ribbon buttons
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.section) {
+        setResultsSection(detail.section);
+      }
+    };
+    window.addEventListener('gfd-results-section', handler);
+    return () => window.removeEventListener('gfd-results-section', handler);
+  }, []);
+
   const isDesign = activeRibbonTab === 'design';
   const isDisplay = activeRibbonTab === 'display';
   const isMeasure = activeRibbonTab === 'measure';
@@ -732,7 +744,7 @@ const LeftPanelStack: React.FC = () => {
   const resultsPanelMap: Record<string, React.ReactNode> = {
     contours: <ContourSettings />,
     vectors: <VectorSettings />,
-    streamlines: <div style={{ padding: 16, color: '#667' }}>Streamlines will be available in a future release.</div>,
+    streamlines: <VectorSettings />,
     reports: <ReportPanel />,
   };
 

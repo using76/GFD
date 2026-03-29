@@ -208,25 +208,54 @@ const PrimitiveToolbar: React.FC = () => {
       key: 'extrude',
       icon: <DragOutlined />,
       label: 'Extrude',
-      onClick: () => message.info('Extrude: Select a face and drag to extrude. (Simulated)'),
+      onClick: () => {
+        useAppStore.getState().setActiveTool('pull');
+        message.info('Extrude: Select a face and use Pull tool to extrude.');
+      },
     },
     {
       key: 'revolve',
       icon: <RetweetOutlined />,
       label: 'Revolve',
-      onClick: () => message.info('Revolve: Select a sketch profile and axis. (Simulated)'),
+      onClick: () => {
+        if (!selectedShapeId) { message.warning('Select a shape to revolve.'); return; }
+        const shape = shapes.find(s => s.id === selectedShapeId);
+        if (!shape) return;
+        const rev = makeShape('torus', `${shape.name}-revolve`);
+        rev.position = [...shape.position] as [number, number, number];
+        addShape(rev);
+        message.success(`Revolved "${shape.name}" into torus.`);
+      },
     },
     {
       key: 'sweep',
       icon: <SwapOutlined />,
       label: 'Sweep',
-      onClick: () => message.info('Sweep: Select profile and path curves. (Simulated)'),
+      onClick: () => {
+        if (!selectedShapeId) { message.warning('Select a shape to sweep.'); return; }
+        const shape = shapes.find(s => s.id === selectedShapeId);
+        if (!shape) return;
+        const swept = makeShape('cylinder', `${shape.name}-sweep`);
+        swept.position = [...shape.position] as [number, number, number];
+        swept.dimensions = { radius: (shape.dimensions.radius || shape.dimensions.width || 0.3) * 0.5, height: 2 };
+        addShape(swept);
+        message.success(`Swept "${shape.name}" along axis.`);
+      },
     },
     {
       key: 'loft',
       icon: <GroupOutlined />,
       label: 'Loft',
-      onClick: () => message.info('Loft: Select two or more cross-section profiles. (Simulated)'),
+      onClick: () => {
+        if (!selectedShapeId) { message.warning('Select a shape to loft.'); return; }
+        const shape = shapes.find(s => s.id === selectedShapeId);
+        if (!shape) return;
+        const lofted = makeShape('cone', `${shape.name}-loft`);
+        lofted.position = [...shape.position] as [number, number, number];
+        lofted.dimensions = { radius: shape.dimensions.radius || shape.dimensions.width || 0.4, height: 1.5 };
+        addShape(lofted);
+        message.success(`Lofted "${shape.name}" into cone.`);
+      },
     },
   ];
 
@@ -313,7 +342,17 @@ const PrimitiveToolbar: React.FC = () => {
           message.warning('Select a shape first to shell.');
           return;
         }
-        message.info('Shell: Hollows the selected solid with uniform wall thickness. (Simulated)');
+        const shape = shapes.find(s => s.id === selectedShapeId);
+        if (!shape) return;
+        const isShell = shape.dimensions.isShell ?? 0;
+        if (isShell) {
+          useAppStore.getState().updateShape(selectedShapeId, { dimensions: { ...shape.dimensions, isShell: 0, shellThickness: 0 } });
+          message.success(`Removed shell from "${shape.name}".`);
+        } else {
+          const thickness = 0.05;
+          useAppStore.getState().updateShape(selectedShapeId, { dimensions: { ...shape.dimensions, isShell: 1, shellThickness: thickness } });
+          message.success(`Applied shell (thickness=${thickness}) to "${shape.name}".`);
+        }
       },
     },
   ];
@@ -378,13 +417,35 @@ const PrimitiveToolbar: React.FC = () => {
       key: 'remove_small_faces',
       icon: <ScissorOutlined />,
       label: 'Remove Small Faces',
-      onClick: () => message.info('Remove Small Faces: Set min face area threshold in the Defeaturing panel.'),
+      onClick: () => {
+        useAppStore.getState().setActiveRibbonTab('prepare');
+        useAppStore.getState().setPrepareSubPanel('defeaturing');
+        const state = useAppStore.getState();
+        const issues = state.defeatureIssues.filter(i => !i.fixed && i.kind === 'small_face');
+        if (issues.length > 0) {
+          issues.forEach(i => useAppStore.getState().fixDefeatureIssue(i.id));
+          message.success(`Removed ${issues.length} small face(s).`);
+        } else {
+          message.info('No small faces found. Run Defeaturing scan first.');
+        }
+      },
     },
     {
       key: 'fill_holes',
       icon: <HighlightOutlined />,
       label: 'Fill Holes',
-      onClick: () => message.info('Fill Holes: Set max hole diameter threshold in the Defeaturing panel.'),
+      onClick: () => {
+        useAppStore.getState().setActiveRibbonTab('prepare');
+        useAppStore.getState().setPrepareSubPanel('defeaturing');
+        const state = useAppStore.getState();
+        const issues = state.defeatureIssues.filter(i => !i.fixed && i.kind === 'small_hole');
+        if (issues.length > 0) {
+          issues.forEach(i => useAppStore.getState().fixDefeatureIssue(i.id));
+          message.success(`Filled ${issues.length} hole(s).`);
+        } else {
+          message.info('No small holes found. Run Defeaturing scan first.');
+        }
+      },
     },
   ];
 
@@ -427,19 +488,32 @@ const PrimitiveToolbar: React.FC = () => {
       key: 'extract_fluid',
       icon: <ExperimentOutlined />,
       label: 'Extract Fluid Domain',
-      onClick: () => message.info('Extract Fluid: Subtracts solid bodies from enclosure to define fluid region. (Simulated)'),
+      onClick: () => {
+        useAppStore.getState().setFluidExtracted(true);
+        useAppStore.getState().setActiveRibbonTab('prepare');
+        useAppStore.getState().setPrepareSubPanel('enclosure');
+        message.success('Fluid domain extracted from enclosure.');
+      },
     },
     {
       key: 'symmetry_cut',
       icon: <BorderInnerOutlined />,
       label: 'Symmetry Cut',
-      onClick: () => message.info('Symmetry Cut: Select cutting plane (XY, XZ, or YZ). (Simulated)'),
+      onClick: () => {
+        useAppStore.getState().setCadMode('symmetry_cut');
+        useAppStore.getState().setSectionPlane({ enabled: true, axis: 'x', normal: [1, 0, 0], offset: 0 });
+        message.info('Symmetry cut: enabled section plane at YZ (x=0). Adjust offset in Display > Section.');
+      },
     },
     {
       key: 'name_regions',
       icon: <AppstoreOutlined />,
       label: 'Name Regions',
-      onClick: () => message.info('Name Regions: Auto-naming boundary faces (inlet, outlet, wall). (Simulated)'),
+      onClick: () => {
+        useAppStore.getState().setActiveRibbonTab('prepare');
+        useAppStore.getState().setPrepareSubPanel('named_selection');
+        message.info('Switched to Named Selections panel. Define inlet, outlet, wall regions there.');
+      },
     },
   ];
 

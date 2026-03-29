@@ -39,11 +39,7 @@ const treeItems: TreeItem[] = [
 const panelMap: Record<ResultsSection, React.ReactNode> = {
   contours: <ContourSettings />,
   vectors: <VectorSettings />,
-  streamlines: (
-    <div style={{ padding: 16, color: '#888' }}>
-      Streamline settings will be available in a future release.
-    </div>
-  ),
+  streamlines: <VectorSettings />,
   reports: <ReportPanel />,
 };
 

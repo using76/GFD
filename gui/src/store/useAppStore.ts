@@ -159,14 +159,22 @@ export interface FieldData {
 export type FlowType = 'incompressible' | 'compressible';
 export type TurbulenceModel = 'none' | 'k-epsilon' | 'k-omega-sst' | 'sa' | 'les';
 export type MultiphaseModel = 'none' | 'vof' | 'euler' | 'mixture' | 'dpm';
+export type RadiationModel = 'none' | 'p1' | 'dom';
+export type SpeciesModel = 'none' | 'species-transport' | 'combustion';
 export type SolverMethod = 'SIMPLE' | 'PISO' | 'SIMPLEC';
 export type BoundaryType = 'wall' | 'inlet' | 'outlet' | 'symmetry';
+export type TimeMode = 'steady' | 'transient';
+export type SpatialScheme = 'first-order' | 'second-order' | 'QUICK';
+export type PressureScheme = 'standard' | 'second-order';
+export type WallThermalCondition = 'adiabatic' | 'fixed-temp' | 'heat-flux';
 
 export interface PhysicsModels {
   flow: FlowType;
   turbulence: TurbulenceModel;
   energy: boolean;
   multiphase: MultiphaseModel;
+  radiation: RadiationModel;
+  species: SpeciesModel;
 }
 
 export interface Material {
@@ -184,14 +192,26 @@ export interface BoundaryCondition {
   velocity: [number, number, number];
   pressure: number;
   temperature: number;
+  turbulenceIntensity: number;
+  wallThermalCondition: WallThermalCondition;
+  heatFlux: number;
+  movingWallVelocity: [number, number, number];
 }
 
 export interface SolverSettings {
   method: SolverMethod;
   relaxPressure: number;
   relaxVelocity: number;
+  relaxTurbulence: number;
+  relaxEnergy: number;
   maxIterations: number;
   tolerance: number;
+  toleranceEnergy: number;
+  pressureScheme: PressureScheme;
+  momentumScheme: SpatialScheme;
+  timeMode: TimeMode;
+  timeStepSize: number;
+  totalTime: number;
 }
 
 // ---- Calculation types ----
@@ -206,7 +226,7 @@ export interface ResidualPoint {
 }
 
 // ---- Results types ----
-export type ColormapType = 'jet' | 'rainbow' | 'grayscale';
+export type ColormapType = 'jet' | 'rainbow' | 'grayscale' | 'coolwarm';
 export type ResultField = 'pressure' | 'velocity' | 'temperature';
 
 export interface ContourConfig {
@@ -215,6 +235,8 @@ export interface ContourConfig {
   autoRange: boolean;
   min: number;
   max: number;
+  opacity: number;
+  showOnBoundary: string;
 }
 
 export interface VectorConfig {
@@ -921,10 +943,16 @@ export const useAppStore = create<AppState>((set, get) => ({
             ? ('inlet' as const)
             : z.name.includes('outlet')
             ? ('outlet' as const)
+            : z.name.includes('symmetry')
+            ? ('symmetry' as const)
             : ('wall' as const),
-          velocity: [0, 0, 0] as [number, number, number],
+          velocity: z.name.includes('inlet') ? [1, 0, 0] as [number, number, number] : [0, 0, 0] as [number, number, number],
           pressure: 0,
           temperature: 300,
+          turbulenceIntensity: 0.05,
+          wallThermalCondition: 'adiabatic' as const,
+          heatFlux: 0,
+          movingWallVelocity: [0, 0, 0] as [number, number, number],
         }));
 
       // --- Mesh quality statistics (real metrics for structured hex mesh) ---
@@ -1050,6 +1078,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     turbulence: 'none',
     energy: false,
     multiphase: 'none',
+    radiation: 'none',
+    species: 'none',
   },
   material: {
     name: 'Air',
@@ -1063,8 +1093,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     method: 'SIMPLE',
     relaxPressure: 0.3,
     relaxVelocity: 0.7,
+    relaxTurbulence: 0.8,
+    relaxEnergy: 1.0,
     maxIterations: 200,
     tolerance: 1e-6,
+    toleranceEnergy: 1e-6,
+    pressureScheme: 'second-order',
+    momentumScheme: 'second-order',
+    timeMode: 'steady',
+    timeStepSize: 0.001,
+    totalTime: 1.0,
   },
   selectedBoundaryId: null,
   updatePhysicsModels: (patch) =>
@@ -1275,6 +1313,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     autoRange: true,
     min: 0,
     max: 1,
+    opacity: 1.0,
+    showOnBoundary: 'all',
   },
   vectorConfig: {
     scale: 1.0,

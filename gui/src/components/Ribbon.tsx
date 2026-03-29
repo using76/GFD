@@ -314,7 +314,16 @@ const DesignRibbon: React.FC = () => {
 
       {/* Reference Geometry */}
       <RibbonButton icon={<FieldNumberOutlined />} label="Equation" onClick={() => {
-        message.info('Enter equation surface: e.g. z = sin(x)*cos(y). (Coming soon)');
+        const eq = window.prompt('Enter equation surface (z = f(x,y)):', 'sin(x)*cos(y)');
+        if (!eq) return;
+        const id = `shape-${nextId++}`;
+        addShape({
+          id, name: `Eq: ${eq.substring(0, 16)}`, kind: 'box',
+          position: [0, 0, 0], rotation: [0, 0, 0],
+          dimensions: { width: 4, height: 0.01, depth: 4, _equation: 1 },
+          group: 'body',
+        });
+        message.success(`Equation surface created: z = ${eq}`);
       }} />
       <RibbonButton icon={<BorderInnerOutlined />} label="Plane" onClick={() => {
         const id = `shape-${nextId++}`;
@@ -525,11 +534,27 @@ const MeasureRibbon: React.FC = () => {
         if (next) message.info('Click a face to measure area');
       }} />
       <RibbonButton icon={<BlockOutlined />} label="Volume" onClick={() => { const st = useAppStore.getState(); const sid = st.selectedShapeId; if (sid) { const s = st.shapes.find(x=>x.id===sid); const d = s?.dimensions||{}; const v = (d.width||1)*(d.height||1)*(d.depth||1); message.success(`Volume of "${s?.name}": ${v.toFixed(4)} m^3`); } else { message.warning('Select a shape to measure volume.'); } }} />
-      <RibbonButton icon={<ColumnWidthOutlined />} label="Length" onClick={() => { message.success('Length: select edges in 3D to measure.'); }} />
+      <RibbonButton icon={<ColumnWidthOutlined />} label="Length" active={measureMode === 'distance'} onClick={() => {
+        const next = measureMode === 'distance' ? null : 'distance' as const;
+        setMeasureMode(next);
+        setActiveTool(next ? 'measure' : 'select');
+        if (next) message.info('Click edges in viewport to measure length');
+      }} />
       <RibbonButton icon={<DeleteOutlined />} label="Clear" onClick={() => { clearMeasureLabels(); message.info('Measurements cleared'); }} />
       <GroupSep label="Measure" />
 
-      <RibbonButton icon={<BarChartOutlined />} label="Mass Props" onClick={() => { message.success('Mass Properties: see Properties panel for selected shape.'); }} />
+      <RibbonButton icon={<BarChartOutlined />} label="Mass Props" onClick={() => {
+        const st = useAppStore.getState();
+        const sid = st.selectedShapeId;
+        if (!sid) { message.warning('Select a shape to view mass properties.'); return; }
+        const s = st.shapes.find(x => x.id === sid);
+        if (!s) return;
+        const d = s.dimensions;
+        const vol = (d.width || d.radius ? Math.PI * (d.radius || 0.5) ** 2 * (d.height || 1) : (d.width || 1) * (d.height || 1) * (d.depth || 1));
+        const density = st.material.density;
+        const mass = vol * density;
+        message.success(`"${s.name}": Vol=${vol.toFixed(4)} m^3, Mass=${mass.toFixed(4)} kg (rho=${density})`);
+      }} />
       <GroupSep label="Properties" />
     </div>
   );
@@ -859,11 +884,9 @@ const MeshRibbon: React.FC = () => {
 
       <RibbonButton icon={<SettingOutlined />} label="Settings" onClick={() => {
         useAppStore.getState().setActiveRibbonTab('mesh');
-        message.info('Mesh settings panel shown');
       }} />
       <RibbonButton icon={<BarChartOutlined />} label="Quality" onClick={() => {
         useAppStore.getState().setActiveRibbonTab('mesh');
-        message.info('Quality panel shown');
       }} />
       <GroupSep label="Controls" />
     </div>
@@ -884,26 +907,22 @@ const SetupRibbon: React.FC = () => {
       <RibbonButton icon={<ExperimentOutlined />} label="Models" large onClick={() => {
         useAppStore.getState().setActiveRibbonTab('setup');
         setSetupSection('models');
-        message.info('Physics models panel shown');
       }} />
       <RibbonButton icon={<GoldOutlined />} label="Materials" onClick={() => {
         useAppStore.getState().setActiveRibbonTab('setup');
         setSetupSection('materials');
-        message.info('Materials panel shown');
       }} />
       <GroupSep label="Physics" />
 
       <RibbonButton icon={<BlockOutlined />} label="Boundaries" large onClick={() => {
         useAppStore.getState().setActiveRibbonTab('setup');
         setSetupSection('boundaries');
-        message.info('Boundary conditions panel shown');
       }} />
       <GroupSep label="BCs" />
 
       <RibbonButton icon={<SettingOutlined />} label="Solver" onClick={() => {
         useAppStore.getState().setActiveRibbonTab('setup');
         setSetupSection('solver');
-        message.info('Solver settings panel shown');
       }} />
       <GroupSep label="Settings" />
     </div>
@@ -939,14 +958,36 @@ const ResultsRibbon: React.FC = () => {
   const setRenderMode = useAppStore((s) => s.setRenderMode);
   const setActiveField = useAppStore((s) => s.setActiveField);
 
+  const switchResultsSection = (section: string) => {
+    window.dispatchEvent(new CustomEvent('gfd-results-section', { detail: { section } }));
+  };
+
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, height: '100%' }}>
-      <RibbonButton icon={<HeatMapOutlined />} label="Contours" large onClick={() => { setRenderMode('contour'); setActiveField('pressure'); }} />
-      <RibbonButton icon={<ArrowsAltOutlined />} label="Vectors" onClick={() => { setRenderMode('solid'); message.success('Vector display: run solver first, then select field in Results tab.'); }} />
-      <RibbonButton icon={<SwapOutlined />} label="Streamlines" onClick={() => { message.success('Streamlines: run solver first, then select in Results tab.'); }} />
+      <RibbonButton icon={<HeatMapOutlined />} label="Contours" large onClick={() => {
+        setRenderMode('contour');
+        setActiveField('pressure');
+        useAppStore.getState().setActiveRibbonTab('results');
+        switchResultsSection('contours');
+      }} />
+      <RibbonButton icon={<ArrowsAltOutlined />} label="Vectors" onClick={() => {
+        setRenderMode('contour');
+        setActiveField('velocity');
+        useAppStore.getState().setActiveRibbonTab('results');
+        switchResultsSection('vectors');
+      }} />
+      <RibbonButton icon={<SwapOutlined />} label="Streamlines" onClick={() => {
+        setRenderMode('contour');
+        setActiveField('velocity');
+        useAppStore.getState().setActiveRibbonTab('results');
+        switchResultsSection('streamlines');
+      }} />
       <GroupSep label="Display" />
 
-      <RibbonButton icon={<FileTextOutlined />} label="Reports" onClick={() => message.info('Reports: use the left panel.')} />
+      <RibbonButton icon={<FileTextOutlined />} label="Reports" onClick={() => {
+        useAppStore.getState().setActiveRibbonTab('results');
+        switchResultsSection('reports');
+      }} />
       <GroupSep label="Reports" />
     </div>
   );

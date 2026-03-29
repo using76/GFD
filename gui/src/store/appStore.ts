@@ -25,4 +25,10 @@ export type {
   MeshSurface,
   MeshSurfaceBoundaryType,
   MeshSurfaceFaceDirection,
+  RadiationModel,
+  SpeciesModel,
+  TimeMode,
+  SpatialScheme,
+  PressureScheme,
+  WallThermalCondition,
 } from './useAppStore';
