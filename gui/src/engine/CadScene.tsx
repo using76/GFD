@@ -1018,7 +1018,8 @@ const EnclosurePreview: React.FC = () => {
   );
 };
 
-/** Renders the extracted solid cutout independently — always visible inside enclosure */
+/** Renders the extracted solid cutout — CLIPPED to enclosure bounds so only
+ *  the portion of the solid inside the enclosure is visible (orange). */
 const ExtractedCutout: React.FC = () => {
   const shapes = useAppStore((s) => s.shapes);
   const enclosure = shapes.find((s) => (s.kind === 'enclosure' || s.isEnclosure) && s.dimensions.subtractedSolidId);
@@ -1029,6 +1030,22 @@ const ExtractedCutout: React.FC = () => {
   const solidDims = (enclosure.dimensions.subtractedSolidDims as Record<string, number>) || {};
   const solidRot = (enclosure.dimensions.subtractedSolidRotation as [number, number, number]) || [0, 0, 0];
   const rotRad: [number, number, number] = [degToRad(solidRot[0]), degToRad(solidRot[1]), degToRad(solidRot[2])];
+
+  // Compute enclosure bounds for clipping planes
+  const ew = enclosure.dimensions.width as number || 4;
+  const eh = enclosure.dimensions.height as number || 4;
+  const ed = enclosure.dimensions.depth as number || 4;
+  const ec = enclosure.position;
+
+  // 6 clipping planes: one per enclosure face, normals pointing INWARD
+  const clipPlanes = useMemo(() => [
+    new THREE.Plane(new THREE.Vector3( 1, 0, 0), -(ec[0] - ew / 2)), // xmin
+    new THREE.Plane(new THREE.Vector3(-1, 0, 0),  (ec[0] + ew / 2)), // xmax
+    new THREE.Plane(new THREE.Vector3( 0, 1, 0), -(ec[1] - eh / 2)), // ymin
+    new THREE.Plane(new THREE.Vector3( 0,-1, 0),  (ec[1] + eh / 2)), // ymax
+    new THREE.Plane(new THREE.Vector3( 0, 0, 1), -(ec[2] - ed / 2)), // zmin
+    new THREE.Plane(new THREE.Vector3( 0, 0,-1),  (ec[2] + ed / 2)), // zmax
+  ], [ec, ew, eh, ed]);
 
   const makeGeo = () => {
     if (solidKind === 'stl' && enclosure.stlData?.vertices) {
@@ -1051,7 +1068,7 @@ const ExtractedCutout: React.FC = () => {
 
   return (
     <group>
-      {/* Solid orange surface (BackSide = visible from outside looking into the cavity) */}
+      {/* Solid surface — clipped to enclosure bounds */}
       <mesh position={solidPos} rotation={rotRad}>
         {makeGeo()}
         <meshStandardMaterial
@@ -1061,12 +1078,20 @@ const ExtractedCutout: React.FC = () => {
           transparent
           opacity={0.6}
           side={THREE.DoubleSide}
+          clippingPlanes={clipPlanes}
+          clipShadows
         />
       </mesh>
-      {/* Wireframe outline */}
+      {/* Wireframe — also clipped */}
       <mesh position={solidPos} rotation={rotRad}>
         {makeGeo()}
-        <meshBasicMaterial color="#ffaa44" wireframe transparent opacity={0.9} />
+        <meshBasicMaterial
+          color="#ffaa44"
+          wireframe
+          transparent
+          opacity={0.8}
+          clippingPlanes={clipPlanes}
+        />
       </mesh>
     </group>
   );
