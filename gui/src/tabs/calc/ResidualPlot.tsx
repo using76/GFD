@@ -63,8 +63,8 @@ const ResidualPlot: React.FC = () => {
       <Typography.Text strong style={{ marginBottom: 8 }}>
         Residual Convergence
       </Typography.Text>
-      <div style={{ flex: 1, minHeight: 0 }}>
-        <ResponsiveContainer width="100%" height="100%">
+      <div style={{ flex: 1, minHeight: 200 }}>
+        <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={200}>
           <LineChart data={data}>
             <CartesianGrid strokeDasharray="3 3" stroke="#333" />
             <XAxis

@@ -105,7 +105,7 @@ const QualityPanel: React.FC = () => {
       <div style={{ marginTop: 16 }}>
         <Typography.Text strong>Quality Histogram</Typography.Text>
         <div style={{ width: '100%', height: 160, marginTop: 8 }}>
-          <ResponsiveContainer>
+          <ResponsiveContainer width="100%" height={150} minWidth={100}>
             <BarChart data={histogramData}>
               <XAxis dataKey="bin" tick={{ fontSize: 9 }} />
               <YAxis tick={{ fontSize: 10 }} unit="%" />
