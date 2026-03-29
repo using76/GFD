@@ -848,6 +848,107 @@ const SelectedShapeWithTransform: React.FC<{ shape: Shape; explodedPosition?: [n
   );
 };
 
+// ============================================================
+// Enclosure Preview (dashed green wireframe box)
+// ============================================================
+
+/** Renders a live wireframe preview of the enclosure being configured */
+const EnclosurePreview: React.FC = () => {
+  const enclosurePreview = useAppStore((s) => s.enclosurePreview);
+  const shapes = useAppStore((s) => s.shapes);
+  const selectedBodiesForEnclosure = useAppStore((s) => s.selectedBodiesForEnclosure);
+  const meshRef = useRef<THREE.Mesh>(null);
+
+  // Pulse animation for preview
+  useFrame(({ clock }) => {
+    if (meshRef.current) {
+      const opacity = 0.2 + Math.sin(clock.getElapsedTime() * 2) * 0.1;
+      const mat = meshRef.current.material as THREE.MeshBasicMaterial;
+      if (mat) mat.opacity = opacity;
+    }
+  });
+
+  // Compute bounding box and dimensions
+  const previewData = useMemo(() => {
+    if (!enclosurePreview || selectedBodiesForEnclosure.length === 0) return null;
+
+    const bodyShapes = shapes.filter(
+      (s) => s.group !== 'enclosure' && s.kind !== 'enclosure' && selectedBodiesForEnclosure.includes(s.id)
+    );
+    if (bodyShapes.length === 0) return null;
+
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
+
+    bodyShapes.forEach((s) => {
+      const hw = (s.dimensions.width ?? s.dimensions.radius ?? 0.5);
+      const hh = (s.dimensions.height ?? s.dimensions.radius ?? 0.5);
+      const hd = (s.dimensions.depth ?? s.dimensions.radius ?? 0.5);
+      minX = Math.min(minX, s.position[0] - hw);
+      maxX = Math.max(maxX, s.position[0] + hw);
+      minY = Math.min(minY, s.position[1] - hh);
+      maxY = Math.max(maxY, s.position[1] + hh);
+      minZ = Math.min(minZ, s.position[2] - hd);
+      maxZ = Math.max(maxZ, s.position[2] + hd);
+    });
+
+    const { padXp, padXn, padYp, padYn, padZp, padZn } = enclosurePreview;
+    const eMinX = minX - padXn;
+    const eMaxX = maxX + padXp;
+    const eMinY = minY - padYn;
+    const eMaxY = maxY + padYp;
+    const eMinZ = minZ - padZn;
+    const eMaxZ = maxZ + padZp;
+
+    const w = eMaxX - eMinX;
+    const h = eMaxY - eMinY;
+    const d = eMaxZ - eMinZ;
+    const cx = (eMinX + eMaxX) / 2;
+    const cy = (eMinY + eMaxY) / 2;
+    const cz = (eMinZ + eMaxZ) / 2;
+
+    return { w, h, d, cx, cy, cz };
+  }, [enclosurePreview, shapes, selectedBodiesForEnclosure]);
+
+  if (!previewData) return null;
+
+  return (
+    <group>
+      {/* Dashed wireframe box */}
+      <mesh
+        ref={meshRef}
+        position={[previewData.cx, previewData.cy, previewData.cz]}
+      >
+        <boxGeometry args={[previewData.w, previewData.h, previewData.d]} />
+        <meshBasicMaterial
+          color="#52c41a"
+          wireframe
+          transparent
+          opacity={0.25}
+        />
+      </mesh>
+      {/* Solid faint fill for visibility */}
+      <mesh position={[previewData.cx, previewData.cy, previewData.cz]}>
+        <boxGeometry args={[previewData.w, previewData.h, previewData.d]} />
+        <meshBasicMaterial
+          color="#52c41a"
+          transparent
+          opacity={0.04}
+          side={THREE.DoubleSide}
+          depthWrite={false}
+        />
+      </mesh>
+      {/* Edge highlight */}
+      <mesh position={[previewData.cx, previewData.cy, previewData.cz]}>
+        <boxGeometry args={[previewData.w, previewData.h, previewData.d]} />
+        <meshBasicMaterial visible={false} />
+        <Edges color="#52c41a" threshold={1} />
+      </mesh>
+    </group>
+  );
+};
+
 const CadScene: React.FC = () => {
   const shapes = useAppStore((s) => s.shapes);
   const selectedShapeId = useAppStore((s) => s.selectedShapeId);
@@ -915,6 +1016,9 @@ const CadScene: React.FC = () => {
 
       {/* Named selection overlays for CFD prep */}
       <NamedSelectionOverlays />
+
+      {/* Enclosure preview (live wireframe before creation) */}
+      <EnclosurePreview />
     </group>
   );
 };

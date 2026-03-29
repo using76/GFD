@@ -700,52 +700,37 @@ const RepairRibbon: React.FC = () => {
 // Prepare Tab Ribbon
 // ============================================================
 const PrepareRibbon: React.FC = () => {
-  const addShape = useAppStore((s) => s.addShape);
   const shapes = useAppStore((s) => s.shapes);
-  const setEnclosureCreated = useAppStore((s) => s.setEnclosureCreated);
   const setFluidExtracted = useAppStore((s) => s.setFluidExtracted);
   const setTopologyShared = useAppStore((s) => s.setTopologyShared);
   const setDefeatureIssues = useAppStore((s) => s.setDefeatureIssues);
   const fixAllDefeatureIssues = useAppStore((s) => s.fixAllDefeatureIssues);
-  const setPrepareSubTab = useAppStore((s) => s.setPrepareSubTab);
+  const setPrepareSubPanel = useAppStore((s) => s.setPrepareSubPanel);
+  const prepareSubPanel = useAppStore((s) => s.prepareSubPanel);
 
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, height: '100%' }}>
-      <RibbonButton icon={<ExpandOutlined />} label="Enclosure" large onClick={() => {
-        const bodies = shapes.filter((s) => s.group !== 'enclosure');
-        let mx = -2, Mx = 2, my = -2, My = 2, mz = -2, Mz = 2;
-        if (bodies.length > 0) {
-          mx = Math.min(...bodies.map((s) => s.position[0])) - 2;
-          Mx = Math.max(...bodies.map((s) => s.position[0])) + 2;
-          my = Math.min(...bodies.map((s) => s.position[1])) - 2;
-          My = Math.max(...bodies.map((s) => s.position[1])) + 2;
-          mz = Math.min(...bodies.map((s) => s.position[2])) - 2;
-          Mz = Math.max(...bodies.map((s) => s.position[2])) + 2;
-        }
-        const id = `shape-${nextId++}`;
-        addShape({
-          id, name: 'Enclosure', kind: 'enclosure',
-          position: [(mx + Mx) / 2, (my + My) / 2, (mz + Mz) / 2],
-          rotation: [0, 0, 0],
-          dimensions: { width: Mx - mx, height: My - my, depth: Mz - mz },
-          isEnclosure: true, group: 'enclosure',
-        });
-        setEnclosureCreated(true);
-        message.success('Enclosure created.');
+      {/* CFD Prep Group: Enclosure + Vol Extract */}
+      <RibbonButton icon={<ExpandOutlined />} label="Enclosure" large active={prepareSubPanel === 'enclosure'} onClick={() => {
+        setPrepareSubPanel(prepareSubPanel === 'enclosure' ? null : 'enclosure');
+        message.info('Configure enclosure in the left panel.');
       }} />
-      <RibbonButton icon={<ExperimentOutlined />} label="Vol Extract" onClick={() => { setPrepareSubTab('cfdprep'); setFluidExtracted(true); message.success('Fluid volume extracted.'); }} />
-      <RibbonButton icon={<BorderInnerOutlined />} label="Share Topo" onClick={() => { setPrepareSubTab('cfdprep'); setTopologyShared(true); message.success('Topology shared.'); }} />
-      <GroupSep label="Domain" />
+      <RibbonButton icon={<ExperimentOutlined />} label="Vol Extract" onClick={() => {
+        setPrepareSubPanel('enclosure');
+        setFluidExtracted(true);
+        message.success('Fluid volume extracted.');
+      }} />
+      <GroupSep label="CFD Prep" />
 
-      <RibbonButton icon={<AppstoreOutlined />} label="Named Sel" large onClick={() => {
-        useAppStore.getState().setActiveRibbonTab('prepare');
-        setPrepareSubTab('cfdprep');
-        message.info('Switch to Prepare tab > Named Selections');
+      {/* Named Selection: its own button */}
+      <RibbonButton icon={<AppstoreOutlined />} label="Named Sel" large active={prepareSubPanel === 'named_selection'} onClick={() => {
+        setPrepareSubPanel(prepareSubPanel === 'named_selection' ? null : 'named_selection');
       }} />
       <GroupSep label="Selection" />
 
-      <RibbonButton icon={<BugOutlined />} label="Defeaturing" onClick={() => {
-        setPrepareSubTab('defeaturing');
+      {/* Defeaturing Group: Defeaturing + Auto Fix + Topology */}
+      <RibbonButton icon={<BugOutlined />} label="Defeaturing" active={prepareSubPanel === 'defeaturing'} onClick={() => {
+        setPrepareSubPanel(prepareSubPanel === 'defeaturing' ? null : 'defeaturing');
         const activeShapes = shapes.filter(s => s.group !== 'enclosure');
         const issues: Array<{ id: string; kind: 'small_face' | 'short_edge' | 'small_hole' | 'sliver_face' | 'gap'; description: string; size: number; fixed: boolean; position: [number, number, number]; shapeId: string }> = [];
         const kinds: Array<'small_face' | 'short_edge' | 'small_hole' | 'sliver_face' | 'gap'> = ['small_face', 'short_edge', 'small_hole', 'sliver_face', 'gap'];
@@ -777,10 +762,13 @@ const PrepareRibbon: React.FC = () => {
         setDefeatureIssues(issues);
         message.success(`${issues.length} defeaturing issues found`);
       }} />
+      <RibbonButton icon={<ThunderboltOutlined />} label="Auto Fix" onClick={() => { fixAllDefeatureIssues(); message.success('All defeaturing issues auto-fixed.'); }} />
+      <RibbonButton icon={<BorderInnerOutlined />} label="Topology" onClick={() => { setTopologyShared(true); message.success('Topology shared: conformal interfaces created.'); }} />
+      <GroupSep label="Geometry" />
+
+      {/* Remove features group */}
       <RibbonButton icon={<DeleteOutlined />} label="Rm Fillets" onClick={() => {
-        setPrepareSubTab('defeaturing');
         const activeShapes = shapes.filter(s => s.group !== 'enclosure');
-        // Remove fillets from all shapes
         let removed = 0;
         activeShapes.forEach(s => {
           if ((s.dimensions.filletRadius ?? 0) > 0) {
@@ -788,7 +776,6 @@ const PrepareRibbon: React.FC = () => {
             removed++;
           }
         });
-        // Generate fillet defeaturing issues
         const issues: Array<{ id: string; kind: 'small_face' | 'short_edge' | 'small_hole' | 'sliver_face' | 'gap'; description: string; size: number; fixed: boolean; position: [number, number, number]; shapeId: string }> = [];
         activeShapes.forEach((shape) => {
           issues.push({
@@ -805,7 +792,6 @@ const PrepareRibbon: React.FC = () => {
         message.success(`Removed fillets from ${removed} shape(s). ${issues.length} fillet regions processed.`);
       }} />
       <RibbonButton icon={<DeleteOutlined />} label="Rm Holes" onClick={() => {
-        setPrepareSubTab('defeaturing');
         const activeShapes = shapes.filter(s => s.group !== 'enclosure');
         const issues: Array<{ id: string; kind: 'small_face' | 'short_edge' | 'small_hole' | 'sliver_face' | 'gap'; description: string; size: number; fixed: boolean; position: [number, number, number]; shapeId: string }> = [];
         activeShapes.forEach((shape) => {
@@ -830,7 +816,6 @@ const PrepareRibbon: React.FC = () => {
         message.success(`Removed ${issues.length} hole(s) from ${activeShapes.length} shape(s).`);
       }} />
       <RibbonButton icon={<DeleteOutlined />} label="Rm Chamfers" onClick={() => {
-        setPrepareSubTab('defeaturing');
         const activeShapes = shapes.filter(s => s.group !== 'enclosure');
         let removed = 0;
         activeShapes.forEach(s => {
@@ -854,7 +839,6 @@ const PrepareRibbon: React.FC = () => {
         if (issues.length > 0) setDefeatureIssues(issues);
         message.success(`Removed chamfers from ${removed} shape(s). ${issues.length} chamfer regions processed.`);
       }} />
-      <RibbonButton icon={<ThunderboltOutlined />} label="Auto Fix" onClick={() => { setPrepareSubTab('defeaturing'); fixAllDefeatureIssues(); message.success('All defeaturing issues auto-fixed.'); }} />
       <GroupSep label="Defeaturing" />
     </div>
   );

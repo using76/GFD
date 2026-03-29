@@ -35,6 +35,7 @@ import ToolOptions from './ToolOptions';
 import ShapeProperties from '../tabs/cad/ShapeProperties';
 import DefeaturingPanel from '../tabs/cad/DefeaturingPanel';
 import CfdPrepPanel from '../tabs/cad/CfdPrepPanel';
+import NamedSelectionPanel from '../tabs/cad/NamedSelectionPanel';
 import MeshSettings from '../tabs/mesh/MeshSettings';
 import QualityPanel from '../tabs/mesh/QualityPanel';
 import ModelsPanel from '../tabs/setup/ModelsPanel';
@@ -661,50 +662,29 @@ const DisplaySettingsPanel: React.FC = () => {
 };
 
 // ============================================================
-// Prepare Sub-Tab Panel (Defeaturing or CFD Prep)
+// Prepare Sub-Panel (driven by prepareSubPanel state)
 // ============================================================
-const PrepareSubTabPanel: React.FC = () => {
-  const prepareSubTab = useAppStore((s) => s.prepareSubTab);
-  const setPrepareSubTab = useAppStore((s) => s.setPrepareSubTab);
+const PrepareSubPanelContent: React.FC = () => {
+  const prepareSubPanel = useAppStore((s) => s.prepareSubPanel);
 
-  return (
-    <>
-      <div style={{ display: 'flex', borderBottom: '1px solid #252540', background: '#141428' }}>
-        {([
-          { key: 'defeaturing' as const, label: 'Defeaturing' },
-          { key: 'cfdprep' as const, label: 'CFD Prep' },
-        ]).map((t) => (
-          <div
-            key={t.key}
-            onClick={() => setPrepareSubTab(t.key)}
-            style={{
-              padding: '5px 12px',
-              fontSize: 11,
-              cursor: 'pointer',
-              color: prepareSubTab === t.key ? '#fff' : '#667',
-              borderBottom: prepareSubTab === t.key ? '2px solid #4096ff' : '2px solid transparent',
-              userSelect: 'none',
-              flex: 1,
-              textAlign: 'center',
-              fontWeight: prepareSubTab === t.key ? 600 : 400,
-            }}
-          >
-            {t.label}
-          </div>
-        ))}
-      </div>
-      {prepareSubTab === 'defeaturing' && (
-        <CollapsiblePanel title="Defeaturing" defaultOpen>
-          <DefeaturingPanel />
-        </CollapsiblePanel>
-      )}
-      {prepareSubTab === 'cfdprep' && (
-        <CollapsiblePanel title="CFD Prep" defaultOpen>
-          <CfdPrepPanel />
-        </CollapsiblePanel>
-      )}
-    </>
-  );
+  if (prepareSubPanel === 'defeaturing') {
+    return (
+      <CollapsiblePanel title="Defeaturing" defaultOpen>
+        <DefeaturingPanel />
+      </CollapsiblePanel>
+    );
+  }
+
+  if (prepareSubPanel === 'named_selection') {
+    return (
+      <CollapsiblePanel title="Named Selections" defaultOpen>
+        <NamedSelectionPanel />
+      </CollapsiblePanel>
+    );
+  }
+
+  // Default: no extra sub-panel
+  return null;
 };
 
 // ============================================================
@@ -843,14 +823,18 @@ const LeftPanelStack: React.FC = () => {
         </>
       )}
 
-      {/* ============ Prepare tab: Named Selections + Defeaturing ============ */}
+      {/* ============ Prepare tab: CFD Prep (Enclosure + Volume Extract) shown directly ============ */}
       {isPrepare && (
         <>
           <CollapsiblePanel title="Structure" defaultOpen>
             <StructureSubTabs />
           </CollapsiblePanel>
 
-          <PrepareSubTabPanel />
+          <CollapsiblePanel title="CFD Prep" defaultOpen>
+            <CfdPrepPanel />
+          </CollapsiblePanel>
+
+          <PrepareSubPanelContent />
 
           <CollapsiblePanel title="Properties" defaultOpen={false}>
             <ShapeProperties />

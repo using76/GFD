@@ -1,106 +1,30 @@
-import React, { useState, useCallback, useMemo } from 'react';
-import { Button, InputNumber, Form, Divider, Select, message, Input, Tag, Tooltip } from 'antd';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import { Button, InputNumber, Form, Select, message } from 'antd';
 import {
   ExpandOutlined,
   ExperimentOutlined,
-  BorderInnerOutlined,
-  AppstoreOutlined,
   CheckCircleOutlined,
-  PlusOutlined,
-  DeleteOutlined,
-  BgColorsOutlined,
-  BuildOutlined,
-  LoadingOutlined,
+  AppstoreOutlined,
+  ClearOutlined,
+  SelectOutlined,
 } from '@ant-design/icons';
 import { useAppStore } from '../../store/useAppStore';
-import type { NamedSelection, NamedSelectionType } from '../../store/useAppStore';
-
-const selectionTypeColors: Record<NamedSelectionType, string> = {
-  inlet: '#4488ff',
-  outlet: '#ff4444',
-  wall: '#44ff44',
-  symmetry: '#ffff44',
-  interface: '#ff88ff',
-  custom: '#88ffff',
-};
-
-const selectionTypeIcons: Record<NamedSelectionType, string> = {
-  inlet: '\u25B6',   // right arrow
-  outlet: '\u25C0',  // left arrow (reversed)
-  wall: '\u2588',    // full block
-  symmetry: '\u2194', // left-right arrow
-  interface: '\u21C4', // double arrow
-  custom: '\u2605',   // star
-};
 
 let nextEnclosureId = 100;
-
-const StepHeader: React.FC<{
-  step: number;
-  title: string;
-  done: boolean;
-  current: boolean;
-}> = ({ step, title, done, current }) => (
-  <div
-    style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: 8,
-      padding: '6px 0',
-      marginBottom: 4,
-    }}
-  >
-    <div
-      style={{
-        width: 20,
-        height: 20,
-        borderRadius: '50%',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontSize: 11,
-        fontWeight: 600,
-        flexShrink: 0,
-        background: done ? '#52c41a' : current ? '#1677ff' : '#333',
-        color: done || current ? '#fff' : '#888',
-      }}
-    >
-      {done ? <CheckCircleOutlined style={{ fontSize: 12 }} /> : step}
-    </div>
-    <span
-      style={{
-        fontWeight: 500,
-        fontSize: 12,
-        color: done ? '#52c41a' : current ? '#fff' : '#888',
-      }}
-    >
-      {title}
-    </span>
-  </div>
-);
 
 const CfdPrepPanel: React.FC = () => {
   const shapes = useAppStore((s) => s.shapes);
   const addShape = useAppStore((s) => s.addShape);
-  const namedSelections = useAppStore((s) => s.namedSelections);
-  const setNamedSelections = useAppStore((s) => s.setNamedSelections);
-  const addNamedSelection = useAppStore((s) => s.addNamedSelection);
-  const removeNamedSelection = useAppStore((s) => s.removeNamedSelection);
   const enclosureCreated = useAppStore((s) => s.enclosureCreated);
   const setEnclosureCreated = useAppStore((s) => s.setEnclosureCreated);
   const fluidExtracted = useAppStore((s) => s.fluidExtracted);
   const setFluidExtracted = useAppStore((s) => s.setFluidExtracted);
-  const topologyShared = useAppStore((s) => s.topologyShared);
-  const setTopologyShared = useAppStore((s) => s.setTopologyShared);
-  const hoveredSelectionName = useAppStore((s) => s.hoveredSelectionName);
-  const setHoveredSelectionName = useAppStore((s) => s.setHoveredSelectionName);
   const cfdPrepStep = useAppStore((s) => s.cfdPrepStep);
   const setCfdPrepStep = useAppStore((s) => s.setCfdPrepStep);
-  const generateMesh = useAppStore((s) => s.generateMesh);
-  const meshGenerated = useAppStore((s) => s.meshGenerated);
-  const meshGenerating = useAppStore((s) => s.meshGenerating);
-  const setActiveTab = useAppStore((s) => s.setActiveTab);
-  const setActiveRibbonTab = useAppStore((s) => s.setActiveRibbonTab);
+  const setEnclosurePreview = useAppStore((s) => s.setEnclosurePreview);
+  const selectedBodiesForEnclosure = useAppStore((s) => s.selectedBodiesForEnclosure);
+  const setSelectedBodiesForEnclosure = useAppStore((s) => s.setSelectedBodiesForEnclosure);
+  const toggleBodyForEnclosure = useAppStore((s) => s.toggleBodyForEnclosure);
 
   const [padXp, setPadXp] = useState(2.0);
   const [padXn, setPadXn] = useState(1.0);
@@ -109,31 +33,24 @@ const CfdPrepPanel: React.FC = () => {
   const [padZp, setPadZp] = useState(1.0);
   const [padZn, setPadZn] = useState(1.0);
   const [selectedBody, setSelectedBody] = useState<string | null>(null);
-  const [newSelName, setNewSelName] = useState('');
-  const [newSelType, setNewSelType] = useState<NamedSelectionType>('wall');
 
   const bodyShapes = useMemo(
     () => shapes.filter((s) => s.group !== 'enclosure' && s.kind !== 'enclosure'),
     [shapes]
   );
 
-  const enclosureShape = useMemo(
-    () => shapes.find((s) => s.kind === 'enclosure' || s.isEnclosure),
-    [shapes]
-  );
-
-  // Step 1: Create Enclosure
-  const handleCreateEnclosure = useCallback(() => {
-    if (bodyShapes.length === 0) {
-      message.warning('No body shapes to enclose. Create shapes first.');
-      return;
-    }
+  // Compute bounding box of selected bodies
+  const boundingBox = useMemo(() => {
+    const selected = selectedBodiesForEnclosure.length > 0
+      ? bodyShapes.filter((s) => selectedBodiesForEnclosure.includes(s.id))
+      : [];
+    if (selected.length === 0) return null;
 
     let minX = Infinity, maxX = -Infinity;
     let minY = Infinity, maxY = -Infinity;
     let minZ = Infinity, maxZ = -Infinity;
 
-    bodyShapes.forEach((s) => {
+    selected.forEach((s) => {
       const hw = (s.dimensions.width ?? s.dimensions.radius ?? 0.5);
       const hh = (s.dimensions.height ?? s.dimensions.radius ?? 0.5);
       const hd = (s.dimensions.depth ?? s.dimensions.radius ?? 0.5);
@@ -145,9 +62,64 @@ const CfdPrepPanel: React.FC = () => {
       maxZ = Math.max(maxZ, s.position[2] + hd);
     });
 
-    minX -= padXn; maxX += padXp;
-    minY -= padYn; maxY += padYp;
-    minZ -= padZn; maxZ += padZp;
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const cz = (minZ + maxZ) / 2;
+
+    return { minX, maxX, minY, maxY, minZ, maxZ, cx, cy, cz };
+  }, [bodyShapes, selectedBodiesForEnclosure]);
+
+  // Computed enclosure dimensions
+  const enclosureDims = useMemo(() => {
+    if (!boundingBox) return null;
+    const w = (boundingBox.maxX + padXp) - (boundingBox.minX - padXn);
+    const h = (boundingBox.maxY + padYp) - (boundingBox.minY - padYn);
+    const d = (boundingBox.maxZ + padZp) - (boundingBox.minZ - padZn);
+    return { w, h, d };
+  }, [boundingBox, padXp, padXn, padYp, padYn, padZp, padZn]);
+
+  // Update enclosure preview when paddings or selected bodies change
+  useEffect(() => {
+    if (!boundingBox) {
+      setEnclosurePreview(null);
+      return;
+    }
+    setEnclosurePreview({
+      center: [boundingBox.cx, boundingBox.cy, boundingBox.cz],
+      padXp, padXn, padYp, padYn, padZp, padZn,
+    });
+  }, [boundingBox, padXp, padXn, padYp, padYn, padZp, padZn, setEnclosurePreview]);
+
+  // Clear preview when component unmounts
+  useEffect(() => {
+    return () => {
+      setEnclosurePreview(null);
+    };
+  }, [setEnclosurePreview]);
+
+  // Select all bodies
+  const handleSelectAll = useCallback(() => {
+    setSelectedBodiesForEnclosure(bodyShapes.map((s) => s.id));
+  }, [bodyShapes, setSelectedBodiesForEnclosure]);
+
+  // Clear selection
+  const handleClearSelection = useCallback(() => {
+    setSelectedBodiesForEnclosure([]);
+  }, [setSelectedBodiesForEnclosure]);
+
+  // Create Enclosure
+  const handleCreateEnclosure = useCallback(() => {
+    if (!boundingBox || selectedBodiesForEnclosure.length === 0) {
+      message.warning('Select at least one body to enclose.');
+      return;
+    }
+
+    const minX = boundingBox.minX - padXn;
+    const maxX = boundingBox.maxX + padXp;
+    const minY = boundingBox.minY - padYn;
+    const maxY = boundingBox.maxY + padYp;
+    const minZ = boundingBox.minZ - padZn;
+    const maxZ = boundingBox.maxZ + padZp;
 
     const w = maxX - minX;
     const h = maxY - minY;
@@ -166,11 +138,12 @@ const CfdPrepPanel: React.FC = () => {
     });
 
     setEnclosureCreated(true);
+    setEnclosurePreview(null);
     if (cfdPrepStep < 1) setCfdPrepStep(1);
     message.success(`Enclosure created: ${w.toFixed(2)} x ${h.toFixed(2)} x ${d.toFixed(2)} m`);
-  }, [bodyShapes, padXp, padXn, padYp, padYn, padZp, padZn, addShape, setEnclosureCreated, cfdPrepStep, setCfdPrepStep]);
+  }, [boundingBox, selectedBodiesForEnclosure, padXp, padXn, padYp, padYn, padZp, padZn, addShape, setEnclosureCreated, setEnclosurePreview, cfdPrepStep, setCfdPrepStep]);
 
-  // Step 2: Extract Fluid Volume
+  // Extract Fluid Volume
   const handleExtractFluid = useCallback(() => {
     if (!enclosureCreated) {
       message.warning('Create an enclosure first.');
@@ -181,249 +154,139 @@ const CfdPrepPanel: React.FC = () => {
     message.success('Fluid volume extracted (boolean subtract solid from enclosure)');
   }, [enclosureCreated, setFluidExtracted, cfdPrepStep, setCfdPrepStep]);
 
-  // Step 3: Auto-name by normal direction
-  const handleAutoNameByNormal = useCallback(() => {
-    if (!enclosureShape) {
-      message.warning('Create an enclosure first.');
-      return;
-    }
-
-    const cx = enclosureShape.position[0];
-    const cy = enclosureShape.position[1];
-    const cz = enclosureShape.position[2];
-    const hw = (enclosureShape.dimensions.width ?? 1) / 2;
-    const hh = (enclosureShape.dimensions.height ?? 1) / 2;
-    const hd = (enclosureShape.dimensions.depth ?? 1) / 2;
-
-    const autoSelections: NamedSelection[] = [
-      {
-        name: 'inlet',
-        type: 'inlet',
-        faces: [0],
-        center: [cx - hw, cy, cz],
-        normal: [-1, 0, 0],
-        width: enclosureShape.dimensions.depth ?? 1,
-        height: enclosureShape.dimensions.height ?? 1,
-        color: selectionTypeColors.inlet,
-      },
-      {
-        name: 'outlet',
-        type: 'outlet',
-        faces: [1],
-        center: [cx + hw, cy, cz],
-        normal: [1, 0, 0],
-        width: enclosureShape.dimensions.depth ?? 1,
-        height: enclosureShape.dimensions.height ?? 1,
-        color: selectionTypeColors.outlet,
-      },
-      {
-        name: 'wall-top',
-        type: 'wall',
-        faces: [2],
-        center: [cx, cy + hh, cz],
-        normal: [0, 1, 0],
-        width: enclosureShape.dimensions.width ?? 1,
-        height: enclosureShape.dimensions.depth ?? 1,
-        color: selectionTypeColors.wall,
-      },
-      {
-        name: 'wall-bottom',
-        type: 'wall',
-        faces: [3],
-        center: [cx, cy - hh, cz],
-        normal: [0, -1, 0],
-        width: enclosureShape.dimensions.width ?? 1,
-        height: enclosureShape.dimensions.depth ?? 1,
-        color: selectionTypeColors.wall,
-      },
-      {
-        name: 'wall-front',
-        type: 'wall',
-        faces: [4],
-        center: [cx, cy, cz + hd],
-        normal: [0, 0, 1],
-        width: enclosureShape.dimensions.width ?? 1,
-        height: enclosureShape.dimensions.height ?? 1,
-        color: selectionTypeColors.wall,
-      },
-      {
-        name: 'wall-back',
-        type: 'wall',
-        faces: [5],
-        center: [cx, cy, cz - hd],
-        normal: [0, 0, -1],
-        width: enclosureShape.dimensions.width ?? 1,
-        height: enclosureShape.dimensions.height ?? 1,
-        color: selectionTypeColors.wall,
-      },
-    ];
-
-    setNamedSelections(autoSelections);
-    if (cfdPrepStep < 3) setCfdPrepStep(3);
-    message.success('Auto-named 6 face selections by normal direction');
-  }, [enclosureShape, setNamedSelections, cfdPrepStep, setCfdPrepStep]);
-
-  // Add custom named selection
-  const handleAddSelection = useCallback(() => {
-    if (!newSelName.trim()) {
-      message.warning('Enter a name for the selection.');
-      return;
-    }
-    if (namedSelections.find((ns) => ns.name === newSelName.trim())) {
-      message.warning('A selection with this name already exists.');
-      return;
-    }
-
-    const sel: NamedSelection = {
-      name: newSelName.trim(),
-      type: newSelType,
-      faces: [],
-      center: [0, 0, 0],
-      normal: [0, 1, 0],
-      width: 1,
-      height: 1,
-      color: selectionTypeColors[newSelType],
-    };
-    addNamedSelection(sel);
-    setNewSelName('');
-    message.success(`Added named selection: ${sel.name}`);
-  }, [newSelName, newSelType, namedSelections, addNamedSelection]);
-
-  // Step 4: Share Topology
-  const handleShareTopology = useCallback(() => {
-    if (!enclosureCreated) {
-      message.warning('Create an enclosure first.');
-      return;
-    }
-    setTopologyShared(true);
-    setCfdPrepStep(4);
-    message.success('Topology shared: conformal interfaces created between bodies');
-  }, [enclosureCreated, setTopologyShared, setCfdPrepStep]);
-
-  // Step 5: Generate Mesh and switch to Mesh tab
-  const handleGenerateMesh = useCallback(() => {
-    if (!enclosureCreated) {
-      message.warning('Create an enclosure first.');
-      return;
-    }
-    generateMesh();
-    setCfdPrepStep(5);
-    // After a short delay (mesh generation is async), switch to mesh tab
-    setTimeout(() => {
-      setActiveTab('mesh');
-      setActiveRibbonTab('mesh');
-      message.success('Mesh generated. Switched to Mesh tab.');
-    }, 900);
-  }, [enclosureCreated, generateMesh, setCfdPrepStep, setActiveTab, setActiveRibbonTab]);
-
-  const wallCount = namedSelections.filter((ns) => ns.type === 'wall').length;
+  const inputStyle = { width: '100%' };
+  const labelStyle: React.CSSProperties = { marginBottom: 2 };
 
   return (
     <div style={{ padding: 12, fontSize: 12 }}>
-      {/* Header */}
+      {/* ====== Enclosure Section ====== */}
       <div
         style={{
-          fontWeight: 600,
-          marginBottom: 12,
-          fontSize: 14,
-          borderBottom: '1px solid #303030',
-          paddingBottom: 8,
           display: 'flex',
           alignItems: 'center',
           gap: 6,
+          fontWeight: 600,
+          fontSize: 13,
+          marginBottom: 8,
+          paddingBottom: 6,
+          borderBottom: '1px solid #303050',
+          color: '#ccd',
         }}
       >
-        <AppstoreOutlined />
-        CFD Preparation
+        <ExpandOutlined style={{ color: '#52c41a' }} />
+        Enclosure
       </div>
 
-      {/* ====== Step 1: Enclosure ====== */}
-      <StepHeader step={1} title="Enclosure" done={enclosureCreated} current={cfdPrepStep === 0} />
       <div
         style={{
           background: '#111118',
           border: '1px solid #252530',
           borderRadius: 4,
-          padding: 8,
-          marginBottom: 12,
-          marginLeft: 10,
-          borderLeft: `2px solid ${enclosureCreated ? '#52c41a' : '#333'}`,
+          padding: 10,
+          marginBottom: 14,
+          borderLeft: `2px solid ${enclosureCreated ? '#52c41a' : '#4096ff'}`,
         }}
       >
-        <div style={{ color: '#999', fontSize: 11, marginBottom: 6 }}>
-          Padding (m):
+        {/* Selected bodies count */}
+        <div style={{ color: '#aab', fontSize: 11, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+          <SelectOutlined style={{ fontSize: 12 }} />
+          Selected bodies: <strong style={{ color: '#fff' }}>{selectedBodiesForEnclosure.length}</strong>
         </div>
+
+        {/* Select All / Clear buttons */}
+        <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+          <Button size="small" onClick={handleSelectAll} style={{ flex: 1, fontSize: 11 }}>
+            Select All
+          </Button>
+          <Button size="small" icon={<ClearOutlined />} onClick={handleClearSelection} style={{ flex: 1, fontSize: 11 }}>
+            Clear
+          </Button>
+        </div>
+
+        {/* Body list for selection */}
+        {bodyShapes.length > 0 && (
+          <div style={{ maxHeight: 100, overflow: 'auto', marginBottom: 8, border: '1px solid #1a1a30', borderRadius: 3 }}>
+            {bodyShapes.map((s) => {
+              const isSelected = selectedBodiesForEnclosure.includes(s.id);
+              return (
+                <div
+                  key={s.id}
+                  onClick={() => toggleBodyForEnclosure(s.id)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '3px 6px',
+                    fontSize: 11,
+                    cursor: 'pointer',
+                    background: isSelected ? '#1a2a4a' : 'transparent',
+                    color: isSelected ? '#4096ff' : '#889',
+                    borderBottom: '1px solid #1a1a30',
+                  }}
+                  onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = '#161630'; }}
+                  onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = 'transparent'; }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={() => {}}
+                    style={{ margin: 0, cursor: 'pointer' }}
+                  />
+                  <span>{s.name}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Center (read-only) */}
+        {boundingBox && (
+          <div style={{ color: '#889', fontSize: 11, marginBottom: 8 }}>
+            Center: ({boundingBox.cx.toFixed(2)}, {boundingBox.cy.toFixed(2)}, {boundingBox.cz.toFixed(2)})
+          </div>
+        )}
+
+        {/* Padding inputs */}
+        <div style={{ color: '#999', fontSize: 11, marginBottom: 4 }}>Padding:</div>
         <Form layout="vertical" size="small">
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2px 8px' }}>
-            <Form.Item label="+X" style={{ marginBottom: 2 }}>
-              <InputNumber
-                value={padXp}
-                min={0}
-                step={0.5}
-                onChange={(v) => setPadXp(v ?? 2)}
-                style={{ width: '100%' }}
-                size="small"
-              />
+            <Form.Item label="+X" style={labelStyle}>
+              <InputNumber value={padXp} min={0} step={0.5} onChange={(v) => setPadXp(v ?? 2)} style={inputStyle} size="small" />
             </Form.Item>
-            <Form.Item label="-X" style={{ marginBottom: 2 }}>
-              <InputNumber
-                value={padXn}
-                min={0}
-                step={0.5}
-                onChange={(v) => setPadXn(v ?? 1)}
-                style={{ width: '100%' }}
-                size="small"
-              />
+            <Form.Item label="-X" style={labelStyle}>
+              <InputNumber value={padXn} min={0} step={0.5} onChange={(v) => setPadXn(v ?? 1)} style={inputStyle} size="small" />
             </Form.Item>
-            <Form.Item label="+Y" style={{ marginBottom: 2 }}>
-              <InputNumber
-                value={padYp}
-                min={0}
-                step={0.5}
-                onChange={(v) => setPadYp(v ?? 1)}
-                style={{ width: '100%' }}
-                size="small"
-              />
+            <Form.Item label="+Y" style={labelStyle}>
+              <InputNumber value={padYp} min={0} step={0.5} onChange={(v) => setPadYp(v ?? 1)} style={inputStyle} size="small" />
             </Form.Item>
-            <Form.Item label="-Y" style={{ marginBottom: 2 }}>
-              <InputNumber
-                value={padYn}
-                min={0}
-                step={0.5}
-                onChange={(v) => setPadYn(v ?? 1)}
-                style={{ width: '100%' }}
-                size="small"
-              />
+            <Form.Item label="-Y" style={labelStyle}>
+              <InputNumber value={padYn} min={0} step={0.5} onChange={(v) => setPadYn(v ?? 1)} style={inputStyle} size="small" />
             </Form.Item>
-            <Form.Item label="+Z" style={{ marginBottom: 2 }}>
-              <InputNumber
-                value={padZp}
-                min={0}
-                step={0.5}
-                onChange={(v) => setPadZp(v ?? 1)}
-                style={{ width: '100%' }}
-                size="small"
-              />
+            <Form.Item label="+Z" style={labelStyle}>
+              <InputNumber value={padZp} min={0} step={0.5} onChange={(v) => setPadZp(v ?? 1)} style={inputStyle} size="small" />
             </Form.Item>
-            <Form.Item label="-Z" style={{ marginBottom: 2 }}>
-              <InputNumber
-                value={padZn}
-                min={0}
-                step={0.5}
-                onChange={(v) => setPadZn(v ?? 1)}
-                style={{ width: '100%' }}
-                size="small"
-              />
+            <Form.Item label="-Z" style={labelStyle}>
+              <InputNumber value={padZn} min={0} step={0.5} onChange={(v) => setPadZn(v ?? 1)} style={inputStyle} size="small" />
             </Form.Item>
           </div>
         </Form>
+
+        {/* Computed size */}
+        {enclosureDims && (
+          <div style={{ color: '#aab', fontSize: 11, marginTop: 2, marginBottom: 6, fontWeight: 500 }}>
+            Size: {enclosureDims.w.toFixed(1)} x {enclosureDims.h.toFixed(1)} x {enclosureDims.d.toFixed(1)} m
+          </div>
+        )}
+
+        {/* Create Enclosure button */}
         <Button
           type={enclosureCreated ? 'default' : 'primary'}
-          icon={<ExpandOutlined />}
+          icon={enclosureCreated ? <CheckCircleOutlined /> : <ExpandOutlined />}
           onClick={handleCreateEnclosure}
           block
           size="small"
           style={{ marginTop: 4 }}
+          disabled={selectedBodiesForEnclosure.length === 0}
         >
           {enclosureCreated ? 'Recreate Enclosure' : 'Create Enclosure'}
         </Button>
@@ -434,24 +297,47 @@ const CfdPrepPanel: React.FC = () => {
         )}
       </div>
 
-      {/* ====== Step 2: Volume Extract ====== */}
-      <StepHeader step={2} title="Volume Extract" done={fluidExtracted} current={cfdPrepStep === 1} />
+      {/* ====== Volume Extract Section ====== */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          fontWeight: 600,
+          fontSize: 13,
+          marginBottom: 8,
+          paddingBottom: 6,
+          borderBottom: '1px solid #303050',
+          color: enclosureCreated ? '#ccd' : '#556',
+        }}
+      >
+        <ExperimentOutlined style={{ color: enclosureCreated ? '#1677ff' : '#444' }} />
+        Volume Extract
+      </div>
+
       <div
         style={{
           background: '#111118',
           border: '1px solid #252530',
           borderRadius: 4,
-          padding: 8,
-          marginBottom: 12,
-          marginLeft: 10,
+          padding: 10,
+          marginBottom: 8,
           borderLeft: `2px solid ${fluidExtracted ? '#52c41a' : '#333'}`,
           opacity: enclosureCreated ? 1 : 0.5,
           pointerEvents: enclosureCreated ? 'auto' : 'none',
         }}
       >
+        <div style={{ color: '#889', fontSize: 11, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+          Enclosure: {enclosureCreated ? (
+            <span style={{ color: '#52c41a' }}><CheckCircleOutlined /> Created</span>
+          ) : (
+            <span style={{ color: '#ff4d4f' }}>Not created</span>
+          )}
+        </div>
+
         {bodyShapes.length > 0 && (
           <Form layout="vertical" size="small" style={{ marginBottom: 4 }}>
-            <Form.Item label="Select solid body:" style={{ marginBottom: 4 }}>
+            <Form.Item label="Solid body:" style={{ marginBottom: 4 }}>
               <Select
                 value={selectedBody}
                 onChange={(v) => setSelectedBody(v)}
@@ -463,6 +349,7 @@ const CfdPrepPanel: React.FC = () => {
             </Form.Item>
           </Form>
         )}
+
         <Button
           type={fluidExtracted ? 'default' : 'primary'}
           icon={<ExperimentOutlined />}
@@ -476,212 +363,6 @@ const CfdPrepPanel: React.FC = () => {
         {fluidExtracted && (
           <div style={{ color: '#52c41a', fontSize: 11, marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
             <CheckCircleOutlined /> Fluid volume extracted
-          </div>
-        )}
-      </div>
-
-      {/* ====== Step 3: Named Selections ====== */}
-      <StepHeader step={3} title="Named Selections" done={namedSelections.length > 0} current={cfdPrepStep === 2} />
-      <div
-        style={{
-          background: '#111118',
-          border: '1px solid #252530',
-          borderRadius: 4,
-          padding: 8,
-          marginBottom: 12,
-          marginLeft: 10,
-          borderLeft: `2px solid ${namedSelections.length > 0 ? '#52c41a' : '#333'}`,
-          opacity: enclosureCreated ? 1 : 0.5,
-          pointerEvents: enclosureCreated ? 'auto' : 'none',
-        }}
-      >
-        <div style={{ color: '#888', fontSize: 11, marginBottom: 6 }}>
-          Click face in 3D to name
-        </div>
-
-        {/* Existing named selections */}
-        {namedSelections.length > 0 && (
-          <div style={{ maxHeight: 160, overflow: 'auto', marginBottom: 8 }}>
-            {namedSelections.map((ns) => (
-              <div
-                key={ns.name}
-                onMouseEnter={() => setHoveredSelectionName(ns.name)}
-                onMouseLeave={() => setHoveredSelectionName(null)}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  padding: '3px 4px',
-                  borderBottom: '1px solid #1a1a1a',
-                  background: hoveredSelectionName === ns.name ? '#1a1a3e' : 'transparent',
-                  borderRadius: 2,
-                  cursor: 'pointer',
-                  transition: 'background 0.15s',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ color: ns.color, fontSize: 13 }}>
-                    {selectionTypeIcons[ns.type]}
-                  </span>
-                  <span style={{ color: '#ddd', fontSize: 11 }}>{ns.name}</span>
-                  <Tag
-                    style={{
-                      fontSize: 9,
-                      padding: '0 3px',
-                      lineHeight: '14px',
-                      margin: 0,
-                      border: `1px solid ${ns.color}44`,
-                      color: ns.color,
-                      background: 'transparent',
-                    }}
-                  >
-                    {ns.type}
-                  </Tag>
-                </div>
-                <Tooltip title="Remove">
-                  <Button
-                    type="text"
-                    size="small"
-                    icon={<DeleteOutlined />}
-                    style={{ fontSize: 10, color: '#666', width: 20, height: 20, padding: 0 }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeNamedSelection(ns.name);
-                    }}
-                  />
-                </Tooltip>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Summary */}
-        {namedSelections.length > 0 && (
-          <div style={{ color: '#888', fontSize: 10, marginBottom: 6 }}>
-            {namedSelections.length} selections ({wallCount} walls)
-          </div>
-        )}
-
-        {/* Auto-name button */}
-        <Button
-          icon={<BgColorsOutlined />}
-          onClick={handleAutoNameByNormal}
-          block
-          size="small"
-          style={{ marginBottom: 6 }}
-          disabled={!enclosureCreated}
-        >
-          Auto-Name by Normal
-        </Button>
-
-        {/* Add custom selection */}
-        <Divider style={{ margin: '6px 0' }} />
-        <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
-          <Input
-            value={newSelName}
-            onChange={(e) => setNewSelName(e.target.value)}
-            placeholder="Selection name"
-            size="small"
-            style={{ flex: 1 }}
-            onPressEnter={handleAddSelection}
-          />
-          <Select
-            value={newSelType}
-            onChange={(v) => setNewSelType(v)}
-            size="small"
-            style={{ width: 90 }}
-            options={[
-              { value: 'inlet', label: 'Inlet' },
-              { value: 'outlet', label: 'Outlet' },
-              { value: 'wall', label: 'Wall' },
-              { value: 'symmetry', label: 'Symmetry' },
-              { value: 'interface', label: 'Interface' },
-              { value: 'custom', label: 'Custom' },
-            ]}
-          />
-        </div>
-        <Button
-          icon={<PlusOutlined />}
-          onClick={handleAddSelection}
-          block
-          size="small"
-          disabled={!newSelName.trim()}
-        >
-          Add Named Selection
-        </Button>
-      </div>
-
-      {/* ====== Step 4: Share Topology ====== */}
-      <StepHeader step={4} title="Share Topology" done={topologyShared} current={cfdPrepStep === 3} />
-      <div
-        style={{
-          background: '#111118',
-          border: '1px solid #252530',
-          borderRadius: 4,
-          padding: 8,
-          marginBottom: 8,
-          marginLeft: 10,
-          borderLeft: `2px solid ${topologyShared ? '#52c41a' : '#333'}`,
-          opacity: enclosureCreated ? 1 : 0.5,
-          pointerEvents: enclosureCreated ? 'auto' : 'none',
-        }}
-      >
-        <div style={{ color: '#888', fontSize: 11, marginBottom: 6 }}>
-          Creates shared faces between bodies for conformal meshing.
-        </div>
-        <Button
-          icon={<BorderInnerOutlined />}
-          onClick={handleShareTopology}
-          block
-          size="small"
-          type={topologyShared ? 'default' : 'primary'}
-          disabled={!enclosureCreated}
-        >
-          {topologyShared ? 'Topology Shared' : 'Enable Share Topology'}
-        </Button>
-        {topologyShared && (
-          <div style={{ color: '#52c41a', fontSize: 11, marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
-            <CheckCircleOutlined /> Topology shared
-          </div>
-        )}
-      </div>
-
-      {/* ====== Step 5: Generate Mesh ====== */}
-      <StepHeader step={5} title="Generate Mesh" done={meshGenerated} current={cfdPrepStep === 4} />
-      <div
-        style={{
-          background: '#111118',
-          border: '1px solid #252530',
-          borderRadius: 4,
-          padding: 8,
-          marginBottom: 8,
-          marginLeft: 10,
-          borderLeft: `2px solid ${meshGenerated ? '#52c41a' : '#333'}`,
-          opacity: enclosureCreated ? 1 : 0.5,
-          pointerEvents: enclosureCreated ? 'auto' : 'none',
-        }}
-      >
-        <div style={{ color: '#888', fontSize: 11, marginBottom: 6 }}>
-          Generate mesh within the enclosure domain and switch to Mesh tab.
-        </div>
-        <Button
-          type={meshGenerated ? 'default' : 'primary'}
-          icon={meshGenerating ? <LoadingOutlined /> : <BuildOutlined />}
-          onClick={handleGenerateMesh}
-          block
-          size="small"
-          disabled={!enclosureCreated || meshGenerating}
-          loading={meshGenerating}
-        >
-          {meshGenerating
-            ? 'Generating...'
-            : meshGenerated
-            ? 'Regenerate Mesh'
-            : 'Generate Mesh'}
-        </Button>
-        {meshGenerated && (
-          <div style={{ color: '#52c41a', fontSize: 11, marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
-            <CheckCircleOutlined /> Mesh generated
           </div>
         )}
       </div>

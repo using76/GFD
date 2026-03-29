@@ -380,6 +380,27 @@ interface AppState {
   prepareSubTab: 'defeaturing' | 'cfdprep';
   setPrepareSubTab: (tab: 'defeaturing' | 'cfdprep') => void;
 
+  // Prepare sub-panel (which panel to show in left panel)
+  prepareSubPanel: 'enclosure' | 'named_selection' | 'defeaturing' | null;
+  setPrepareSubPanel: (panel: 'enclosure' | 'named_selection' | 'defeaturing' | null) => void;
+
+  // Enclosure preview (live wireframe before creation)
+  enclosurePreview: {
+    center: [number, number, number];
+    padXp: number;
+    padXn: number;
+    padYp: number;
+    padYn: number;
+    padZp: number;
+    padZn: number;
+  } | null;
+  setEnclosurePreview: (preview: AppState['enclosurePreview']) => void;
+
+  // Selected bodies for enclosure
+  selectedBodiesForEnclosure: string[];
+  setSelectedBodiesForEnclosure: (ids: string[]) => void;
+  toggleBodyForEnclosure: (id: string) => void;
+
   // Exploded view
   exploded: boolean;
   setExploded: (v: boolean) => void;
@@ -1050,6 +1071,25 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Prepare sub-tab
   prepareSubTab: 'defeaturing',
   setPrepareSubTab: (tab) => set({ prepareSubTab: tab }),
+
+  // Prepare sub-panel
+  prepareSubPanel: null,
+  setPrepareSubPanel: (panel) => set({ prepareSubPanel: panel }),
+
+  // Enclosure preview
+  enclosurePreview: null,
+  setEnclosurePreview: (preview) => set({ enclosurePreview: preview }),
+
+  // Selected bodies for enclosure
+  selectedBodiesForEnclosure: [],
+  setSelectedBodiesForEnclosure: (ids) => set({ selectedBodiesForEnclosure: ids }),
+  toggleBodyForEnclosure: (id) => set((s) => {
+    const idx = s.selectedBodiesForEnclosure.indexOf(id);
+    if (idx >= 0) {
+      return { selectedBodiesForEnclosure: s.selectedBodiesForEnclosure.filter((x) => x !== id) };
+    }
+    return { selectedBodiesForEnclosure: [...s.selectedBodiesForEnclosure, id] };
+  }),
 
   // Exploded view
   exploded: false,
