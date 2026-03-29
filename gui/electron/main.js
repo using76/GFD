@@ -17,8 +17,24 @@ function createWindow() {
     title: 'GFD - Generalized Fluid Dynamics',
   });
 
-  // In development, load from Vite dev server; in production, load built files
+  // Open DevTools in development
   const isDev = process.argv.includes('--dev') || !app.isPackaged;
+  if (isDev) {
+    mainWindow.webContents.openDevTools({ mode: 'bottom' });
+  }
+
+  // Prevent crash from unhandled renderer errors
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    console.error('[Electron] Renderer crashed:', details.reason);
+    mainWindow.reload();
+  });
+
+  mainWindow.webContents.on('crashed', () => {
+    console.error('[Electron] WebContents crashed, reloading...');
+    mainWindow.reload();
+  });
+
+  // In development, load from Vite dev server; in production, load built files
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173').catch(() => {
       // Fallback to built files if dev server is not running
