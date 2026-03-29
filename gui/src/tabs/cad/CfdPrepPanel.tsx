@@ -143,16 +143,55 @@ const CfdPrepPanel: React.FC = () => {
     message.success(`Enclosure created: ${w.toFixed(2)} x ${h.toFixed(2)} x ${d.toFixed(2)} m`);
   }, [boundingBox, selectedBodiesForEnclosure, padXp, padXn, padYp, padYn, padZp, padZn, addShape, setEnclosureCreated, setEnclosurePreview, cfdPrepStep, setCfdPrepStep]);
 
-  // Extract Fluid Volume
+  // Extract Fluid Volume: hide solid, mark enclosure as fluid domain
   const handleExtractFluid = useCallback(() => {
     if (!enclosureCreated) {
       message.warning('Create an enclosure first.');
       return;
     }
+    if (!selectedBody) {
+      message.warning('Select a solid body to subtract from enclosure.');
+      return;
+    }
+
+    const state = useAppStore.getState();
+    const solidShape = state.shapes.find((s) => s.id === selectedBody);
+    const enclosureShape = state.shapes.find((s) => s.kind === 'enclosure' || s.isEnclosure);
+
+    if (!solidShape || !enclosureShape) {
+      message.error('Could not find solid or enclosure shape.');
+      return;
+    }
+
+    // Store the solid's info in the enclosure for rendering the "hole"
+    state.updateShape(enclosureShape.id, {
+      dimensions: {
+        ...enclosureShape.dimensions,
+        // Store subtracted solid info for 3D rendering
+        subtractedSolidId: solidShape.id,
+        subtractedSolidKind: solidShape.kind,
+        subtractedSolidPos: solidShape.position,
+        subtractedSolidDims: solidShape.dimensions,
+      },
+    });
+
+    // Hide the original solid (it's now "inside" the fluid domain)
+    state.removeShape(selectedBody);
+
     setFluidExtracted(true);
     if (cfdPrepStep < 2) setCfdPrepStep(2);
-    message.success('Fluid volume extracted (boolean subtract solid from enclosure)');
-  }, [enclosureCreated, setFluidExtracted, cfdPrepStep, setCfdPrepStep]);
+
+    // Add console log
+    const lines = state.consoleLines || [];
+    state.setConsoleLines([
+      ...lines,
+      `[CFD Prep] Extracted fluid volume: Enclosure minus "${solidShape.name}"`,
+      `[CFD Prep] Solid body "${solidShape.name}" removed from scene (subtracted)`,
+      `[CFD Prep] Fluid domain is now the enclosure with internal cutout`,
+    ]);
+
+    message.success(`Fluid volume extracted: Enclosure - "${solidShape.name}"`);
+  }, [enclosureCreated, selectedBody, setFluidExtracted, cfdPrepStep, setCfdPrepStep]);
 
   const inputStyle = { width: '100%' };
   const labelStyle: React.CSSProperties = { marginBottom: 2 };

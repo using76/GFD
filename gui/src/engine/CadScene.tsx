@@ -742,6 +742,34 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
           <meshBasicMaterial color="#52c41a" wireframe transparent opacity={0.3} />
         </mesh>
       )}
+      {/* Show cutout hole where solid was subtracted (Volume Extract result) */}
+      {isEnclosure && shape.dimensions.subtractedSolidId && (
+        <mesh
+          position={shape.dimensions.subtractedSolidPos as [number, number, number] || [0, 0, 0]}
+        >
+          {shape.dimensions.subtractedSolidKind === 'sphere' ? (
+            <sphereGeometry args={[(shape.dimensions.subtractedSolidDims as any)?.radius || 0.5, 32, 32]} />
+          ) : shape.dimensions.subtractedSolidKind === 'cylinder' ? (
+            <cylinderGeometry args={[
+              (shape.dimensions.subtractedSolidDims as any)?.radius || 0.3,
+              (shape.dimensions.subtractedSolidDims as any)?.radius || 0.3,
+              (shape.dimensions.subtractedSolidDims as any)?.height || 1, 32
+            ]} />
+          ) : (
+            <boxGeometry args={[
+              (shape.dimensions.subtractedSolidDims as any)?.width || 1,
+              (shape.dimensions.subtractedSolidDims as any)?.height || 1,
+              (shape.dimensions.subtractedSolidDims as any)?.depth || 1
+            ]} />
+          )}
+          <meshStandardMaterial
+            color="#1a1a2e"
+            transparent
+            opacity={0.6}
+            side={THREE.BackSide}
+          />
+        </mesh>
+      )}
       {/* Shell: render inner hollow surface */}
       {isShell && !isEnclosure && !isBooleanTool && (
         <ShellInner shape={shape} position={pos} rotation={rotation} />
