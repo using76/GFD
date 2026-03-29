@@ -743,8 +743,8 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
           <meshBasicMaterial color="#52c41a" wireframe transparent opacity={0.3} />
         </mesh>
       )}
-      {/* Show cutout hole where solid was subtracted (Volume Extract result) */}
-      {isEnclosure && shape.dimensions.subtractedSolidId && (() => {
+      {/* Cutout is now rendered by ExtractedCutout component independently */}
+      {false && isEnclosure && shape.dimensions.subtractedSolidId && (() => {
         const solidKind = shape.dimensions.subtractedSolidKind as string;
         const solidPos = (shape.dimensions.subtractedSolidPos as [number, number, number]) || [0, 0, 0];
         const solidDims = (shape.dimensions.subtractedSolidDims as Record<string, number>) || {};
@@ -1018,6 +1018,60 @@ const EnclosurePreview: React.FC = () => {
   );
 };
 
+/** Renders the extracted solid cutout independently — always visible inside enclosure */
+const ExtractedCutout: React.FC = () => {
+  const shapes = useAppStore((s) => s.shapes);
+  const enclosure = shapes.find((s) => (s.kind === 'enclosure' || s.isEnclosure) && s.dimensions.subtractedSolidId);
+  if (!enclosure) return null;
+
+  const solidKind = enclosure.dimensions.subtractedSolidKind as string;
+  const solidPos = (enclosure.dimensions.subtractedSolidPos as [number, number, number]) || [0, 0, 0];
+  const solidDims = (enclosure.dimensions.subtractedSolidDims as Record<string, number>) || {};
+  const solidRot = (enclosure.dimensions.subtractedSolidRotation as [number, number, number]) || [0, 0, 0];
+  const rotRad: [number, number, number] = [degToRad(solidRot[0]), degToRad(solidRot[1]), degToRad(solidRot[2])];
+
+  const makeGeo = () => {
+    if (solidKind === 'stl' && enclosure.stlData?.vertices) {
+      const verts = enclosure.stlData.vertices;
+      return (
+        <bufferGeometry>
+          <bufferAttribute
+            attach="attributes-position"
+            args={[verts instanceof Float32Array ? verts : new Float32Array(verts as any), 3]}
+          />
+        </bufferGeometry>
+      );
+    }
+    if (solidKind === 'sphere') return <sphereGeometry args={[solidDims.radius || 0.5, 32, 32]} />;
+    if (solidKind === 'cylinder') return <cylinderGeometry args={[solidDims.radius || 0.3, solidDims.radius || 0.3, solidDims.height || 1, 32]} />;
+    if (solidKind === 'cone') return <coneGeometry args={[solidDims.radius || 0.3, solidDims.height || 1, 32]} />;
+    if (solidKind === 'torus') return <torusGeometry args={[solidDims.majorRadius || 0.5, solidDims.minorRadius || 0.2, 16, 32]} />;
+    return <boxGeometry args={[solidDims.width || 1, solidDims.height || 1, solidDims.depth || 1]} />;
+  };
+
+  return (
+    <group>
+      {/* Solid orange surface (BackSide = visible from outside looking into the cavity) */}
+      <mesh position={solidPos} rotation={rotRad}>
+        {makeGeo()}
+        <meshStandardMaterial
+          color="#ff6633"
+          emissive="#ff4400"
+          emissiveIntensity={0.4}
+          transparent
+          opacity={0.6}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+      {/* Wireframe outline */}
+      <mesh position={solidPos} rotation={rotRad}>
+        {makeGeo()}
+        <meshBasicMaterial color="#ffaa44" wireframe transparent opacity={0.9} />
+      </mesh>
+    </group>
+  );
+};
+
 const CadScene: React.FC = () => {
   const shapes = useAppStore((s) => s.shapes);
   const selectedShapeId = useAppStore((s) => s.selectedShapeId);
@@ -1073,6 +1127,9 @@ const CadScene: React.FC = () => {
           }
         />
       )}
+
+      {/* Volume Extract cutout — rendered independently so it's always visible */}
+      <ExtractedCutout />
 
       {/* Defeaturing issue markers in 3D */}
       <DefeatureMarkers />
