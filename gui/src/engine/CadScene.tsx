@@ -1030,14 +1030,24 @@ const ExtractedCutout: React.FC = () => {
   const eh = (enclosure?.dimensions?.height as number) || 4;
   const ed = (enclosure?.dimensions?.depth as number) || 4;
 
+  // Enclosure bounds: min and max corners
+  const xMin = ec[0] - ew / 2;
+  const xMax = ec[0] + ew / 2;
+  const yMin = ec[1] - eh / 2;
+  const yMax = ec[1] + eh / 2;
+  const zMin = ec[2] - ed / 2;
+  const zMax = ec[2] + ed / 2;
+
+  // 6 clipping planes — keep only geometry INSIDE the enclosure box
+  // THREE.Plane convention: normal · point + constant >= 0 is kept
   const clipPlanes = useMemo(() => [
-    new THREE.Plane(new THREE.Vector3( 1, 0, 0), -(ec[0] - ew / 2)), // xmin
-    new THREE.Plane(new THREE.Vector3(-1, 0, 0),  (ec[0] + ew / 2)), // xmax
-    new THREE.Plane(new THREE.Vector3( 0, 1, 0), -(ec[1] - eh / 2)), // ymin
-    new THREE.Plane(new THREE.Vector3( 0,-1, 0),  (ec[1] + eh / 2)), // ymax
-    new THREE.Plane(new THREE.Vector3( 0, 0, 1), -(ec[2] - ed / 2)), // zmin
-    new THREE.Plane(new THREE.Vector3( 0, 0,-1),  (ec[2] + ed / 2)), // zmax
-  ], [ec, ew, eh, ed]);
+    new THREE.Plane(new THREE.Vector3( 1, 0, 0),  -xMin), // x >= xMin
+    new THREE.Plane(new THREE.Vector3(-1, 0, 0),   xMax), // x <= xMax
+    new THREE.Plane(new THREE.Vector3( 0, 1, 0),  -yMin), // y >= yMin
+    new THREE.Plane(new THREE.Vector3( 0,-1, 0),   yMax), // y <= yMax
+    new THREE.Plane(new THREE.Vector3( 0, 0, 1),  -zMin), // z >= zMin
+    new THREE.Plane(new THREE.Vector3( 0, 0,-1),   zMax), // z <= zMax
+  ], [xMin, xMax, yMin, yMax, zMin, zMax]);
 
   // Early return AFTER all hooks
   if (!enclosure) return null;
