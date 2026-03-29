@@ -1108,6 +1108,219 @@ const ExtractedCutout: React.FC = () => {
   );
 };
 
+// ============================================================
+// Mesh Zone Overlays (Fluent-style volume & boundary faces)
+// ============================================================
+
+const MESH_BOUNDARY_COLORS: Record<string, string> = {
+  inlet: '#4488ff',
+  outlet: '#ff4444',
+  wall: '#44cc44',
+  symmetry: '#ffcc00',
+  periodic: '#aa44ff',
+  open: '#44ffff',
+  none: '#444444',
+};
+
+/** Renders a semi-transparent volume box for fluid or solid zone */
+const MeshVolumeOverlay: React.FC<{ volumeId: string }> = ({ volumeId }) => {
+  const meshVolumes = useAppStore((s) => s.meshVolumes);
+  const selectedMeshVolumeId = useAppStore((s) => s.selectedMeshVolumeId);
+  const shapes = useAppStore((s) => s.shapes);
+
+  const volume = meshVolumes.find((v) => v.id === volumeId);
+  if (!volume || !volume.visible) return null;
+
+  const isSelected = selectedMeshVolumeId === volumeId;
+  const enclosure = shapes.find((s) => s.kind === 'enclosure' || s.isEnclosure);
+
+  if (volume.type === 'fluid' && enclosure) {
+    const w = enclosure.dimensions.width || 4;
+    const h = enclosure.dimensions.height || 4;
+    const d = enclosure.dimensions.depth || 4;
+    return (
+      <mesh position={enclosure.position}>
+        <boxGeometry args={[w, h, d]} />
+        <meshStandardMaterial
+          color={volume.color}
+          transparent
+          opacity={isSelected ? 0.15 : 0.08}
+          side={THREE.DoubleSide}
+          depthWrite={false}
+        />
+      </mesh>
+    );
+  }
+
+  if (volume.type === 'solid') {
+    // Find the extracted solid shape
+    const solidShape = shapes.find((s) => s.group === 'extracted_solid');
+    if (!solidShape) return null;
+    const rotation: [number, number, number] = [
+      degToRad(solidShape.rotation[0]),
+      degToRad(solidShape.rotation[1]),
+      degToRad(solidShape.rotation[2]),
+    ];
+    return (
+      <mesh position={solidShape.position} rotation={rotation}>
+        {makeGeometry(solidShape)}
+        <meshStandardMaterial
+          color={volume.color}
+          transparent
+          opacity={isSelected ? 0.25 : 0.15}
+          side={THREE.DoubleSide}
+          depthWrite={false}
+        />
+      </mesh>
+    );
+  }
+
+  return null;
+};
+
+/** Renders a single boundary face as a colored semi-transparent plane */
+const MeshSurfaceOverlay: React.FC<{ surfaceId: string }> = ({ surfaceId }) => {
+  const meshSurfaces = useAppStore((s) => s.meshSurfaces);
+  const selectedMeshSurfaceId = useAppStore((s) => s.selectedMeshSurfaceId);
+  const editingSurfaceId = useAppStore((s) => s.editingSurfaceId);
+  const meshRef = useRef<THREE.Mesh>(null);
+
+  const surface = meshSurfaces.find((s) => s.id === surfaceId);
+  if (!surface) return null;
+  // Skip unassigned faces unless they are being edited
+  if (surface.boundaryType === 'none' && editingSurfaceId !== surfaceId) return null;
+  // Skip interface face with no dimensions
+  if (surface.faceDirection === 'interface' && surface.width === 0 && surface.height === 0) return null;
+  // Skip custom faces with no position
+  if (surface.width === 0 && surface.height === 0) return null;
+
+  const isSelected = selectedMeshSurfaceId === surfaceId;
+  const isEditing = editingSurfaceId === surfaceId;
+  const color = surface.boundaryType !== 'none'
+    ? MESH_BOUNDARY_COLORS[surface.boundaryType] || surface.color
+    : '#444444';
+
+  // Compute rotation from normal
+  const rotation = (() => {
+    const up = new THREE.Vector3(0, 0, 1);
+    const normal = new THREE.Vector3(...surface.normal);
+    if (normal.length() < 0.001) return [0, 0, 0] as [number, number, number];
+    const quaternion = new THREE.Quaternion().setFromUnitVectors(up, normal.normalize());
+    const euler = new THREE.Euler().setFromQuaternion(quaternion);
+    return [euler.x, euler.y, euler.z] as [number, number, number];
+  })();
+
+  // Pulse animation for editing surfaces
+  useFrame(({ clock }) => {
+    if (meshRef.current && isEditing) {
+      const opacity = 0.25 + Math.sin(clock.getElapsedTime() * 3) * 0.15;
+      const mat = meshRef.current.material as THREE.MeshBasicMaterial;
+      if (mat) mat.opacity = opacity;
+    }
+  });
+
+  return (
+    <mesh
+      ref={meshRef}
+      position={surface.center}
+      rotation={rotation}
+    >
+      <planeGeometry args={[surface.width, surface.height]} />
+      <meshBasicMaterial
+        color={color}
+        transparent
+        opacity={isSelected || isEditing ? 0.35 : 0.18}
+        side={THREE.DoubleSide}
+        depthWrite={false}
+      />
+    </mesh>
+  );
+};
+
+/** Renders all unassigned face outlines when editing (pulsing to show they are selectable) */
+const UnassignedFaceGlow: React.FC = () => {
+  const meshSurfaces = useAppStore((s) => s.meshSurfaces);
+  const editingSurfaceId = useAppStore((s) => s.editingSurfaceId);
+  const meshRef = useRef<THREE.Group>(null);
+
+  useFrame(({ clock }) => {
+    if (meshRef.current) {
+      const opacity = 0.1 + Math.sin(clock.getElapsedTime() * 2) * 0.08;
+      meshRef.current.children.forEach((child) => {
+        const mesh = child as THREE.Mesh;
+        if (mesh.material) {
+          (mesh.material as THREE.MeshBasicMaterial).opacity = opacity;
+        }
+      });
+    }
+  });
+
+  if (!editingSurfaceId) return null;
+
+  const unassigned = meshSurfaces.filter(
+    (s) => s.boundaryType === 'none' && s.width > 0 && s.height > 0
+  );
+  if (unassigned.length === 0) return null;
+
+  return (
+    <group ref={meshRef}>
+      {unassigned.map((surface) => {
+        const up = new THREE.Vector3(0, 0, 1);
+        const normal = new THREE.Vector3(...surface.normal);
+        if (normal.length() < 0.001) return null;
+        const quaternion = new THREE.Quaternion().setFromUnitVectors(up, normal.normalize());
+        const euler = new THREE.Euler().setFromQuaternion(quaternion);
+        const rotation: [number, number, number] = [euler.x, euler.y, euler.z];
+
+        return (
+          <mesh
+            key={surface.id}
+            position={surface.center}
+            rotation={rotation}
+          >
+            <planeGeometry args={[surface.width, surface.height]} />
+            <meshBasicMaterial
+              color="#ffffff"
+              transparent
+              opacity={0.1}
+              side={THREE.DoubleSide}
+              depthWrite={false}
+            />
+          </mesh>
+        );
+      })}
+    </group>
+  );
+};
+
+/** Container for all mesh zone overlays */
+const MeshZoneOverlays: React.FC = () => {
+  const meshVolumes = useAppStore((s) => s.meshVolumes);
+  const meshSurfaces = useAppStore((s) => s.meshSurfaces);
+  const activeTab = useAppStore((s) => s.activeTab);
+
+  // Only show on mesh tab
+  if (activeTab !== 'mesh') return null;
+  if (meshVolumes.length === 0 && meshSurfaces.length === 0) return null;
+
+  return (
+    <group>
+      {/* Volume overlays */}
+      {meshVolumes.map((vol) => (
+        <MeshVolumeOverlay key={vol.id} volumeId={vol.id} />
+      ))}
+
+      {/* Surface/boundary overlays */}
+      {meshSurfaces.map((surf) => (
+        <MeshSurfaceOverlay key={surf.id} surfaceId={surf.id} />
+      ))}
+
+      {/* Pulsing glow for unassigned faces while editing */}
+      <UnassignedFaceGlow />
+    </group>
+  );
+};
+
 const CadScene: React.FC = () => {
   const shapes = useAppStore((s) => s.shapes);
   const selectedShapeId = useAppStore((s) => s.selectedShapeId);
@@ -1181,6 +1394,9 @@ const CadScene: React.FC = () => {
 
       {/* Enclosure preview (live wireframe before creation) */}
       <EnclosurePreview />
+
+      {/* Mesh zone overlays (Fluent-style volumes & boundary faces) */}
+      <MeshZoneOverlays />
     </group>
   );
 };

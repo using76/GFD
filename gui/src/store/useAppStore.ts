@@ -67,6 +67,40 @@ export interface MeshZone {
   kind: 'volume' | 'surface';
 }
 
+// ---- Mesh zone / boundary management (Fluent-style) ----
+export type MeshSurfaceBoundaryType = 'none' | 'inlet' | 'outlet' | 'wall' | 'symmetry' | 'periodic' | 'open';
+export type MeshSurfaceFaceDirection = 'xmin' | 'xmax' | 'ymin' | 'ymax' | 'zmin' | 'zmax' | 'interface' | 'custom';
+
+export interface MeshVolume {
+  id: string;
+  name: string;
+  type: 'fluid' | 'solid';
+  visible: boolean;
+  color: string;
+}
+
+export interface MeshSurface {
+  id: string;
+  name: string;
+  faceDirection: MeshSurfaceFaceDirection;
+  boundaryType: MeshSurfaceBoundaryType;
+  color: string;
+  center: [number, number, number];
+  normal: [number, number, number];
+  width: number;
+  height: number;
+}
+
+export const BOUNDARY_COLORS: Record<MeshSurfaceBoundaryType, string> = {
+  inlet: '#4488ff',
+  outlet: '#ff4444',
+  wall: '#44cc44',
+  symmetry: '#ffcc00',
+  periodic: '#aa44ff',
+  open: '#44ffff',
+  none: '#555555',
+};
+
 export interface MeshConfig {
   type: MeshType;
   globalSize: number;
@@ -290,6 +324,21 @@ interface AppState {
   updateMeshConfig: (patch: Partial<MeshConfig>) => void;
   generateMesh: () => void;
   setMeshDisplayData: (data: MeshDisplayData | null) => void;
+
+  // Mesh zone / boundary management (Fluent-style)
+  meshVolumes: MeshVolume[];
+  meshSurfaces: MeshSurface[];
+  selectedMeshVolumeId: string | null;
+  selectedMeshSurfaceId: string | null;
+  editingSurfaceId: string | null;
+  setMeshVolumes: (volumes: MeshVolume[]) => void;
+  setMeshSurfaces: (surfaces: MeshSurface[]) => void;
+  selectMeshVolume: (id: string | null) => void;
+  selectMeshSurface: (id: string | null) => void;
+  setEditingSurface: (id: string | null) => void;
+  updateMeshSurface: (id: string, changes: Partial<MeshSurface>) => void;
+  addBoundarySurface: (type: MeshSurfaceBoundaryType) => void;
+  removeBoundarySurface: (id: string) => void;
 
   // Setup
   physicsModels: PhysicsModels;
@@ -769,6 +818,58 @@ export const useAppStore = create<AppState>((set, get) => ({
     }, 800);
   },
   setMeshDisplayData: (data) => set({ meshDisplayData: data }),
+
+  // Mesh zone / boundary management (Fluent-style)
+  meshVolumes: [],
+  meshSurfaces: [],
+  selectedMeshVolumeId: null,
+  selectedMeshSurfaceId: null,
+  editingSurfaceId: null,
+  setMeshVolumes: (volumes) => set({ meshVolumes: volumes }),
+  setMeshSurfaces: (surfaces) => set({ meshSurfaces: surfaces }),
+  selectMeshVolume: (id) => set({ selectedMeshVolumeId: id, selectedMeshSurfaceId: null }),
+  selectMeshSurface: (id) => set({ selectedMeshSurfaceId: id, selectedMeshVolumeId: null }),
+  setEditingSurface: (id) => set({ editingSurfaceId: id }),
+  updateMeshSurface: (id, changes) =>
+    set((s) => ({
+      meshSurfaces: s.meshSurfaces.map((surf) =>
+        surf.id === id ? { ...surf, ...changes } : surf
+      ),
+    })),
+  addBoundarySurface: (type) => {
+    const state = get();
+    const existingOfType = state.meshSurfaces.filter(
+      (s) => s.boundaryType === type
+    );
+    const idx = existingOfType.length + 1;
+    const newSurface: MeshSurface = {
+      id: `boundary-${type}-${Date.now()}`,
+      name: `${type}-${idx}`,
+      faceDirection: 'custom',
+      boundaryType: type,
+      color: BOUNDARY_COLORS[type],
+      center: [0, 0, 0],
+      normal: [0, 0, 0],
+      width: 0,
+      height: 0,
+    };
+    set({
+      meshSurfaces: [...state.meshSurfaces, newSurface],
+      selectedMeshSurfaceId: newSurface.id,
+      editingSurfaceId: newSurface.id,
+    });
+  },
+  removeBoundarySurface: (id) =>
+    set((s) => {
+      // When removing a boundary, reset any faces that were assigned to it back to "none"
+      const removed = s.meshSurfaces.find((surf) => surf.id === id);
+      if (!removed) return s;
+      return {
+        meshSurfaces: s.meshSurfaces.filter((surf) => surf.id !== id),
+        selectedMeshSurfaceId: s.selectedMeshSurfaceId === id ? null : s.selectedMeshSurfaceId,
+        editingSurfaceId: s.editingSurfaceId === id ? null : s.editingSurfaceId,
+      };
+    }),
 
   // Setup
   physicsModels: {

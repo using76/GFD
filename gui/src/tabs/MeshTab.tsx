@@ -1,13 +1,9 @@
-import React from 'react';
-import {
-  AppstoreOutlined,
-  BorderInnerOutlined,
-} from '@ant-design/icons';
+import React, { useMemo } from 'react';
 import SplitLayout from '../components/SplitLayout';
-import OutlineTree from '../components/OutlineTree';
-import type { TreeItem } from '../components/OutlineTree';
+import MeshZoneTree from './mesh/MeshZoneTree';
 import MeshSettings from './mesh/MeshSettings';
 import QualityPanel from './mesh/QualityPanel';
+import BoundaryEditor from './mesh/BoundaryEditor';
 import { useAppStore } from '../store/useAppStore';
 
 interface MeshTabProps {
@@ -15,71 +11,40 @@ interface MeshTabProps {
 }
 
 const MeshTab: React.FC<MeshTabProps> = ({ viewport }) => {
-  const meshZones = useAppStore((s) => s.meshZones);
   const meshGenerated = useAppStore((s) => s.meshGenerated);
+  const editingSurfaceId = useAppStore((s) => s.editingSurfaceId);
+  const selectedMeshSurfaceId = useAppStore((s) => s.selectedMeshSurfaceId);
 
-  const treeItems: TreeItem[] = meshGenerated
-    ? [
-        {
-          key: 'volumes',
-          title: 'Volumes',
-          icon: <AppstoreOutlined />,
-          children: meshZones
-            .filter((z) => z.kind === 'volume')
-            .map((z) => ({
-              key: z.id,
-              title: z.name,
-              isLeaf: true,
-            })),
-        },
-        {
-          key: 'surfaces',
-          title: 'Surfaces',
-          icon: <BorderInnerOutlined />,
-          children: meshZones
-            .filter((z) => z.kind === 'surface')
-            .map((z) => ({
-              key: z.id,
-              title: z.name,
-              isLeaf: true,
-            })),
-        },
-      ]
-    : [
-        {
-          key: 'no-mesh',
-          title: 'No mesh generated',
-          isLeaf: true,
-        },
-      ];
+  // Show BoundaryEditor when a surface is selected for editing;
+  // otherwise show MeshSettings + QualityPanel.
+  const showBoundaryEditor = !!(editingSurfaceId || selectedMeshSurfaceId);
 
-  const leftPanel = (
-    <div>
-      <div
-        style={{
-          padding: '8px 12px',
-          fontWeight: 600,
-          borderBottom: '1px solid #303030',
-        }}
-      >
-        Mesh Zones
-      </div>
-      <OutlineTree items={treeItems} />
+  const leftPanel = useMemo(() => (
+    <div style={{ height: '100%', overflow: 'auto' }}>
+      <MeshZoneTree />
     </div>
-  );
+  ), []);
 
-  const rightPanel = (
+  const rightPanel = useMemo(() => (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <div style={{ flex: 1, overflow: 'auto' }}>
-        <MeshSettings />
-      </div>
-      {meshGenerated && (
-        <div style={{ borderTop: '1px solid #303030', overflow: 'auto', maxHeight: '50%' }}>
-          <QualityPanel />
+      {showBoundaryEditor ? (
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          <BoundaryEditor />
         </div>
+      ) : (
+        <>
+          <div style={{ flex: 1, overflow: 'auto' }}>
+            <MeshSettings />
+          </div>
+          {meshGenerated && (
+            <div style={{ borderTop: '1px solid #303030', overflow: 'auto', maxHeight: '50%' }}>
+              <QualityPanel />
+            </div>
+          )}
+        </>
       )}
     </div>
-  );
+  ), [showBoundaryEditor, meshGenerated]);
 
   return (
     <SplitLayout left={leftPanel} center={viewport} right={rightPanel} />

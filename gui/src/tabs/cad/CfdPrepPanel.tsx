@@ -8,7 +8,8 @@ import {
   ClearOutlined,
   SelectOutlined,
 } from '@ant-design/icons';
-import { useAppStore } from '../../store/useAppStore';
+import { useAppStore, BOUNDARY_COLORS } from '../../store/useAppStore';
+import type { MeshVolume, MeshSurface } from '../../store/useAppStore';
 
 let nextEnclosureId = 100;
 
@@ -185,7 +186,65 @@ const CfdPrepPanel: React.FC = () => {
     setFluidExtracted(true);
     if (cfdPrepStep < 2) setCfdPrepStep(2);
 
-    // Console feedback via message (consoleLines updated by solver)
+    // Auto-generate mesh volumes and surfaces for Fluent-style zone management
+    const encDims = enclosureShape.dimensions;
+    const encPos = enclosureShape.position;
+    const hw = (encDims.width || 4) / 2;
+    const hh = (encDims.height || 4) / 2;
+    const hd = (encDims.depth || 4) / 2;
+
+    const volumes: MeshVolume[] = [
+      { id: 'vol-fluid', name: 'Fluid', type: 'fluid', visible: true, color: '#4488ff' },
+      { id: 'vol-solid', name: solidShape.name || 'Solid', type: 'solid', visible: false, color: '#888888' },
+    ];
+    state.setMeshVolumes(volumes);
+
+    const solidPos = solidShape.position;
+    const surfaces: MeshSurface[] = [
+      {
+        id: 'surf-xmin', name: 'xmin', faceDirection: 'xmin', boundaryType: 'none',
+        color: BOUNDARY_COLORS.none,
+        center: [encPos[0] - hw, encPos[1], encPos[2]], normal: [-1, 0, 0],
+        width: encDims.depth || 4, height: encDims.height || 4,
+      },
+      {
+        id: 'surf-xmax', name: 'xmax', faceDirection: 'xmax', boundaryType: 'none',
+        color: BOUNDARY_COLORS.none,
+        center: [encPos[0] + hw, encPos[1], encPos[2]], normal: [1, 0, 0],
+        width: encDims.depth || 4, height: encDims.height || 4,
+      },
+      {
+        id: 'surf-ymin', name: 'ymin', faceDirection: 'ymin', boundaryType: 'none',
+        color: BOUNDARY_COLORS.none,
+        center: [encPos[0], encPos[1] - hh, encPos[2]], normal: [0, -1, 0],
+        width: encDims.width || 4, height: encDims.depth || 4,
+      },
+      {
+        id: 'surf-ymax', name: 'ymax', faceDirection: 'ymax', boundaryType: 'none',
+        color: BOUNDARY_COLORS.none,
+        center: [encPos[0], encPos[1] + hh, encPos[2]], normal: [0, 1, 0],
+        width: encDims.width || 4, height: encDims.depth || 4,
+      },
+      {
+        id: 'surf-zmin', name: 'zmin', faceDirection: 'zmin', boundaryType: 'none',
+        color: BOUNDARY_COLORS.none,
+        center: [encPos[0], encPos[1], encPos[2] - hd], normal: [0, 0, -1],
+        width: encDims.width || 4, height: encDims.height || 4,
+      },
+      {
+        id: 'surf-zmax', name: 'zmax', faceDirection: 'zmax', boundaryType: 'none',
+        color: BOUNDARY_COLORS.none,
+        center: [encPos[0], encPos[1], encPos[2] + hd], normal: [0, 0, 1],
+        width: encDims.width || 4, height: encDims.height || 4,
+      },
+      {
+        id: 'surf-interface', name: 'solid-wall', faceDirection: 'interface', boundaryType: 'wall',
+        color: BOUNDARY_COLORS.wall,
+        center: solidPos, normal: [0, 0, 0],
+        width: 0, height: 0,
+      },
+    ];
+    state.setMeshSurfaces(surfaces);
 
     message.success(`Fluid volume extracted: Enclosure - "${solidShape.name}"`);
   }, [enclosureCreated, selectedBody, setFluidExtracted, cfdPrepStep, setCfdPrepStep]);
