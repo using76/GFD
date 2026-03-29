@@ -164,15 +164,19 @@ const CfdPrepPanel: React.FC = () => {
     }
 
     // Store the solid's info in the enclosure for rendering the "hole"
+    // For STL shapes, also store the vertex data so CadScene can render the cutout
     state.updateShape(enclosureShape.id, {
       dimensions: {
         ...enclosureShape.dimensions,
-        // Store subtracted solid info for 3D rendering
         subtractedSolidId: solidShape.id,
         subtractedSolidKind: solidShape.kind,
         subtractedSolidPos: solidShape.position,
         subtractedSolidDims: solidShape.dimensions,
+        subtractedSolidRotation: solidShape.rotation,
       },
+      stlData: solidShape.kind === 'stl' && solidShape.stlData
+        ? solidShape.stlData  // Pass STL vertices for 3D cutout rendering
+        : enclosureShape.stlData,
     });
 
     // Hide the original solid (it's now "inside" the fluid domain)

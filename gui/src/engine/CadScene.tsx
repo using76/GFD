@@ -743,33 +743,47 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
         </mesh>
       )}
       {/* Show cutout hole where solid was subtracted (Volume Extract result) */}
-      {isEnclosure && shape.dimensions.subtractedSolidId && (
-        <mesh
-          position={shape.dimensions.subtractedSolidPos as [number, number, number] || [0, 0, 0]}
-        >
-          {shape.dimensions.subtractedSolidKind === 'sphere' ? (
-            <sphereGeometry args={[(shape.dimensions.subtractedSolidDims as any)?.radius || 0.5, 32, 32]} />
-          ) : shape.dimensions.subtractedSolidKind === 'cylinder' ? (
-            <cylinderGeometry args={[
-              (shape.dimensions.subtractedSolidDims as any)?.radius || 0.3,
-              (shape.dimensions.subtractedSolidDims as any)?.radius || 0.3,
-              (shape.dimensions.subtractedSolidDims as any)?.height || 1, 32
-            ]} />
-          ) : (
-            <boxGeometry args={[
-              (shape.dimensions.subtractedSolidDims as any)?.width || 1,
-              (shape.dimensions.subtractedSolidDims as any)?.height || 1,
-              (shape.dimensions.subtractedSolidDims as any)?.depth || 1
-            ]} />
-          )}
-          <meshStandardMaterial
-            color="#1a1a2e"
-            transparent
-            opacity={0.6}
-            side={THREE.BackSide}
-          />
-        </mesh>
-      )}
+      {isEnclosure && shape.dimensions.subtractedSolidId && (() => {
+        const solidKind = shape.dimensions.subtractedSolidKind as string;
+        const solidPos = (shape.dimensions.subtractedSolidPos as [number, number, number]) || [0, 0, 0];
+        const solidDims = (shape.dimensions.subtractedSolidDims as Record<string, number>) || {};
+        const solidRot = (shape.dimensions.subtractedSolidRotation as [number, number, number]) || [0, 0, 0];
+        const rotRad: [number, number, number] = [degToRad(solidRot[0]), degToRad(solidRot[1]), degToRad(solidRot[2])];
+
+        // STL cutout: use stored stlData vertices
+        if (solidKind === 'stl' && shape.stlData && shape.stlData.vertices) {
+          const verts = shape.stlData.vertices;
+          return (
+            <mesh position={solidPos} rotation={rotRad}>
+              <bufferGeometry>
+                <bufferAttribute
+                  attach="attributes-position"
+                  args={[verts instanceof Float32Array ? verts : new Float32Array(verts as any), 3]}
+                />
+              </bufferGeometry>
+              <meshStandardMaterial color="#1a1a2e" transparent opacity={0.7} side={THREE.BackSide} />
+            </mesh>
+          );
+        }
+
+        // Primitive cutout
+        return (
+          <mesh position={solidPos} rotation={rotRad}>
+            {solidKind === 'sphere' ? (
+              <sphereGeometry args={[solidDims.radius || 0.5, 32, 32]} />
+            ) : solidKind === 'cylinder' ? (
+              <cylinderGeometry args={[solidDims.radius || 0.3, solidDims.radius || 0.3, solidDims.height || 1, 32]} />
+            ) : solidKind === 'cone' ? (
+              <coneGeometry args={[solidDims.radius || 0.3, solidDims.height || 1, 32]} />
+            ) : solidKind === 'torus' ? (
+              <torusGeometry args={[solidDims.majorRadius || 0.5, solidDims.minorRadius || 0.2, 16, 32]} />
+            ) : (
+              <boxGeometry args={[solidDims.width || 1, solidDims.height || 1, solidDims.depth || 1]} />
+            )}
+            <meshStandardMaterial color="#1a1a2e" transparent opacity={0.6} side={THREE.BackSide} />
+          </mesh>
+        );
+      })()}
       {/* Shell: render inner hollow surface */}
       {isShell && !isEnclosure && !isBooleanTool && (
         <ShellInner shape={shape} position={pos} rotation={rotation} />
