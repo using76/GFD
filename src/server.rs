@@ -561,12 +561,26 @@ fn handle_mesh_generate(state: &mut ServerState, id: u64, params: &Value) -> Rpc
     let nx = params.get("nx").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
     let ny = params.get("ny").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
     let nz = params.get("nz").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    let lx = params.get("lx").and_then(|v| v.as_f64()).unwrap_or(1.0);
-    let ly = params.get("ly").and_then(|v| v.as_f64()).unwrap_or(1.0);
-    let lz = params
-        .get("lz")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(if nz > 0 { 1.0 } else { 0.0 });
+
+    // Accept domain bounds from GUI (new format) or fall back to lx/ly/lz
+    let (lx, ly, lz, origin_x, origin_y, origin_z) =
+        if let Some(domain) = params.get("domain") {
+            let xmin = domain.get("xmin").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let xmax = domain.get("xmax").and_then(|v| v.as_f64()).unwrap_or(1.0);
+            let ymin = domain.get("ymin").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let ymax = domain.get("ymax").and_then(|v| v.as_f64()).unwrap_or(1.0);
+            let zmin = domain.get("zmin").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let zmax = domain.get("zmax").and_then(|v| v.as_f64()).unwrap_or(if nz > 0 { 1.0 } else { 0.0 });
+            (xmax - xmin, ymax - ymin, zmax - zmin, xmin, ymin, zmin)
+        } else {
+            let lx = params.get("lx").and_then(|v| v.as_f64()).unwrap_or(1.0);
+            let ly = params.get("ly").and_then(|v| v.as_f64()).unwrap_or(1.0);
+            let lz = params
+                .get("lz")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(if nz > 0 { 1.0 } else { 0.0 });
+            (lx, ly, lz, 0.0, 0.0, 0.0)
+        };
 
     let mesh = StructuredMesh::uniform(nx, ny, nz, lx, ly, lz).to_unstructured();
 
@@ -580,12 +594,24 @@ fn handle_mesh_generate(state: &mut ServerState, id: u64, params: &Value) -> Rpc
     state.mesh_params = Some((nx, ny, nz, lx, ly, lz));
     state.mesh = Some(mesh);
 
+    // Return enhanced response with domain info
     RpcResponse::ok(
         id,
         serde_json::json!({
             "cells": n_cells,
             "faces": n_faces,
             "nodes": n_nodes,
+            "nx": nx,
+            "ny": ny,
+            "nz": nz,
+            "domain": {
+                "xmin": origin_x,
+                "xmax": origin_x + lx,
+                "ymin": origin_y,
+                "ymax": origin_y + ly,
+                "zmin": origin_z,
+                "zmax": origin_z + lz,
+            },
             "quality": {
                 "min_ortho": quality.min_orthogonality,
                 "max_skew": quality.max_skewness,

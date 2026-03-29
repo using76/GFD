@@ -32,14 +32,14 @@ function jetColor(t: number): [number, number, number] {
  * Build contour vertex colors from field data.
  */
 function buildContourColors(
-  nodeCount: number,
+  vertexCount: number,
   fieldValues: Float32Array,
   fieldMin: number,
   fieldMax: number
 ): Float32Array {
-  const colors = new Float32Array(nodeCount * 3);
+  const colors = new Float32Array(vertexCount * 3);
   const range = fieldMax - fieldMin || 1;
-  for (let i = 0; i < Math.min(nodeCount, fieldValues.length); i++) {
+  for (let i = 0; i < Math.min(vertexCount, fieldValues.length); i++) {
     const t = (fieldValues[i] - fieldMin) / range;
     const [r, g, b] = jetColor(t);
     colors[i * 3] = r;
@@ -72,29 +72,53 @@ function DemoCubeWireframe() {
 
 export default function MeshRenderer() {
   const meshDisplayData = useAppStore((s) => s.meshDisplayData);
+  const meshGenerated = useAppStore((s) => s.meshGenerated);
   const renderMode = useAppStore((s) => s.renderMode);
   const activeField = useAppStore((s) => s.activeField);
   const fieldData = useAppStore((s) => s.fieldData);
   const contourConfig = useAppStore((s) => s.contourConfig);
+  const activeTab = useAppStore((s) => s.activeTab);
 
   // Track geometry ref for dynamic color updates
   const geomRef = useRef<THREE.BufferGeometry | null>(null);
 
+  // Build the mesh surface geometry (colored triangles)
   const geometry = useMemo(() => {
     if (!meshDisplayData) return null;
     if (!meshDisplayData.positions || meshDisplayData.positions.length === 0) return null;
-    if (!meshDisplayData.indices || meshDisplayData.indices.length === 0) return null;
 
     const geom = new THREE.BufferGeometry();
-    // Copy data to ensure Three.js owns the arrays
-    const posCopy = new Float32Array(meshDisplayData.positions);
-    const idxCopy = new Uint32Array(meshDisplayData.indices);
 
-    geom.setAttribute('position', new THREE.BufferAttribute(posCopy, 3));
-    geom.setIndex(new THREE.BufferAttribute(idxCopy, 1));
-    geom.computeVertexNormals();
+    // New format: per-triangle positions (no index buffer needed)
+    if (meshDisplayData.indices === null) {
+      const posCopy = new Float32Array(meshDisplayData.positions);
+      geom.setAttribute('position', new THREE.BufferAttribute(posCopy, 3));
+      geom.computeVertexNormals();
+
+      // Apply vertex colors if available
+      if (meshDisplayData.colors && meshDisplayData.colors.length > 0) {
+        const colorCopy = new Float32Array(meshDisplayData.colors);
+        geom.setAttribute('color', new THREE.BufferAttribute(colorCopy, 3));
+      }
+    } else {
+      // Legacy format: indexed geometry
+      const posCopy = new Float32Array(meshDisplayData.positions);
+      const idxCopy = new Uint32Array(meshDisplayData.indices);
+      geom.setAttribute('position', new THREE.BufferAttribute(posCopy, 3));
+      geom.setIndex(new THREE.BufferAttribute(idxCopy, 1));
+      geom.computeVertexNormals();
+    }
 
     geomRef.current = geom;
+    return geom;
+  }, [meshDisplayData]);
+
+  // Build wireframe geometry from wireframePositions
+  const wireGeometry = useMemo(() => {
+    if (!meshDisplayData?.wireframePositions || meshDisplayData.wireframePositions.length === 0) return null;
+    const geom = new THREE.BufferGeometry();
+    const posCopy = new Float32Array(meshDisplayData.wireframePositions);
+    geom.setAttribute('position', new THREE.BufferAttribute(posCopy, 3));
     return geom;
   }, [meshDisplayData]);
 
@@ -104,8 +128,13 @@ export default function MeshRenderer() {
     if (!geom || !meshDisplayData) return;
 
     if (!activeField || renderMode !== 'contour') {
-      // Remove vertex colors when not in contour mode
-      if (geom.hasAttribute('color')) {
+      // Restore original mesh colors when not in contour mode
+      if (meshDisplayData.colors && meshDisplayData.colors.length > 0) {
+        const colorCopy = new Float32Array(meshDisplayData.colors);
+        geom.setAttribute('color', new THREE.BufferAttribute(colorCopy, 3));
+        const colorAttr = geom.getAttribute('color') as THREE.BufferAttribute;
+        if (colorAttr) colorAttr.needsUpdate = true;
+      } else if (geom.hasAttribute('color')) {
         geom.deleteAttribute('color');
         geom.attributes.position.needsUpdate = true;
       }
@@ -114,7 +143,11 @@ export default function MeshRenderer() {
 
     const field = fieldData.find((f) => f.name === activeField);
     if (!field) {
-      if (geom.hasAttribute('color')) {
+      // Restore mesh colors
+      if (meshDisplayData.colors && meshDisplayData.colors.length > 0) {
+        const colorCopy = new Float32Array(meshDisplayData.colors);
+        geom.setAttribute('color', new THREE.BufferAttribute(colorCopy, 3));
+      } else if (geom.hasAttribute('color')) {
         geom.deleteAttribute('color');
       }
       return;
@@ -122,16 +155,19 @@ export default function MeshRenderer() {
 
     const fMin = contourConfig.autoRange ? field.min : contourConfig.min;
     const fMax = contourConfig.autoRange ? field.max : contourConfig.max;
-    const colors = buildContourColors(meshDisplayData.nodeCount, field.values, fMin, fMax);
+    const vertexCount = meshDisplayData.positions.length / 3;
+    const colors = buildContourColors(vertexCount, field.values, fMin, fMax);
     geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-    // Mark for update
     const colorAttr = geom.getAttribute('color') as THREE.BufferAttribute;
     if (colorAttr) colorAttr.needsUpdate = true;
   }, [geometry, meshDisplayData, activeField, fieldData, contourConfig, renderMode]);
 
-  // No mesh loaded: show demo geometry
-  if (!geometry) {
+  // Only show mesh on mesh/setup/calc/results tabs when generated
+  const showMesh = meshGenerated && geometry && ['mesh', 'setup', 'calc', 'results'].includes(activeTab);
+
+  // No mesh loaded or not on a tab that shows mesh: show demo geometry
+  if (!showMesh) {
     return (
       <group>
         {renderMode === 'wireframe' ? <DemoCubeWireframe /> : <DemoCube />}
@@ -140,15 +176,23 @@ export default function MeshRenderer() {
     );
   }
 
-  const hasContour = renderMode === 'contour' && activeField && geometry.hasAttribute('color');
+  const hasVertexColors = geometry!.hasAttribute('color');
+  const isContour = renderMode === 'contour' && activeField && hasVertexColors;
 
   return (
     <group>
-      {/* Solid / Contour mode */}
+      {/* Solid / Contour mode: render colored surface faces */}
       {renderMode !== 'wireframe' && (
-        <mesh geometry={geometry} userData={{ selectable: true }}>
-          {hasContour ? (
-            <meshBasicMaterial vertexColors side={THREE.DoubleSide} />
+        <mesh geometry={geometry!} userData={{ selectable: true }}>
+          {hasVertexColors ? (
+            <meshStandardMaterial
+              vertexColors
+              side={THREE.DoubleSide}
+              transparent
+              opacity={isContour ? 0.95 : 0.85}
+              roughness={0.5}
+              metalness={0}
+            />
           ) : (
             <meshStandardMaterial
               color="#4080c0"
@@ -160,15 +204,29 @@ export default function MeshRenderer() {
         </mesh>
       )}
 
-      {/* Wireframe overlay — always visible as thin lines */}
-      <mesh geometry={geometry}>
-        <meshBasicMaterial
-          color={renderMode === 'contour' ? '#000000' : '#80a0ff'}
-          wireframe
-          transparent
-          opacity={renderMode === 'wireframe' ? 0.8 : renderMode === 'contour' ? 0.08 : 0.2}
-        />
-      </mesh>
+      {/* Wireframe overlay: dedicated line segments for clean cell edges */}
+      {wireGeometry && (
+        <lineSegments geometry={wireGeometry}>
+          <lineBasicMaterial
+            color={renderMode === 'contour' ? '#111111' : renderMode === 'wireframe' ? '#80a0ff' : '#222233'}
+            transparent
+            opacity={renderMode === 'wireframe' ? 0.8 : renderMode === 'contour' ? 0.06 : 0.3}
+            linewidth={1}
+          />
+        </lineSegments>
+      )}
+
+      {/* Fallback wireframe overlay using mesh geometry if no wireframePositions */}
+      {!wireGeometry && (
+        <mesh geometry={geometry!}>
+          <meshBasicMaterial
+            color={renderMode === 'contour' ? '#000000' : '#80a0ff'}
+            wireframe
+            transparent
+            opacity={renderMode === 'wireframe' ? 0.8 : renderMode === 'contour' ? 0.08 : 0.2}
+          />
+        </mesh>
+      )}
     </group>
   );
 }

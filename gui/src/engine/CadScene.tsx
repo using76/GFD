@@ -1327,8 +1327,14 @@ const CadScene: React.FC = () => {
   const booleanOps = useAppStore((s) => s.booleanOps);
   const exploded = useAppStore((s) => s.exploded);
   const explodeFactor = useAppStore((s) => s.explodeFactor);
+  const meshGenerated = useAppStore((s) => s.meshGenerated);
+  const activeTab = useAppStore((s) => s.activeTab);
 
   const selectedShape = shapes.find((s) => s.id === selectedShapeId);
+
+  // When mesh is generated and we are on mesh/setup/calc/results tabs,
+  // hide CAD shapes so the mesh surface rendering is visible instead.
+  const hideCadShapes = meshGenerated && ['mesh', 'setup', 'calc', 'results'].includes(activeTab);
 
   // Determine which shapes are boolean "tool" shapes (subtract visual)
   const booleanToolIds = useMemo(() => {
@@ -1349,8 +1355,8 @@ const CadScene: React.FC = () => {
       {/* Section plane clipping */}
       <SectionPlaneClip />
 
-      {/* Regular shapes (hide extracted solids — they show as cutout inside enclosure) */}
-      {shapes
+      {/* Regular shapes — hidden when mesh is generated and on mesh-related tabs */}
+      {!hideCadShapes && shapes
         .filter((s) => s.id !== selectedShapeId && s.group !== 'extracted_solid')
         .map((shape) => {
           const pos = exploded && shape.group !== 'enclosure'
@@ -1365,7 +1371,7 @@ const CadScene: React.FC = () => {
             />
           );
         })}
-      {selectedShape && selectedShape.group !== 'extracted_solid' && (
+      {!hideCadShapes && selectedShape && selectedShape.group !== 'extracted_solid' && (
         <SelectedShapeWithTransform
           key={selectedShape.id}
           shape={selectedShape}
@@ -1377,8 +1383,8 @@ const CadScene: React.FC = () => {
         />
       )}
 
-      {/* Volume Extract cutout — rendered independently so it's always visible */}
-      <ExtractedCutout />
+      {/* Volume Extract cutout — also hidden when mesh is displayed */}
+      {!hideCadShapes && <ExtractedCutout />}
 
       {/* Defeaturing issue markers in 3D */}
       <DefeatureMarkers />
@@ -1390,10 +1396,10 @@ const CadScene: React.FC = () => {
       <MeasureElements />
 
       {/* Named selection overlays for CFD prep */}
-      <NamedSelectionOverlays />
+      {!hideCadShapes && <NamedSelectionOverlays />}
 
       {/* Enclosure preview (live wireframe before creation) */}
-      <EnclosurePreview />
+      {!hideCadShapes && <EnclosurePreview />}
 
       {/* Mesh zone overlays (Fluent-style volumes & boundary faces) */}
       <MeshZoneOverlays />
