@@ -179,8 +179,8 @@ const CfdPrepPanel: React.FC = () => {
         : enclosureShape.stlData,
     });
 
-    // Hide the original solid (it's now "inside" the fluid domain)
-    state.removeShape(selectedBody);
+    // Hide the original solid (don't delete — mark as hidden so cutout stays)
+    state.updateShape(selectedBody, { group: 'extracted_solid' } as any);
 
     setFluidExtracted(true);
     if (cfdPrepStep < 2) setCfdPrepStep(2);

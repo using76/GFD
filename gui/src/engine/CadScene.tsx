@@ -1046,9 +1046,9 @@ const CadScene: React.FC = () => {
       {/* Section plane clipping */}
       <SectionPlaneClip />
 
-      {/* Regular shapes */}
+      {/* Regular shapes (hide extracted solids — they show as cutout inside enclosure) */}
       {shapes
-        .filter((s) => s.id !== selectedShapeId)
+        .filter((s) => s.id !== selectedShapeId && s.group !== 'extracted_solid')
         .map((shape) => {
           const pos = exploded && shape.group !== 'enclosure'
             ? getExplodedPosition(shape.position, sceneCenter, explodeFactor)
@@ -1062,7 +1062,7 @@ const CadScene: React.FC = () => {
             />
           );
         })}
-      {selectedShape && (
+      {selectedShape && selectedShape.group !== 'extracted_solid' && (
         <SelectedShapeWithTransform
           key={selectedShape.id}
           shape={selectedShape}
