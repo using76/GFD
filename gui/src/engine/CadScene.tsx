@@ -1023,21 +1023,13 @@ const EnclosurePreview: React.FC = () => {
 const ExtractedCutout: React.FC = () => {
   const shapes = useAppStore((s) => s.shapes);
   const enclosure = shapes.find((s) => (s.kind === 'enclosure' || s.isEnclosure) && s.dimensions.subtractedSolidId);
-  if (!enclosure) return null;
 
-  const solidKind = enclosure.dimensions.subtractedSolidKind as string;
-  const solidPos = (enclosure.dimensions.subtractedSolidPos as [number, number, number]) || [0, 0, 0];
-  const solidDims = (enclosure.dimensions.subtractedSolidDims as Record<string, number>) || {};
-  const solidRot = (enclosure.dimensions.subtractedSolidRotation as [number, number, number]) || [0, 0, 0];
-  const rotRad: [number, number, number] = [degToRad(solidRot[0]), degToRad(solidRot[1]), degToRad(solidRot[2])];
+  // ALL hooks BEFORE any early return (React Rules of Hooks)
+  const ec = enclosure?.position || [0, 0, 0];
+  const ew = (enclosure?.dimensions?.width as number) || 4;
+  const eh = (enclosure?.dimensions?.height as number) || 4;
+  const ed = (enclosure?.dimensions?.depth as number) || 4;
 
-  // Compute enclosure bounds for clipping planes
-  const ew = enclosure.dimensions.width as number || 4;
-  const eh = enclosure.dimensions.height as number || 4;
-  const ed = enclosure.dimensions.depth as number || 4;
-  const ec = enclosure.position;
-
-  // 6 clipping planes: one per enclosure face, normals pointing INWARD
   const clipPlanes = useMemo(() => [
     new THREE.Plane(new THREE.Vector3( 1, 0, 0), -(ec[0] - ew / 2)), // xmin
     new THREE.Plane(new THREE.Vector3(-1, 0, 0),  (ec[0] + ew / 2)), // xmax
@@ -1046,6 +1038,15 @@ const ExtractedCutout: React.FC = () => {
     new THREE.Plane(new THREE.Vector3( 0, 0, 1), -(ec[2] - ed / 2)), // zmin
     new THREE.Plane(new THREE.Vector3( 0, 0,-1),  (ec[2] + ed / 2)), // zmax
   ], [ec, ew, eh, ed]);
+
+  // Early return AFTER all hooks
+  if (!enclosure) return null;
+
+  const solidKind = enclosure.dimensions.subtractedSolidKind as string;
+  const solidPos = (enclosure.dimensions.subtractedSolidPos as [number, number, number]) || [0, 0, 0];
+  const solidDims = (enclosure.dimensions.subtractedSolidDims as Record<string, number>) || {};
+  const solidRot = (enclosure.dimensions.subtractedSolidRotation as [number, number, number]) || [0, 0, 0];
+  const rotRad: [number, number, number] = [degToRad(solidRot[0]), degToRad(solidRot[1]), degToRad(solidRot[2])];
 
   const makeGeo = () => {
     if (solidKind === 'stl' && enclosure.stlData?.vertices) {

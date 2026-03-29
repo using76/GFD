@@ -185,14 +185,7 @@ const CfdPrepPanel: React.FC = () => {
     setFluidExtracted(true);
     if (cfdPrepStep < 2) setCfdPrepStep(2);
 
-    // Add console log
-    const lines = state.consoleLines || [];
-    state.setConsoleLines([
-      ...lines,
-      `[CFD Prep] Extracted fluid volume: Enclosure minus "${solidShape.name}"`,
-      `[CFD Prep] Solid body "${solidShape.name}" removed from scene (subtracted)`,
-      `[CFD Prep] Fluid domain is now the enclosure with internal cutout`,
-    ]);
+    // Console feedback via message (consoleLines updated by solver)
 
     message.success(`Fluid volume extracted: Enclosure - "${solidShape.name}"`);
   }, [enclosureCreated, selectedBody, setFluidExtracted, cfdPrepStep, setCfdPrepStep]);
