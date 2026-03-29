@@ -113,6 +113,28 @@ const GroupSep: React.FC<{ label?: string }> = ({ label }) => (
 
 let nextId = 100;
 
+/** Parse binary STL buffer */
+function parseBinaryStl(buf: ArrayBuffer): { verts: Float32Array; fc: number } {
+  const dv = new DataView(buf);
+  const fc = dv.getUint32(80, true);
+  if (fc === 0 || 84 + fc * 50 > buf.byteLength) {
+    return { verts: new Float32Array(0), fc: 0 };
+  }
+  const verts = new Float32Array(fc * 9);
+  let offset = 84;
+  for (let i = 0; i < fc; i++) {
+    offset += 12; // skip normal
+    for (let v = 0; v < 3; v++) {
+      verts[i * 9 + v * 3] = dv.getFloat32(offset, true);
+      verts[i * 9 + v * 3 + 1] = dv.getFloat32(offset + 4, true);
+      verts[i * 9 + v * 3 + 2] = dv.getFloat32(offset + 8, true);
+      offset += 12;
+    }
+    offset += 2; // skip attribute
+  }
+  return { verts, fc };
+}
+
 function makeShape(kind: ShapeKind) {
   const id = `shape-${nextId++}`;
   const defaults: Record<string, Record<string, number>> = {
@@ -316,41 +338,72 @@ const DesignRibbon: React.FC = () => {
       }} />
       <GroupSep label="Reference" />
 
-      {/* Import */}
+      {/* Import STL (ASCII + Binary) */}
       <Upload
-        accept=".stl"
+        accept=".stl,.STL"
         showUploadList={false}
         beforeUpload={(file) => {
           const reader = new FileReader();
           reader.onload = (e) => {
-            const buf = e.target?.result as ArrayBuffer;
-            if (!buf) return;
-            const dv = new DataView(buf);
-            const fc = dv.getUint32(80, true);
-            const verts = new Float32Array(fc * 9);
-            let offset = 84;
-            for (let i = 0; i < fc; i++) {
-              offset += 12;
-              for (let v = 0; v < 3; v++) {
-                verts[i * 9 + v * 3] = dv.getFloat32(offset, true);
-                verts[i * 9 + v * 3 + 1] = dv.getFloat32(offset + 4, true);
-                verts[i * 9 + v * 3 + 2] = dv.getFloat32(offset + 8, true);
-                offset += 12;
+            try {
+              const buf = e.target?.result as ArrayBuffer;
+              if (!buf || buf.byteLength < 84) {
+                message.error('Invalid STL file (too small)');
+                return;
               }
-              offset += 2;
+
+              // Detect ASCII vs Binary
+              const headerBytes = new Uint8Array(buf, 0, 6);
+              const headerStr = String.fromCharCode(...headerBytes);
+              let verts: Float32Array;
+              let fc: number;
+
+              if (headerStr.startsWith('solid') && buf.byteLength > 84) {
+                // Try ASCII first
+                const text = new TextDecoder().decode(buf);
+                const vertexRegex = /vertex\s+([-\d.eE+]+)\s+([-\d.eE+]+)\s+([-\d.eE+]+)/g;
+                const coords: number[] = [];
+                let match;
+                while ((match = vertexRegex.exec(text)) !== null) {
+                  coords.push(parseFloat(match[1]), parseFloat(match[2]), parseFloat(match[3]));
+                }
+                if (coords.length >= 9) {
+                  // ASCII parse succeeded
+                  verts = new Float32Array(coords);
+                  fc = coords.length / 9;
+                } else {
+                  // Fallback to binary (some binary files start with "solid")
+                  const result = parseBinaryStl(buf);
+                  verts = result.verts;
+                  fc = result.fc;
+                }
+              } else {
+                // Binary STL
+                const result = parseBinaryStl(buf);
+                verts = result.verts;
+                fc = result.fc;
+              }
+
+              if (fc === 0) {
+                message.error('No triangles found in STL file');
+                return;
+              }
+
+              const id = `shape-${nextId++}`;
+              addShape({
+                id,
+                name: file.name.replace(/\.stl$/i, ''),
+                kind: 'stl' as any,
+                position: [0, 0, 0],
+                rotation: [0, 0, 0],
+                dimensions: {},
+                stlData: { vertices: verts, faceCount: fc },
+                group: 'body',
+              });
+              message.success(`Imported ${file.name} (${fc} triangles)`);
+            } catch (err: any) {
+              message.error(`STL import failed: ${err.message || err}`);
             }
-            const id = `shape-${nextId++}`;
-            addShape({
-              id,
-              name: file.name.replace(/\.stl$/i, ''),
-              kind: 'stl',
-              position: [0, 0, 0],
-              rotation: [0, 0, 0],
-              dimensions: {},
-              stlData: { vertices: verts, faceCount: fc },
-              group: 'body',
-            });
-            message.success(`Imported ${file.name}`);
           };
           reader.readAsArrayBuffer(file);
           return false;
