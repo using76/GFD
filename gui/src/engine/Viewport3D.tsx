@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useCallback, useState } from 'react';
 import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport, Grid } from '@react-three/drei';
 import { useAppStore } from '../store/useAppStore';
@@ -161,12 +161,73 @@ function ScreenshotCapture() {
   return null;
 }
 
+/** Parse binary STL buffer */
+function parseBinaryStlBuf(buf: ArrayBuffer): { verts: Float32Array; fc: number } {
+  const dv = new DataView(buf);
+  const fc = dv.getUint32(80, true);
+  if (fc === 0 || 84 + fc * 50 > buf.byteLength) return { verts: new Float32Array(0), fc: 0 };
+  const verts = new Float32Array(fc * 9);
+  let offset = 84;
+  for (let i = 0; i < fc; i++) {
+    offset += 12;
+    for (let v = 0; v < 3; v++) {
+      verts[i*9+v*3] = dv.getFloat32(offset, true);
+      verts[i*9+v*3+1] = dv.getFloat32(offset+4, true);
+      verts[i*9+v*3+2] = dv.getFloat32(offset+8, true);
+      offset += 12;
+    }
+    offset += 2;
+  }
+  return { verts, fc };
+}
+
 export default function Viewport3D() {
   const cameraMode = useAppStore((s) => s.cameraMode);
   const backgroundMode = useAppStore((s) => s.backgroundMode);
+  const [dragOver, setDragOver] = useState(false);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (!file || !file.name.toLowerCase().endsWith('.stl')) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const buf = ev.target?.result as ArrayBuffer;
+      if (!buf || buf.byteLength < 84) return;
+      const headerStr = String.fromCharCode(...new Uint8Array(buf, 0, 6));
+      let verts: Float32Array;
+      let fc: number;
+      if (headerStr.startsWith('solid') && buf.byteLength > 84) {
+        const text = new TextDecoder().decode(buf);
+        const regex = /vertex\s+([-\d.eE+]+)\s+([-\d.eE+]+)\s+([-\d.eE+]+)/g;
+        const coords: number[] = [];
+        let m;
+        while ((m = regex.exec(text)) !== null) coords.push(parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3]));
+        if (coords.length >= 9) { verts = new Float32Array(coords); fc = coords.length / 9; }
+        else { const r = parseBinaryStlBuf(buf); verts = r.verts; fc = r.fc; }
+      } else {
+        const r = parseBinaryStlBuf(buf); verts = r.verts; fc = r.fc;
+      }
+      if (fc > 0) {
+        const id = `shape-drop-${Date.now()}`;
+        useAppStore.getState().addShape({
+          id, name: file.name.replace(/\.stl$/i, ''), kind: 'stl',
+          position: [0, 0, 0], rotation: [0, 0, 0], dimensions: {},
+          stlData: { vertices: verts, faceCount: fc }, group: 'body',
+        });
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }, []);
 
   return (
-    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+    <div
+      style={{ width: '100%', height: '100%', position: 'relative', border: dragOver ? '2px dashed #4096ff' : 'none' }}
+      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={handleDrop}
+    >
       <Canvas
         camera={
           cameraMode.type === 'perspective'

@@ -788,8 +788,30 @@ function useKeyboardShortcuts() {
 }
 
 // ============================================================
-// Main App
+// Auto-save (every 5 minutes)
 // ============================================================
+function useAutoSave() {
+  useEffect(() => {
+    const interval = setInterval(() => {
+      try {
+        const state = useAppStore.getState();
+        if (state.shapes.length === 0) return; // Nothing to save
+        const data = {
+          shapes: state.shapes.map(s => ({ ...s, stlData: undefined })),
+          physicsModels: state.physicsModels,
+          material: state.material,
+          solverSettings: state.solverSettings,
+          boundaries: state.boundaries,
+          meshConfig: state.meshConfig,
+        };
+        localStorage.setItem('gfd-autosave', JSON.stringify(data));
+        localStorage.setItem('gfd-autosave-time', new Date().toISOString());
+      } catch { /* ignore save errors */ }
+    }, 5 * 60 * 1000); // 5 minutes
+    return () => clearInterval(interval);
+  }, []);
+}
+
 // ============================================================
 // Keyboard Shortcuts Overlay
 // ============================================================
@@ -867,6 +889,7 @@ export default function App() {
   const STATUS_BAR_H = 28;
 
   useKeyboardShortcuts();
+  useAutoSave();
 
   return (
     <ConfigProvider

@@ -6,8 +6,17 @@ import type { Material } from '../../store/useAppStore';
 const materialPresets: Record<string, Material> = {
   Air: { name: 'Air', density: 1.225, viscosity: 1.789e-5, cp: 1006.43, conductivity: 0.0242 },
   Water: { name: 'Water', density: 998.2, viscosity: 1.003e-3, cp: 4182.0, conductivity: 0.6 },
+  'Engine Oil': { name: 'Engine Oil', density: 884, viscosity: 0.486, cp: 1909, conductivity: 0.145 },
+  Glycerin: { name: 'Glycerin', density: 1261, viscosity: 1.412, cp: 2427, conductivity: 0.286 },
+  Mercury: { name: 'Mercury', density: 13546, viscosity: 1.526e-3, cp: 139.3, conductivity: 8.54 },
+  Ethanol: { name: 'Ethanol', density: 789, viscosity: 1.2e-3, cp: 2440, conductivity: 0.171 },
+  'Natural Gas': { name: 'Natural Gas', density: 0.668, viscosity: 1.087e-5, cp: 2222, conductivity: 0.0332 },
+  Steam: { name: 'Steam', density: 0.5977, viscosity: 1.34e-5, cp: 2010, conductivity: 0.0261 },
+  Blood: { name: 'Blood', density: 1060, viscosity: 3.5e-3, cp: 3617, conductivity: 0.52 },
   Steel: { name: 'Steel', density: 7850, viscosity: 0, cp: 434, conductivity: 60.5 },
   Aluminum: { name: 'Aluminum', density: 2719, viscosity: 0, cp: 871, conductivity: 202.4 },
+  Copper: { name: 'Copper', density: 8933, viscosity: 0, cp: 385, conductivity: 401 },
+  Titanium: { name: 'Titanium', density: 4506, viscosity: 0, cp: 523, conductivity: 21.9 },
   Custom: { name: 'Custom', density: 1.0, viscosity: 1e-5, cp: 1000, conductivity: 0.1 },
 };
 
