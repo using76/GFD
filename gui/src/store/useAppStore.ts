@@ -256,6 +256,13 @@ export interface SelectedEntity {
   id: number;
 }
 
+// ---- Probe Point ----
+export interface ProbePoint {
+  id: string;
+  position: [number, number, number];
+  values: Record<string, number>; // field name → value
+}
+
 // ---- Section Plane ----
 export interface SectionPlane {
   enabled: boolean;
@@ -437,6 +444,12 @@ interface AppState {
   updateVectorConfig: (patch: Partial<VectorConfig>) => void;
   setFieldData: (fields: FieldData[]) => void;
   setActiveField: (name: string | null) => void;
+
+  // Probe points
+  probePoints: ProbePoint[];
+  addProbePoint: (pos: [number, number, number]) => void;
+  removeProbePoint: (id: string) => void;
+  clearProbePoints: () => void;
 
   // Camera / Render / Selection (used by engine components)
   cameraMode: CameraMode;
@@ -1738,6 +1751,41 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({ vectorConfig: { ...s.vectorConfig, ...patch } })),
   setFieldData: (fields) => set({ fieldData: fields }),
   setActiveField: (name) => set({ activeField: name }),
+
+  // Probe points
+  probePoints: [],
+  addProbePoint: (pos) => {
+    const state = get();
+    const values: Record<string, number> = {};
+    // Interpolate field values at probe position from nearest mesh vertex
+    if (state.meshDisplayData && state.fieldData.length > 0) {
+      const positions = state.meshDisplayData.positions;
+      const nVerts = positions.length / 3;
+      // Find nearest vertex
+      let minDist = Infinity;
+      let nearestIdx = 0;
+      for (let i = 0; i < nVerts; i++) {
+        const dx = positions[i*3] - pos[0];
+        const dy = positions[i*3+1] - pos[1];
+        const dz = positions[i*3+2] - pos[2];
+        const d = dx*dx + dy*dy + dz*dz;
+        if (d < minDist) { minDist = d; nearestIdx = i; }
+      }
+      state.fieldData.forEach(f => {
+        if (nearestIdx < f.values.length) {
+          values[f.name] = f.values[nearestIdx];
+        }
+      });
+    }
+    const probe: ProbePoint = {
+      id: `probe-${Date.now()}`,
+      position: pos,
+      values,
+    };
+    set((s) => ({ probePoints: [...s.probePoints, probe] }));
+  },
+  removeProbePoint: (id) => set((s) => ({ probePoints: s.probePoints.filter(p => p.id !== id) })),
+  clearProbePoints: () => set({ probePoints: [] }),
 
   // Camera / Render / Selection
   cameraMode: { type: 'perspective' },

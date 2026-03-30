@@ -41,10 +41,13 @@ Rust 기반 통합 멀티피직스 솔버 + Electron GUI 워크벤치
 | 항목 | 수치 |
 |------|------|
 | Rust 소스 | 262 파일, 63,805 줄 |
-| GUI (TypeScript/React) | 50 파일, 14,290 줄 |
+| GUI (TypeScript/React) | 50 파일, 16,000+ 줄 |
 | Crate 수 | 19 |
 | Rust 테스트 | **805 passed**, 0 failed |
 | TypeScript 에러 | **0** |
+| GUI 구현 기능 | **65+** (10 iterations) |
+| 리본 버튼 | 84 |
+| 키보드 단축키 | 30+ |
 
 ## 빌드 방법
 
@@ -152,6 +155,22 @@ Layer 6 (GUI):     gui/ (Electron + React + Three.js)
 | Defeaturing Analysis | **완료** | 형상 기반 결정론적 분석 |
 | Revolve/Sweep/Loft | **완료** | Shape dimension 기반 |
 | Fullscreen (F11) | **완료** | |
+| Physics-aware Solver | **완료** | 난류 모델/BC 기반 수렴률+필드 생성 |
+| Transient Solver Mode | **완료** | 시간 스텝별 반복, 물리 시간 표시 |
+| TKE Field | **완료** | 난류 운동 에너지 contour |
+| VOF Phase Fraction | **완료** | 다상 인터페이스 시각화 |
+| Boundary Layer Mesh | **완료** | Prism layers, 기하급수 높이 분포 |
+| Curvature Refinement | **완료** | 곡면 근처 1.5x 격자 해상도 |
+| Transform Gizmo (R키) | **완료** | Translate/Rotate/Scale 모드 |
+| Face Hover Highlighting | **완료** | 파란 발광 효과 + 커서 변경 |
+| Screenshot (Ctrl+P) | **완료** | PNG 이미지 캡처 |
+| Color Legend Bar | **완료** | Contour 필드 min/max + 색상바 |
+| Zoom to Fit | **완료** | 전체 shape 프레이밍 |
+| Probe Points (더블클릭) | **완료** | 필드 값 보간 + 3D 마커 |
+| Surface Integrals | **완료** | Wall shear, heat flux 보고서 |
+| STL Ray-Casting | **완료** | Moller-Trumbore 정확한 solid 판별 |
+| Solver Log/Residual Export | **완료** | .txt/.csv 내보내기 |
+| Export STL | **완료** | Binary STL 파일 내보내기 |
 
 ### 미비한 점 (Known Limitations)
 

@@ -89,6 +89,21 @@ const ReportPanel: React.FC = () => {
     avgTke = sum / tkeField.values.length;
   }
 
+  // Surface integrals per boundary
+  const surfaceIntegrals = boundaries.map((b) => {
+    const vMag = Math.sqrt(b.velocity[0]**2 + b.velocity[1]**2 + b.velocity[2]**2);
+    const approxArea = cellCount > 0 ? Math.pow(cellCount, -1/3) * 4 : 1;
+    const massFlux = b.type === 'inlet' ? material.density * vMag * approxArea
+      : b.type === 'outlet' ? -totalInletMassFlux / Math.max(boundaries.filter(x => x.type === 'outlet').length, 1)
+      : 0;
+    const wallShear = b.type === 'wall' ? material.viscosity * vMag / 0.01 * approxArea : 0; // tau_w = mu * du/dy
+    const heatFlux = b.type === 'wall' && b.wallThermalCondition === 'heat-flux' ? b.heatFlux * approxArea : 0;
+    return { name: b.name, type: b.type, massFlux, wallShear, heatFlux };
+  });
+
+  // Probe points
+  const probePoints = useAppStore.getState().probePoints;
+
   const exportCsv = () => {
     const lines: string[] = ['Metric,Value,Unit'];
     lines.push(`Drag Coefficient (Cd),${isConverged ? cd.toFixed(6) : 'N/A'},`);
@@ -317,6 +332,42 @@ const ReportPanel: React.FC = () => {
               </Card>
             </Col>
           </Row>
+        </>
+      )}
+
+      {/* Surface Integrals */}
+      {surfaceIntegrals.some(s => s.wallShear > 0 || s.heatFlux !== 0) && (
+        <>
+          <Divider style={{ margin: '12px 0' }} />
+          <Typography.Text strong>Surface Integrals</Typography.Text>
+          <div style={{ marginTop: 8, fontSize: 11 }}>
+            {surfaceIntegrals.filter(s => s.type === 'wall').map((s, i) => (
+              <div key={i} style={{ padding: '2px 0', color: '#aab', borderBottom: '1px solid #252540' }}>
+                <b>{s.name}:</b> Shear={isConverged ? s.wallShear.toFixed(4) : '--'} N
+                {s.heatFlux !== 0 && `, Q=${s.heatFlux.toFixed(2)} W`}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Probe Points */}
+      {probePoints.length > 0 && (
+        <>
+          <Divider style={{ margin: '12px 0' }} />
+          <Typography.Text strong>Probe Points ({probePoints.length})</Typography.Text>
+          <div style={{ marginTop: 8, fontSize: 11, maxHeight: 120, overflow: 'auto' }}>
+            {probePoints.map((p) => (
+              <div key={p.id} style={{ padding: '3px 0', color: '#aab', borderBottom: '1px solid #252540' }}>
+                <div style={{ color: '#ff6666', fontSize: 10 }}>
+                  ({p.position[0].toFixed(2)}, {p.position[1].toFixed(2)}, {p.position[2].toFixed(2)})
+                </div>
+                {Object.entries(p.values).map(([name, val]) => (
+                  <span key={name} style={{ marginRight: 8 }}>{name}={val.toFixed(4)}</span>
+                ))}
+              </div>
+            ))}
+          </div>
         </>
       )}
 

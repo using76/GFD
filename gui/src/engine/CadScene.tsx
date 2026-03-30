@@ -1611,12 +1611,36 @@ const MeasureClickHandler: React.FC = () => {
     }
   }, [measureMode, measurePoints, addMeasurePoint, addMeasureLabel, clearMeasurePoints, camera, scene, gl, raycaster]);
 
+  // Double-click to place probe point (when field data exists)
+  const handleDblClick = useCallback((event: MouseEvent) => {
+    const state = useAppStore.getState();
+    if (state.fieldData.length === 0) return; // Only when field data available
+
+    const rect = gl.domElement.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObjects(scene.children, true);
+    const hit = intersects.find(i => i.object.type === 'Mesh' && i.object.visible);
+    if (hit) {
+      state.addProbePoint([hit.point.x, hit.point.y, hit.point.z]);
+    }
+  }, [camera, scene, gl, raycaster]);
+
   useEffect(() => {
     if (!measureMode) return;
     const el = gl.domElement;
     el.addEventListener('click', handleClick);
     return () => el.removeEventListener('click', handleClick);
   }, [measureMode, handleClick, gl]);
+
+  useEffect(() => {
+    const el = gl.domElement;
+    el.addEventListener('dblclick', handleDblClick);
+    return () => el.removeEventListener('dblclick', handleDblClick);
+  }, [handleDblClick, gl]);
 
   return null;
 };
@@ -1712,6 +1736,40 @@ const CadScene: React.FC = () => {
 
       {/* Streamline traces */}
       <StreamlineTraces />
+
+      {/* Probe points */}
+      <ProbePointMarkers />
+    </group>
+  );
+};
+
+// ============================================================
+// Probe Point Markers — show field values at specific locations
+// ============================================================
+const ProbePointMarkers: React.FC = () => {
+  const probePoints = useAppStore((s) => s.probePoints);
+
+  if (probePoints.length === 0) return null;
+
+  return (
+    <group>
+      {probePoints.map((probe) => (
+        <group key={probe.id} position={probe.position}>
+          {/* Sphere marker */}
+          <mesh>
+            <sphereGeometry args={[0.04, 16, 16]} />
+            <meshBasicMaterial color="#ff4444" />
+          </mesh>
+          {/* Vertical line */}
+          <primitive object={(() => {
+            const geom = new THREE.BufferGeometry();
+            geom.setAttribute('position', new THREE.BufferAttribute(
+              new Float32Array([0, 0, 0, 0, 0.3, 0]), 3
+            ));
+            return new THREE.Line(geom, new THREE.LineBasicMaterial({ color: '#ff4444' }));
+          })()} />
+        </group>
+      ))}
     </group>
   );
 };
