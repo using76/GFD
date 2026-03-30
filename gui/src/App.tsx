@@ -495,6 +495,11 @@ function useKeyboardShortcuts() {
               }
             }
             return;
+          case 'p':
+            e.preventDefault();
+            window.dispatchEvent(new CustomEvent('gfd-screenshot'));
+            message.success('Screenshot saved');
+            return;
           case 's':
             e.preventDefault();
             try {

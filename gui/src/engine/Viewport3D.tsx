@@ -88,6 +88,9 @@ function SceneContent() {
       {/* Camera preset event handler */}
       <CameraPresetListener />
 
+      {/* Screenshot capture */}
+      <ScreenshotCapture />
+
       {/* CAD shapes */}
       <CadScene />
 
@@ -106,6 +109,23 @@ const bgColors: Record<string, string> = {
   gradient: '#1a2332',
 };
 
+/** Screenshot capture: listens for gfd-screenshot event and saves canvas as PNG */
+function ScreenshotCapture() {
+  const { gl } = useThree();
+  useEffect(() => {
+    const handler = () => {
+      const dataUrl = gl.domElement.toDataURL('image/png');
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = `gfd-screenshot-${Date.now()}.png`;
+      a.click();
+    };
+    window.addEventListener('gfd-screenshot', handler);
+    return () => window.removeEventListener('gfd-screenshot', handler);
+  }, [gl]);
+  return null;
+}
+
 export default function Viewport3D() {
   const cameraMode = useAppStore((s) => s.cameraMode);
   const backgroundMode = useAppStore((s) => s.backgroundMode);
@@ -120,7 +140,7 @@ export default function Viewport3D() {
         }
         orthographic={cameraMode.type === 'orthographic'}
         style={{ background: bgColors[backgroundMode] ?? '#0d1117' }}
-        gl={{ antialias: true, localClippingEnabled: true }}
+        gl={{ antialias: true, localClippingEnabled: true, preserveDrawingBuffer: true }}
       >
         <SceneContent />
       </Canvas>

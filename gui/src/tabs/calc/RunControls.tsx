@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { Button, Space, Checkbox, Divider, Statistic, InputNumber, Typography, Select, Tag } from 'antd';
+import { Button, Space, Checkbox, Divider, Statistic, InputNumber, Typography, Select, Tag, message } from 'antd';
 import {
   CaretRightOutlined,
   PauseOutlined,
   StopOutlined,
   SettingOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons';
 import { useAppStore } from '../../store/useAppStore';
 
@@ -234,6 +235,40 @@ const RunControls: React.FC = () => {
           ))}
           <div><b>GPU:</b> {useGpu ? 'Enabled' : 'Disabled'} | <b>MPI:</b> {useMpi ? `${mpiCores} cores` : 'Disabled'}</div>
         </div>
+      )}
+
+      {/* Export section */}
+      {residuals.length > 0 && (
+        <>
+          <Divider style={{ margin: '8px 0' }} />
+          <Space>
+            <Button size="small" icon={<DownloadOutlined />} onClick={() => {
+              const consoleLines = useAppStore.getState().consoleLines;
+              const blob = new Blob([consoleLines.join('\n')], { type: 'text/plain' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url; a.download = 'gfd_solver_log.txt'; a.click();
+              URL.revokeObjectURL(url);
+              message.success('Console log exported');
+            }}>
+              Export Log
+            </Button>
+            <Button size="small" icon={<DownloadOutlined />} onClick={() => {
+              const lines = ['iteration,continuity,x-momentum,y-momentum,energy'];
+              residuals.forEach(r => {
+                lines.push(`${r.iteration},${r.continuity.toExponential(6)},${r.xMomentum.toExponential(6)},${r.yMomentum.toExponential(6)},${r.energy.toExponential(6)}`);
+              });
+              const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url; a.download = 'gfd_residuals.csv'; a.click();
+              URL.revokeObjectURL(url);
+              message.success('Residual history exported');
+            }}>
+              Export Residuals
+            </Button>
+          </Space>
+        </>
       )}
     </div>
   );

@@ -840,9 +840,16 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       // Compute cell counts from globalSize
       const gs = state.meshConfig.globalSize;
-      const nx = Math.max(3, gs > 0 ? Math.round(domainLx / gs) : 20);
-      const ny = Math.max(3, gs > 0 ? Math.round(domainLy / gs) : 20);
-      const nz = Math.max(3, gs > 0 ? Math.round(domainLz / gs) : 20);
+      // Curvature refinement: increase resolution near curved bodies
+      const hasCurvedBodies = state.shapes.some(s =>
+        s.group !== 'enclosure' && s.visible !== false &&
+        ['sphere', 'cylinder', 'cone', 'torus', 'pipe', 'stl'].includes(s.kind)
+      );
+      const curveFactor = state.meshConfig.curvatureRefine && hasCurvedBodies ? 1.5 : 1.0;
+      const effectiveGs = gs / curveFactor;
+      const nx = Math.max(3, effectiveGs > 0 ? Math.round(domainLx / effectiveGs) : 20);
+      const ny = Math.max(3, effectiveGs > 0 ? Math.round(domainLy / effectiveGs) : 20);
+      const nz = Math.max(3, effectiveGs > 0 ? Math.round(domainLz / effectiveGs) : 20);
 
       const dx = domainLx / nx;
       const dz = domainLz / nz;
