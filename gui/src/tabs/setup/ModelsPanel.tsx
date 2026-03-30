@@ -1,5 +1,5 @@
 import React from 'react';
-import { Form, Select, Checkbox, Typography } from 'antd';
+import { Form, Select, Checkbox } from 'antd';
 import { useAppStore } from '../../store/useAppStore';
 
 const descriptions: Record<string, Record<string, string>> = {

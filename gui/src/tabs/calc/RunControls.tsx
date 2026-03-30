@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Button, Space, Checkbox, Divider, Statistic, InputNumber, Typography, Select, Collapse, Tag } from 'antd';
+import { Button, Space, Checkbox, Divider, Statistic, InputNumber, Typography, Select, Tag } from 'antd';
 import {
   CaretRightOutlined,
   PauseOutlined,

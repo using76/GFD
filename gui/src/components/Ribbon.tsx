@@ -565,7 +565,6 @@ const MeasureRibbon: React.FC = () => {
 // ============================================================
 const RepairRibbon: React.FC = () => {
   const addRepairLog = useAppStore((s) => s.addRepairLog);
-  const shapes = useAppStore((s) => s.shapes);
 
   const generateRepairIssues = () => {
     const state = useAppStore.getState();

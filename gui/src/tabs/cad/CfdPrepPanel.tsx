@@ -4,7 +4,6 @@ import {
   ExpandOutlined,
   ExperimentOutlined,
   CheckCircleOutlined,
-  AppstoreOutlined,
   ClearOutlined,
   SelectOutlined,
 } from '@ant-design/icons';

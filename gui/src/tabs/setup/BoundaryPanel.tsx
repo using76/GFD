@@ -22,7 +22,6 @@ const BoundaryPanel: React.FC = () => {
   const selectedBoundaryId = useAppStore((s) => s.selectedBoundaryId);
   const selectBoundary = useAppStore((s) => s.selectBoundary);
   const updateBoundary = useAppStore((s) => s.updateBoundary);
-  const meshSurfaces = useAppStore((s) => s.meshSurfaces);
   const meshGenerated = useAppStore((s) => s.meshGenerated);
 
   const selected = boundaries.find((b) => b.id === selectedBoundaryId);

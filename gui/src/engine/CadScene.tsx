@@ -2,7 +2,7 @@ import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { Edges, TransformControls } from '@react-three/drei';
 import { useFrame, useThree } from '@react-three/fiber';
 import { useAppStore } from '../store/useAppStore';
-import type { Shape, DefeatureIssue, DefeatureIssueKind, NamedSelection, RepairIssue, RepairIssueKind, MeasureLabel } from '../store/useAppStore';
+import type { Shape, DefeatureIssue, DefeatureIssueKind, NamedSelection, RepairIssue, RepairIssueKind } from '../store/useAppStore';
 import * as THREE from 'three';
 
 const degToRad = (d: number) => (d * Math.PI) / 180;
@@ -152,7 +152,6 @@ const EnclosureMaterial: React.FC<{ isSelected: boolean }> = ({ isSelected }) =>
     transparent
     opacity={0.08}
     wireframe={false}
-    depthWrite={false}
     side={THREE.DoubleSide}
     depthWrite={false}
   />
@@ -750,13 +749,14 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
         const solidDims = (shape.dimensions.subtractedSolidDims as Record<string, number>) || {};
         const solidRot = (shape.dimensions.subtractedSolidRotation as [number, number, number]) || [0, 0, 0];
         const rotRad: [number, number, number] = [degToRad(solidRot[0]), degToRad(solidRot[1]), degToRad(solidRot[2])];
+        const stlVerts = shape.stlData?.vertices;
 
         // Cutout geometry (the "hole" inside the enclosure)
-        const cutoutGeometry = solidKind === 'stl' && shape.stlData && shape.stlData.vertices ? (
+        const cutoutGeometry = solidKind === 'stl' && stlVerts ? (
           <bufferGeometry>
             <bufferAttribute
               attach="attributes-position"
-              args={[shape.stlData.vertices instanceof Float32Array ? shape.stlData.vertices : new Float32Array(shape.stlData.vertices as any), 3]}
+              args={[(stlVerts instanceof Float32Array ? stlVerts : new Float32Array(stlVerts as any)) as Float32Array, 3]}
             />
           </bufferGeometry>
         ) : solidKind === 'sphere' ? (
@@ -788,11 +788,11 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
             </mesh>
             {/* Wireframe outline of the cutout — always visible */}
             <mesh position={solidPos} rotation={rotRad}>
-              {solidKind === 'stl' && shape.stlData && shape.stlData.vertices ? (
+              {solidKind === 'stl' && stlVerts ? (
                 <bufferGeometry>
                   <bufferAttribute
                     attach="attributes-position"
-                    args={[shape.stlData.vertices instanceof Float32Array ? shape.stlData.vertices : new Float32Array(shape.stlData.vertices as any), 3]}
+                    args={[(stlVerts instanceof Float32Array ? stlVerts : new Float32Array(stlVerts as any)) as Float32Array, 3]}
                   />
                 </bufferGeometry>
               ) : solidKind === 'sphere' ? (

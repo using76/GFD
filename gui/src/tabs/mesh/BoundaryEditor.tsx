@@ -38,14 +38,6 @@ const BoundaryEditor: React.FC = () => {
     [meshSurfaces, editingSurfaceId]
   );
 
-  // All domain face surfaces (the 6 enclosure faces + interface)
-  const domainFaces = useMemo(
-    () => meshSurfaces.filter((s) =>
-      s.faceDirection !== 'custom' && s.id !== editingSurfaceId
-    ),
-    [meshSurfaces, editingSurfaceId]
-  );
-
   // Which faces are currently assigned to THIS boundary
   // A face is "assigned to this boundary" if this surface IS that face (same id)
   // Or if we track assignment differently: the editing surface has a faceDirection

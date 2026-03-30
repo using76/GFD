@@ -24,11 +24,11 @@ export interface Shape {
   kind: ShapeKind;
   position: [number, number, number];
   rotation: [number, number, number];
-  dimensions: Record<string, number>;
+  dimensions: Record<string, any>;
   stlData?: StlData;           // present when kind === 'stl'
   booleanRef?: string;         // id of BooleanOperation that produced this compound shape
   isEnclosure?: boolean;       // true for CFD prep enclosures
-  group?: 'body' | 'boolean' | 'enclosure'; // tree grouping
+  group?: 'body' | 'boolean' | 'enclosure' | 'extracted_solid'; // tree grouping
 }
 
 // ---- Defeaturing types ----
