@@ -20,6 +20,7 @@ export default function StatusBar() {
   const meshDisplayData = useAppStore((s) => s.meshDisplayData);
   const selectedEntity = useAppStore((s) => s.selectedEntity);
   const activeTool = useAppStore((s) => s.activeTool);
+  const transformMode = useAppStore((s) => s.transformMode);
   const selectionFilter = useAppStore((s) => s.selectionFilter);
   const exploded = useAppStore((s) => s.exploded);
   const transparencyMode = useAppStore((s) => s.transparencyMode);
@@ -82,6 +83,10 @@ export default function StatusBar() {
         <Text style={{ fontSize: 11, color: '#667' }}>
           Tool: {activeTool}
         </Text>
+
+        <Tag color={transformMode === 'translate' ? 'blue' : transformMode === 'rotate' ? 'orange' : 'green'} style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+          {transformMode.charAt(0).toUpperCase() + transformMode.slice(1)}
+        </Tag>
 
         <Text style={{ fontSize: 11, color: '#667' }}>
           Select: {selectionFilter}

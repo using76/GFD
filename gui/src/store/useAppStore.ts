@@ -1395,6 +1395,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           ...(state.useGpu ? [`[${now}] [GFD] GPU Acceleration: ENABLED (CUDA)`] : []),
           ...(state.useMpi ? [`[${now}] [GFD] MPI Parallel: ENABLED (${state.mpiCores} cores)`] : []),
           `[${now}] [GFD] Under-relaxation: P=${state.solverSettings.relaxPressure}, U=${state.solverSettings.relaxVelocity}, k/e=${state.solverSettings.relaxTurbulence}`,
+          ...(state.solverSettings.timeMode === 'transient' ? [
+            `[${now}] [GFD] Transient: dt=${state.solverSettings.timeStepSize}s, T_end=${state.solverSettings.totalTime}s, steps=${Math.ceil(state.solverSettings.totalTime / state.solverSettings.timeStepSize)}`,
+          ] : []),
           `[${now}] [GFD] Initializing fields...`,
           `[${now}] [GFD] Solver started.`,
           `[${now}] [GFD] ---`,
@@ -1439,14 +1442,22 @@ export const useAppStore = create<AppState>((set, get) => ({
         energy: energyEnabled ? 1e-2 * decay * (0.85 + 0.3 * noise(4)) : 0,
       };
       const ts = new Date().toLocaleTimeString();
-      const line = `[${ts}] [Iter ${String(iter).padStart(4)}] continuity=${point.continuity.toExponential(3)}  x-mom=${point.xMomentum.toExponential(3)}  y-mom=${point.yMomentum.toExponential(3)}  energy=${point.energy.toExponential(3)}`;
-      const maxIter = s.solverSettings.maxIterations;
+      const isTransient = s.solverSettings.timeMode === 'transient';
+      const currentTime = isTransient ? iter * s.solverSettings.timeStepSize : 0;
+      const timeStr = isTransient ? `  t=${currentTime.toFixed(4)}s` : '';
+      const line = `[${ts}] [Iter ${String(iter).padStart(4)}]${timeStr} continuity=${point.continuity.toExponential(3)}  x-mom=${point.xMomentum.toExponential(3)}  y-mom=${point.yMomentum.toExponential(3)}  energy=${point.energy.toExponential(3)}`;
 
-      // Check convergence: either max iterations reached or all residuals below tolerance
+      // Max iterations: for transient, use totalTime/timeStepSize; for steady, use maxIterations
+      const maxIter = isTransient
+        ? Math.ceil(s.solverSettings.totalTime / s.solverSettings.timeStepSize)
+        : s.solverSettings.maxIterations;
+
+      // Check convergence
       const tol = s.solverSettings.tolerance;
-      const converged = point.continuity < tol && point.xMomentum < tol && point.yMomentum < tol && point.energy < tol;
+      const converged = !isTransient && point.continuity < tol && point.xMomentum < tol && point.yMomentum < tol && point.energy < tol;
+      const timeFinished = isTransient && currentTime >= s.solverSettings.totalTime;
 
-      if (iter >= maxIter || converged) {
+      if (iter >= maxIter || converged || timeFinished) {
         if (solverInterval) clearInterval(solverInterval);
         solverInterval = null;
 
@@ -1562,7 +1573,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
 
         const finishTs = new Date().toLocaleTimeString();
-        const finishMsg = converged
+        const finishMsg = timeFinished
+          ? `[${finishTs}] [GFD] Transient simulation complete: t=${currentTime.toFixed(4)}s, ${iter} time steps.`
+          : converged
           ? `[${finishTs}] [GFD] Solution CONVERGED after ${iter} iterations (all residuals < ${tol.toExponential(1)}).`
           : `[${finishTs}] [GFD] Reached max iterations (${maxIter}). Final continuity residual: ${point.continuity.toExponential(3)}`;
 
