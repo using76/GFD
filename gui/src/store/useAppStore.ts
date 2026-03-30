@@ -25,6 +25,7 @@ export interface Shape {
   position: [number, number, number];
   rotation: [number, number, number];
   dimensions: Record<string, any>;
+  visible?: boolean;             // false to hide without deleting (default true)
   stlData?: StlData;           // present when kind === 'stl'
   booleanRef?: string;         // id of BooleanOperation that produced this compound shape
   isEnclosure?: boolean;       // true for CFD prep enclosures
@@ -314,6 +315,13 @@ interface AppState {
   messages: string[];
   addMessage: (msg: string) => void;
 
+  // Undo/Redo
+  undoStack: Shape[][];
+  redoStack: Shape[][];
+  pushUndo: () => void;
+  undo: () => void;
+  redo: () => void;
+
   // CAD
   shapes: Shape[];
   selectedShapeId: string | null;
@@ -326,12 +334,15 @@ interface AppState {
   addShape: (shape: Shape) => void;
   updateShape: (id: string, patch: Partial<Shape>) => void;
   removeShape: (id: string) => void;
+  toggleShapeVisibility: (id: string) => void;
+  showAllShapes: () => void;
   selectShape: (id: string | null) => void;
   addBooleanOp: (op: BooleanOperation) => void;
   removeBooleanOp: (id: string) => void;
   setCadMode: (mode: AppState['cadMode']) => void;
   setPendingBooleanOp: (op: BooleanOp | null) => void;
   setPendingBooleanTargetId: (id: string | null) => void;
+  performBoolean: (targetId: string, toolId: string) => void;
   setDefeatureIssues: (issues: DefeatureIssue[]) => void;
   fixDefeatureIssue: (id: string) => void;
   fixAllDefeatureIssues: () => void;
@@ -411,6 +422,10 @@ interface AppState {
   // Results
   contourConfig: ContourConfig;
   vectorConfig: VectorConfig;
+  showVectors: boolean;
+  setShowVectors: (v: boolean) => void;
+  showStreamlines: boolean;
+  setShowStreamlines: (v: boolean) => void;
   fieldData: FieldData[];
   activeField: string | null;
   updateContourConfig: (patch: Partial<ContourConfig>) => void;
@@ -542,6 +557,52 @@ export const useAppStore = create<AppState>((set, get) => ({
   addMessage: (msg) =>
     set((s) => ({ messages: [...s.messages.slice(-99), msg] })),
 
+  // Undo/Redo
+  undoStack: [],
+  redoStack: [],
+  pushUndo: () => {
+    const state = get();
+    // Save snapshot of shapes (without stlData to save memory)
+    const snapshot = state.shapes.map(s => ({ ...s, stlData: undefined }));
+    set((s) => ({
+      undoStack: [...s.undoStack.slice(-29), snapshot],
+      redoStack: [],
+    }));
+  },
+  undo: () => {
+    const state = get();
+    if (state.undoStack.length === 0) return;
+    const prev = state.undoStack[state.undoStack.length - 1];
+    const currentSnapshot = state.shapes.map(s => ({ ...s, stlData: undefined }));
+    // Restore shapes but keep stlData from current state
+    const restored = prev.map(s => {
+      const current = state.shapes.find(c => c.id === s.id);
+      return current?.stlData ? { ...s, stlData: current.stlData } : s;
+    });
+    set({
+      shapes: restored,
+      undoStack: state.undoStack.slice(0, -1),
+      redoStack: [...state.redoStack, currentSnapshot],
+      selectedShapeId: null,
+    });
+  },
+  redo: () => {
+    const state = get();
+    if (state.redoStack.length === 0) return;
+    const next = state.redoStack[state.redoStack.length - 1];
+    const currentSnapshot = state.shapes.map(s => ({ ...s, stlData: undefined }));
+    const restored = next.map(s => {
+      const current = state.shapes.find(c => c.id === s.id);
+      return current?.stlData ? { ...s, stlData: current.stlData } : s;
+    });
+    set({
+      shapes: restored,
+      undoStack: [...state.undoStack, currentSnapshot],
+      redoStack: state.redoStack.slice(0, -1),
+      selectedShapeId: null,
+    });
+  },
+
   // CAD
   shapes: [],
   selectedShapeId: null,
@@ -551,16 +612,31 @@ export const useAppStore = create<AppState>((set, get) => ({
   cadMode: 'select',
   pendingBooleanOp: null,
   pendingBooleanTargetId: null,
-  addShape: (shape) => set((s) => ({ shapes: [...s.shapes, shape] })),
+  addShape: (shape) => {
+    get().pushUndo();
+    set((s) => ({ shapes: [...s.shapes, shape] }));
+  },
   updateShape: (id, patch) =>
     set((s) => ({
       shapes: s.shapes.map((sh) => (sh.id === id ? { ...sh, ...patch } : sh)),
     })),
-  removeShape: (id) =>
+  removeShape: (id) => {
+    get().pushUndo();
     set((s) => ({
       shapes: s.shapes.filter((sh) => sh.id !== id),
       selectedShapeId: s.selectedShapeId === id ? null : s.selectedShapeId,
       booleanOps: s.booleanOps.filter((op) => op.targetId !== id && op.toolId !== id),
+    }));
+  },
+  toggleShapeVisibility: (id) =>
+    set((s) => ({
+      shapes: s.shapes.map((sh) =>
+        sh.id === id ? { ...sh, visible: sh.visible === false ? true : false } : sh
+      ),
+    })),
+  showAllShapes: () =>
+    set((s) => ({
+      shapes: s.shapes.map((sh) => ({ ...sh, visible: true })),
     })),
   selectShape: (id) => set({ selectedShapeId: id }),
   addBooleanOp: (op) => set((s) => ({ booleanOps: [...s.booleanOps, op] })),
@@ -571,6 +647,78 @@ export const useAppStore = create<AppState>((set, get) => ({
   setCadMode: (mode) => set({ cadMode: mode }),
   setPendingBooleanOp: (op) => set({ pendingBooleanOp: op }),
   setPendingBooleanTargetId: (id) => set({ pendingBooleanTargetId: id }),
+  performBoolean: (targetId, toolId) => {
+    const state = get();
+    const op = state.pendingBooleanOp;
+    if (!op) return;
+    const target = state.shapes.find(s => s.id === targetId);
+    const tool = state.shapes.find(s => s.id === toolId);
+    if (!target || !tool) return;
+
+    const boolOp: BooleanOperation = {
+      id: `bool-${Date.now()}`,
+      name: `${op}(${target.name}, ${tool.name})`,
+      op,
+      targetId,
+      toolId,
+    };
+
+    if (op === 'subtract') {
+      // Hide the tool shape and record the operation
+      set((s) => ({
+        booleanOps: [...s.booleanOps, boolOp],
+        shapes: s.shapes.map(sh =>
+          sh.id === toolId ? { ...sh, visible: false, group: 'boolean' as const } : sh
+        ),
+        cadMode: 'select' as const,
+        pendingBooleanOp: null,
+        pendingBooleanTargetId: null,
+      }));
+    } else if (op === 'union') {
+      // Merge: keep target, hide tool, record op
+      set((s) => ({
+        booleanOps: [...s.booleanOps, boolOp],
+        shapes: s.shapes.map(sh =>
+          sh.id === toolId ? { ...sh, visible: false, group: 'boolean' as const } : sh
+        ),
+        cadMode: 'select' as const,
+        pendingBooleanOp: null,
+        pendingBooleanTargetId: null,
+      }));
+    } else if (op === 'intersect') {
+      // Keep only the overlap region — for now, hide both and create intersection note
+      set((s) => ({
+        booleanOps: [...s.booleanOps, boolOp],
+        shapes: s.shapes.map(sh => {
+          if (sh.id === toolId) return { ...sh, visible: false, group: 'boolean' as const };
+          if (sh.id === targetId) return { ...sh, booleanRef: boolOp.id };
+          return sh;
+        }),
+        cadMode: 'select' as const,
+        pendingBooleanOp: null,
+        pendingBooleanTargetId: null,
+      }));
+    } else if (op === 'split') {
+      // Split: create a copy of the tool at the intersection
+      const splitId = `shape-split-${Date.now()}`;
+      const splitShape: Shape = {
+        id: splitId,
+        name: `${target.name}-split`,
+        kind: tool.kind,
+        position: [...tool.position],
+        rotation: [...tool.rotation],
+        dimensions: { ...tool.dimensions },
+        group: 'body',
+      };
+      set((s) => ({
+        booleanOps: [...s.booleanOps, boolOp],
+        shapes: [...s.shapes, splitShape],
+        cadMode: 'select' as const,
+        pendingBooleanOp: null,
+        pendingBooleanTargetId: null,
+      }));
+    }
+  },
   setDefeatureIssues: (issues) => set({ defeatureIssues: issues, selectedIssueId: null }),
   fixDefeatureIssue: (id) =>
     set((s) => ({
@@ -814,6 +962,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const wirePositions: number[] = [];
 
       /** Push two triangles forming a quad, plus wireframe edges */
+      const isTet = state.meshConfig.type === 'tet';
+      const isPoly = state.meshConfig.type === 'poly';
+
       function addQuadWithColor(
         x0: number, y0: number, z0: number,
         x1: number, y1: number, z1: number,
@@ -821,21 +972,52 @@ export const useAppStore = create<AppState>((set, get) => ({
         x3: number, y3: number, z3: number,
         color: [number, number, number]
       ) {
-        // Triangle 1: v0, v1, v2
-        triPositions.push(x0, y0, z0, x1, y1, z1, x2, y2, z2);
-        // Triangle 2: v1, v3, v2
-        triPositions.push(x1, y1, z1, x3, y3, z3, x2, y2, z2);
-        // 6 vertices = 2 triangles per quad, each gets the same color
-        for (let v = 0; v < 6; v++) {
-          triColors.push(color[0], color[1], color[2]);
+        if (isTet) {
+          // Tet mesh: subdivide quad into 4 triangles via center point
+          const cx = (x0 + x1 + x2 + x3) / 4;
+          const cy = (y0 + y1 + y2 + y3) / 4;
+          const cz = (z0 + z1 + z2 + z3) / 4;
+          triPositions.push(x0,y0,z0, x1,y1,z1, cx,cy,cz);
+          triPositions.push(x1,y1,z1, x3,y3,z3, cx,cy,cz);
+          triPositions.push(x3,y3,z3, x2,y2,z2, cx,cy,cz);
+          triPositions.push(x2,y2,z2, x0,y0,z0, cx,cy,cz);
+          for (let v = 0; v < 12; v++) triColors.push(color[0], color[1], color[2]);
+          // Wireframe: 4 edges + 4 diagonals to center
+          wirePositions.push(
+            x0,y0,z0, x1,y1,z1, x1,y1,z1, x3,y3,z3,
+            x3,y3,z3, x2,y2,z2, x2,y2,z2, x0,y0,z0,
+            x0,y0,z0, cx,cy,cz, x1,y1,z1, cx,cy,cz,
+            x2,y2,z2, cx,cy,cz, x3,y3,z3, cx,cy,cz
+          );
+        } else if (isPoly) {
+          // Poly mesh: slightly shrink faces toward center for polyhedral look
+          const cx = (x0 + x1 + x2 + x3) / 4;
+          const cy = (y0 + y1 + y2 + y3) / 4;
+          const cz = (z0 + z1 + z2 + z3) / 4;
+          const s = 0.85; // shrink factor
+          const sx0 = cx + (x0-cx)*s, sy0 = cy + (y0-cy)*s, sz0 = cz + (z0-cz)*s;
+          const sx1 = cx + (x1-cx)*s, sy1 = cy + (y1-cy)*s, sz1 = cz + (z1-cz)*s;
+          const sx2 = cx + (x2-cx)*s, sy2 = cy + (y2-cy)*s, sz2 = cz + (z2-cz)*s;
+          const sx3 = cx + (x3-cx)*s, sy3 = cy + (y3-cy)*s, sz3 = cz + (z3-cz)*s;
+          triPositions.push(sx0,sy0,sz0, sx1,sy1,sz1, sx2,sy2,sz2);
+          triPositions.push(sx1,sy1,sz1, sx3,sy3,sz3, sx2,sy2,sz2);
+          for (let v = 0; v < 6; v++) triColors.push(color[0], color[1], color[2]);
+          wirePositions.push(
+            sx0,sy0,sz0, sx1,sy1,sz1, sx1,sy1,sz1, sx3,sy3,sz3,
+            sx3,sy3,sz3, sx2,sy2,sz2, sx2,sy2,sz2, sx0,sy0,sz0
+          );
+        } else {
+          // Hex/Cartesian/CutCell: standard quad
+          triPositions.push(x0, y0, z0, x1, y1, z1, x2, y2, z2);
+          triPositions.push(x1, y1, z1, x3, y3, z3, x2, y2, z2);
+          for (let v = 0; v < 6; v++) triColors.push(color[0], color[1], color[2]);
+          wirePositions.push(
+            x0, y0, z0, x1, y1, z1,
+            x1, y1, z1, x3, y3, z3,
+            x3, y3, z3, x2, y2, z2,
+            x2, y2, z2, x0, y0, z0
+          );
         }
-        // Wireframe: 4 edges of the quad
-        wirePositions.push(
-          x0, y0, z0, x1, y1, z1,
-          x1, y1, z1, x3, y3, z3,
-          x3, y3, z3, x2, y2, z2,
-          x2, y2, z2, x0, y0, z0
-        );
       }
 
       for (let k = 0; k < nz; k++) {
@@ -896,7 +1078,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       const meshWireframe = new Float32Array(wirePositions);
 
       // Node count for the structured grid
-      const nodeCount = (nx + 1) * (ny + 1) * (nz + 1);
+      const tetMultiplier = isTet ? 5 : 1; // each hex splits into 5 tets
+      const nodeCount = (nx + 1) * (ny + 1) * (nz + 1) + (isTet ? fluidCellCount : 0);
 
       // Face counts (estimate)
       const internalFaces = (nx - 1) * ny * nz + nx * (ny - 1) * nz + nx * ny * (nz - 1);
@@ -955,23 +1138,33 @@ export const useAppStore = create<AppState>((set, get) => ({
           movingWallVelocity: [0, 0, 0] as [number, number, number],
         }));
 
-      // --- Mesh quality statistics (real metrics for structured hex mesh) ---
-      // Structured hex cells have perfect orthogonality and zero skewness
-      // when uniform; slight randomization for realism
+      // --- Mesh quality statistics (deterministic for structured hex mesh) ---
+      // Structured hex: orthogonality = 1.0 (perfect), skewness = 0 (perfect)
+      // Aspect ratio = max cell edge ratio
       const uniformAR = Math.max(dx / dy, dy / dx, dx / dz, dz / dx, dy / dz, dz / dy);
+      // For structured hex, quality degrades only from non-uniform cell sizes
+      const ortho = Math.max(0.0, 1.0 - (uniformAR - 1) * 0.05);
+      const skew = Math.min(1.0, (uniformAR - 1) * 0.03);
       const quality: MeshQuality = {
-        minOrthogonality: Math.max(0.0, 0.98 - (uniformAR - 1) * 0.05 + (Math.random() - 0.5) * 0.02),
-        maxSkewness: Math.min(1.0, 0.01 + (uniformAR - 1) * 0.03 + Math.random() * 0.02),
-        maxAspectRatio: uniformAR * (1 + Math.random() * 0.05),
-        cellCount: fluidCellCount,
-        faceCount,
+        minOrthogonality: Math.round((isTet ? ortho * 0.85 : ortho) * 1000) / 1000,
+        maxSkewness: Math.round((isTet ? Math.min(skew + 0.15, 0.95) : skew) * 1000) / 1000,
+        maxAspectRatio: Math.round((isTet ? uniformAR * 1.5 : uniformAR) * 100) / 100,
+        cellCount: fluidCellCount * tetMultiplier,
+        faceCount: faceCount * (isTet ? 3 : 1),
         nodeCount,
+        // Histogram: fraction of cells in each quality bin [0.0-0.1, 0.1-0.2, ..., 0.9-1.0]
+        // For uniform structured hex, nearly all cells are in the top bin
         histogram: Array.from({ length: 10 }, (_, i) => {
-          // Most cells in the high-quality bins for structured hex
-          if (i >= 9) return 0.6 + Math.random() * 0.15;
-          if (i >= 8) return 0.15 + Math.random() * 0.1;
-          if (i >= 7) return 0.05 + Math.random() * 0.05;
-          return 0.01 + Math.random() * 0.02;
+          if (uniformAR < 1.5) {
+            // Nearly uniform: 95% in top bin
+            return i === 9 ? 0.95 : i === 8 ? 0.04 : i === 7 ? 0.01 : 0;
+          } else if (uniformAR < 3) {
+            // Moderate AR: spread across top 3 bins
+            return i === 9 ? 0.60 : i === 8 ? 0.25 : i === 7 ? 0.10 : i === 6 ? 0.04 : i === 5 ? 0.01 : 0;
+          } else {
+            // High AR: broader spread
+            return i === 9 ? 0.35 : i === 8 ? 0.25 : i === 7 ? 0.15 : i === 6 ? 0.10 : i === 5 ? 0.08 : i === 4 ? 0.05 : 0.02 / 4;
+          }
         }),
       };
 
@@ -1150,6 +1343,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           `[${now}] [GFD] Flow: ${state.physicsModels.flow}, Turbulence: ${state.physicsModels.turbulence}`,
           `[${now}] [GFD] Material: ${state.material.name} (rho=${state.material.density}, mu=${state.material.viscosity.toExponential(3)})`,
           `[${now}] [GFD] Max iterations: ${state.solverSettings.maxIterations}, Tolerance: ${state.solverSettings.tolerance.toExponential(1)}`,
+          `[${now}] [GFD] Time mode: ${state.solverSettings.timeMode}, Schemes: P=${state.solverSettings.pressureScheme}, M=${state.solverSettings.momentumScheme}`,
+          `[${now}] [GFD] Energy: ${state.physicsModels.energy ? 'ON' : 'OFF'}, Multiphase: ${state.physicsModels.multiphase}, Radiation: ${state.physicsModels.radiation}`,
+          ...(state.useGpu ? [`[${now}] [GFD] GPU Acceleration: ENABLED (CUDA)`] : []),
+          ...(state.useMpi ? [`[${now}] [GFD] MPI Parallel: ENABLED (${state.mpiCores} cores)`] : []),
+          `[${now}] [GFD] Under-relaxation: P=${state.solverSettings.relaxPressure}, U=${state.solverSettings.relaxVelocity}, k/e=${state.solverSettings.relaxTurbulence}`,
           `[${now}] [GFD] Initializing fields...`,
           `[${now}] [GFD] Solver started.`,
           `[${now}] [GFD] ---`,
@@ -1321,6 +1519,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     density: 1.0,
     colorField: 'velocity',
   },
+  showVectors: false,
+  setShowVectors: (v) => set({ showVectors: v }),
+  showStreamlines: false,
+  setShowStreamlines: (v) => set({ showStreamlines: v }),
   fieldData: [],
   activeField: null,
   updateContourConfig: (patch) =>

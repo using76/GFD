@@ -28,6 +28,46 @@ function jetColor(t: number): [number, number, number] {
   return [r, g, b];
 }
 
+/** Rainbow colormap: red -> yellow -> green -> cyan -> blue -> magenta */
+function rainbowColor(t: number): [number, number, number] {
+  const c = Math.max(0, Math.min(1, t));
+  const h = (1 - c) * 0.85; // Hue from 0.85 (purple) to 0 (red)
+  const s = 1, l = 0.5;
+  // HSL to RGB
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h * 12) % 12;
+    return l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+  };
+  return [f(0), f(8), f(4)];
+}
+
+/** Grayscale colormap */
+function grayscaleColor(t: number): [number, number, number] {
+  const c = Math.max(0, Math.min(1, t));
+  return [c, c, c];
+}
+
+/** Cool-warm (diverging) colormap: blue -> white -> red */
+function coolwarmColor(t: number): [number, number, number] {
+  const c = Math.max(0, Math.min(1, t));
+  if (c < 0.5) {
+    const s = c * 2; // 0..1
+    return [s, s, 1]; // blue -> white
+  } else {
+    const s = (c - 0.5) * 2; // 0..1
+    return [1, 1 - s, 1 - s]; // white -> red
+  }
+}
+
+type ColormapFn = (t: number) => [number, number, number];
+const colormapFns: Record<string, ColormapFn> = {
+  jet: jetColor,
+  rainbow: rainbowColor,
+  grayscale: grayscaleColor,
+  coolwarm: coolwarmColor,
+};
+
 /**
  * Build contour vertex colors from field data.
  */
@@ -35,13 +75,15 @@ function buildContourColors(
   vertexCount: number,
   fieldValues: Float32Array,
   fieldMin: number,
-  fieldMax: number
+  fieldMax: number,
+  colormap: string = 'jet'
 ): Float32Array {
   const colors = new Float32Array(vertexCount * 3);
   const range = fieldMax - fieldMin || 1;
+  const cmFn = colormapFns[colormap] ?? jetColor;
   for (let i = 0; i < Math.min(vertexCount, fieldValues.length); i++) {
     const t = (fieldValues[i] - fieldMin) / range;
-    const [r, g, b] = jetColor(t);
+    const [r, g, b] = cmFn(t);
     colors[i * 3] = r;
     colors[i * 3 + 1] = g;
     colors[i * 3 + 2] = b;
@@ -156,7 +198,7 @@ export default function MeshRenderer() {
     const fMin = contourConfig.autoRange ? field.min : contourConfig.min;
     const fMax = contourConfig.autoRange ? field.max : contourConfig.max;
     const vertexCount = meshDisplayData.positions.length / 3;
-    const colors = buildContourColors(vertexCount, field.values, fMin, fMax);
+    const colors = buildContourColors(vertexCount, field.values, fMin, fMax, contourConfig.colormap);
     geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
     const colorAttr = geom.getAttribute('color') as THREE.BufferAttribute;

@@ -180,7 +180,7 @@ const CfdPrepPanel: React.FC = () => {
     });
 
     // Hide the original solid (don't delete — mark as hidden so cutout stays)
-    state.updateShape(selectedBody, { group: 'extracted_solid' } as any);
+    state.updateShape(selectedBody, { group: 'extracted_solid' });
 
     setFluidExtracted(true);
     if (cfdPrepStep < 2) setCfdPrepStep(2);

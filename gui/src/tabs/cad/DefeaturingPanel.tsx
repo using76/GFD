@@ -44,146 +44,132 @@ const issueFixLabels: Record<DefeatureIssueKind, string> = {
   gap: 'Fix',
 };
 
-/** Generate simulated defeaturing issues with 3D positions based on shapes in the store */
+/** Analyze shape geometry deterministically to find defeaturing issues */
 function generateIssues(
-  shapes: { id: string; position: [number, number, number]; dimensions: Record<string, number> }[],
+  shapes: { id: string; name?: string; kind?: string; position: [number, number, number]; dimensions: Record<string, any> }[],
   thresholds: { minFaceArea: number; minEdgeLength: number; maxHoleDia: number; maxFilletR: number }
 ): DefeatureIssue[] {
   const issues: DefeatureIssue[] = [];
   let id = 0;
 
-  // If no shapes, generate issues around the origin
-  const targets = shapes.length > 0
-    ? shapes
-    : [{ id: 'origin', position: [0, 0, 0] as [number, number, number], dimensions: { width: 2, height: 2, depth: 2 } }];
+  if (shapes.length === 0) return issues;
 
-  for (const shape of targets) {
+  for (const shape of shapes) {
     const pos = shape.position;
-    const hw = (shape.dimensions.width ?? shape.dimensions.radius ?? 0.5) / 2;
-    const hh = (shape.dimensions.height ?? shape.dimensions.radius ?? 0.5) / 2;
-    const hd = (shape.dimensions.depth ?? shape.dimensions.radius ?? 0.5) / 2;
+    const d = shape.dimensions;
+    const hw = (d.width ?? d.radius ?? 0.5) / 2;
+    const hh = (d.height ?? d.radius ?? 0.5) / 2;
+    const hd = (d.depth ?? d.radius ?? 0.5) / 2;
+    const name = shape.name ?? shape.id;
 
-    // Small faces near edges/corners of the shape
-    const numSmallFaces = 2 + Math.floor(Math.random() * 4);
-    for (let i = 0; i < numSmallFaces; i++) {
-      const area = Math.random() * thresholds.minFaceArea;
-      // Position near a random face of the shape
-      const faceIdx = Math.floor(Math.random() * 6);
-      const offset: [number, number, number] = [0, 0, 0];
-      if (faceIdx === 0) offset[0] = hw;
-      else if (faceIdx === 1) offset[0] = -hw;
-      else if (faceIdx === 2) offset[1] = hh;
-      else if (faceIdx === 3) offset[1] = -hh;
-      else if (faceIdx === 4) offset[2] = hd;
-      else offset[2] = -hd;
-      // Add slight random jitter
-      const jitter = () => (Math.random() - 0.5) * 0.2;
-      issues.push({
-        id: `df-${id++}`,
-        kind: 'small_face',
-        description: `Face area ${area.toExponential(2)} m\u00B2 (< ${thresholds.minFaceArea})`,
-        size: area,
-        fixed: false,
-        position: [
-          pos[0] + offset[0] + jitter(),
-          pos[1] + offset[1] + jitter(),
-          pos[2] + offset[2] + jitter(),
-        ],
-        shapeId: shape.id,
-      });
-    }
-
-    // Short edges along shape edges
-    const numShortEdges = 1 + Math.floor(Math.random() * 3);
-    for (let i = 0; i < numShortEdges; i++) {
-      const len = Math.random() * thresholds.minEdgeLength;
-      // Position along an edge
-      const edgeAxis = Math.floor(Math.random() * 3);
-      const sign1 = Math.random() > 0.5 ? 1 : -1;
-      const sign2 = Math.random() > 0.5 ? 1 : -1;
-      const extents = [hw, hh, hd];
-      const edgePos: [number, number, number] = [pos[0], pos[1], pos[2]];
-      const axes = [0, 1, 2].filter((a) => a !== edgeAxis);
-      edgePos[axes[0]] += extents[axes[0]] * sign1;
-      edgePos[axes[1]] += extents[axes[1]] * sign2;
-      edgePos[edgeAxis] += (Math.random() - 0.5) * extents[edgeAxis];
-      issues.push({
-        id: `df-${id++}`,
-        kind: 'short_edge',
-        description: `Edge length ${len.toFixed(4)} m (< ${thresholds.minEdgeLength})`,
-        size: len,
-        fixed: false,
-        position: edgePos,
-        shapeId: shape.id,
-      });
-    }
-
-    // Small holes on faces
-    const numHoles = 1 + Math.floor(Math.random() * 2);
-    for (let i = 0; i < numHoles; i++) {
-      const dia = Math.random() * thresholds.maxHoleDia;
-      const faceIdx = Math.floor(Math.random() * 6);
-      const holePos: [number, number, number] = [pos[0], pos[1], pos[2]];
-      if (faceIdx < 2) {
-        holePos[0] += faceIdx === 0 ? hw : -hw;
-        holePos[1] += (Math.random() - 0.5) * hh;
-        holePos[2] += (Math.random() - 0.5) * hd;
-      } else if (faceIdx < 4) {
-        holePos[1] += faceIdx === 2 ? hh : -hh;
-        holePos[0] += (Math.random() - 0.5) * hw;
-        holePos[2] += (Math.random() - 0.5) * hd;
-      } else {
-        holePos[2] += faceIdx === 4 ? hd : -hd;
-        holePos[0] += (Math.random() - 0.5) * hw;
-        holePos[1] += (Math.random() - 0.5) * hh;
+    // Check for small faces: faces smaller than threshold
+    const faceAreas = [
+      hw * 2 * hh * 2, // xz face (top/bottom)
+      hw * 2 * hd * 2, // xy face (front/back)
+      hh * 2 * hd * 2, // yz face (left/right)
+    ];
+    faceAreas.forEach((area, fi) => {
+      if (area < thresholds.minFaceArea) {
+        const faceNames = ['top', 'front', 'side'];
+        const offset: [number, number, number] = [0, 0, 0];
+        if (fi === 0) offset[1] = hh;
+        else if (fi === 1) offset[2] = hd;
+        else offset[0] = hw;
+        issues.push({
+          id: `df-${id++}`, kind: 'small_face',
+          description: `Small ${faceNames[fi]} face on "${name}": ${area.toFixed(4)} m² (< ${thresholds.minFaceArea})`,
+          size: area, fixed: false,
+          position: [pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]],
+          shapeId: shape.id,
+        });
       }
+    });
+
+    // Check for short edges: edges shorter than threshold
+    const edgeLengths = [hw * 2, hh * 2, hd * 2];
+    const edgeLabels = ['width', 'height', 'depth'];
+    edgeLengths.forEach((len, ei) => {
+      if (len < thresholds.minEdgeLength) {
+        const edgePos: [number, number, number] = [...pos];
+        if (ei === 0) { edgePos[1] += hh; edgePos[2] += hd; }
+        else if (ei === 1) { edgePos[0] += hw; edgePos[2] += hd; }
+        else { edgePos[0] += hw; edgePos[1] += hh; }
+        issues.push({
+          id: `df-${id++}`, kind: 'short_edge',
+          description: `Short ${edgeLabels[ei]} edge on "${name}": ${len.toFixed(4)} m (< ${thresholds.minEdgeLength})`,
+          size: len, fixed: false,
+          position: edgePos,
+          shapeId: shape.id,
+        });
+      }
+    });
+
+    // Check for sliver faces: aspect ratio > 10
+    const faceARs = [
+      { ar: (hw * 2) / Math.max(hh * 2, 0.001), face: 'front' },
+      { ar: (hw * 2) / Math.max(hd * 2, 0.001), face: 'top' },
+      { ar: (hh * 2) / Math.max(hd * 2, 0.001), face: 'side' },
+    ];
+    faceARs.forEach(({ ar, face }) => {
+      const actualAR = Math.max(ar, 1 / ar);
+      if (actualAR > 10) {
+        issues.push({
+          id: `df-${id++}`, kind: 'sliver_face',
+          description: `Sliver ${face} face on "${name}": AR=${actualAR.toFixed(1)}`,
+          size: actualAR, fixed: false,
+          position: [...pos],
+          shapeId: shape.id,
+        });
+      }
+    });
+
+    // Check for fillets that should be removed
+    if ((d.filletRadius ?? 0) > 0 && d.filletRadius < thresholds.maxFilletR) {
       issues.push({
-        id: `df-${id++}`,
-        kind: 'small_hole',
-        description: `Hole diameter ${dia.toFixed(3)} m (< ${thresholds.maxHoleDia})`,
-        size: dia,
-        fixed: false,
-        position: holePos,
+        id: `df-${id++}`, kind: 'small_face',
+        description: `Small fillet on "${name}": R=${d.filletRadius.toFixed(3)} m (< ${thresholds.maxFilletR})`,
+        size: d.filletRadius, fixed: false,
+        position: [pos[0] + hw, pos[1] + hh, pos[2]],
         shapeId: shape.id,
       });
     }
 
-    // Sliver faces (occasional)
-    if (Math.random() > 0.4) {
-      const ar = 20 + Math.random() * 80;
-      const sliverPos: [number, number, number] = [
-        pos[0] + (Math.random() - 0.5) * hw * 1.5,
-        pos[1] + (Math.random() > 0.5 ? hh : -hh),
-        pos[2] + (Math.random() - 0.5) * hd * 1.5,
-      ];
-      issues.push({
-        id: `df-${id++}`,
-        kind: 'sliver_face',
-        description: `Sliver face with aspect ratio ${ar.toFixed(1)}`,
-        size: ar,
-        fixed: false,
-        position: sliverPos,
-        shapeId: shape.id,
-      });
+    // Check for holes (pipe inner radius)
+    if (shape.kind === 'pipe' && (d.innerRadius ?? 0) > 0) {
+      const holeDia = d.innerRadius * 2;
+      if (holeDia < thresholds.maxHoleDia) {
+        issues.push({
+          id: `df-${id++}`, kind: 'small_hole',
+          description: `Small hole in "${name}": dia=${holeDia.toFixed(3)} m (< ${thresholds.maxHoleDia})`,
+          size: holeDia, fixed: false,
+          position: [pos[0], pos[1] + hh, pos[2]],
+          shapeId: shape.id,
+        });
+      }
     }
+  }
 
-    // Gaps between bodies (only if multiple shapes)
-    if (targets.length > 1 && Math.random() > 0.5) {
-      const gap = Math.random() * 0.05;
-      const gapPos: [number, number, number] = [
-        pos[0] + hw + gap / 2,
-        pos[1],
-        pos[2],
-      ];
-      issues.push({
-        id: `df-${id++}`,
-        kind: 'gap',
-        description: `Gap ${gap.toFixed(4)} m between adjacent bodies`,
-        size: gap,
-        fixed: false,
-        position: gapPos,
-        shapeId: shape.id,
-      });
+  // Check for gaps between adjacent shapes
+  for (let i = 0; i < shapes.length; i++) {
+    for (let j = i + 1; j < shapes.length; j++) {
+      const a = shapes[i], b = shapes[j];
+      const dist = Math.sqrt(
+        (a.position[0] - b.position[0]) ** 2 +
+        (a.position[1] - b.position[1]) ** 2 +
+        (a.position[2] - b.position[2]) ** 2
+      );
+      const aSize = Math.max(a.dimensions.width ?? 0, a.dimensions.radius ?? 0, a.dimensions.height ?? 0);
+      const bSize = Math.max(b.dimensions.width ?? 0, b.dimensions.radius ?? 0, b.dimensions.height ?? 0);
+      const gapDist = dist - (aSize + bSize) / 2;
+      if (gapDist > 0 && gapDist < 0.1) {
+        issues.push({
+          id: `df-${id++}`, kind: 'gap',
+          description: `Gap ${gapDist.toFixed(4)} m between "${a.name ?? a.id}" and "${b.name ?? b.id}"`,
+          size: gapDist, fixed: false,
+          position: [(a.position[0] + b.position[0]) / 2, (a.position[1] + b.position[1]) / 2, (a.position[2] + b.position[2]) / 2],
+          shapeId: a.id,
+        });
+      }
     }
   }
 

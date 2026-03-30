@@ -1,129 +1,29 @@
-import React, { useCallback, useRef } from 'react';
+import React from 'react';
 import { useAppStore } from '../store/useAppStore';
-import type { MeasurePoint } from '../store/useAppStore';
 
 /**
  * MeasureOverlay renders measurement labels as HTML overlay on top of the 3D Canvas.
- * When measureMode is active, clicking on the viewport generates measurement results.
- *
- * Now tracks 3D world positions: clicks are mapped to a ground plane (Y=0) via simple
- * ray-plane intersection using normalized device coordinates. This gives meaningful
- * 3D positions for the measurement markers in CadScene.
+ * All measurement click handling is done by CadScene's MeasureClickHandler via Three.js raycasting.
+ * This component is purely visual (pointerEvents: none).
  */
 const MeasureOverlay: React.FC = () => {
   const measureMode = useAppStore((s) => s.measureMode);
   const measureLabels = useAppStore((s) => s.measureLabels);
   const measurePoints = useAppStore((s) => s.measurePoints);
-  const addMeasureLabel = useAppStore((s) => s.addMeasureLabel);
-  const addMeasurePoint = useAppStore((s) => s.addMeasurePoint);
-  const clearMeasurePoints = useAppStore((s) => s.clearMeasurePoints);
-  const overlayRef = useRef<HTMLDivElement>(null);
-  const labelCounter = useRef(0);
-
-  /** Convert screen click to approximate 3D world position.
-   *  Uses a simple mapping: screen coords -> world coords on Y=0 plane.
-   *  The viewport is treated as mapping to a [-3, 3] x [-3, 3] world range. */
-  const screenToWorld = useCallback((screenX: number, screenY: number, rect: DOMRect): [number, number, number] => {
-    const nx = (screenX / rect.width) * 2 - 1;
-    const ny = -((screenY / rect.height) * 2 - 1);
-    // Map to world coordinates on Y=0 plane, approximate based on default camera
-    const worldX = nx * 3;
-    const worldY = 0;
-    const worldZ = ny * 3;
-    return [worldX, worldY, worldZ];
-  }, []);
-
-  const handleClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (!measureMode) return;
-
-      const rect = overlayRef.current?.getBoundingClientRect();
-      if (!rect) return;
-
-      const screenX = e.clientX - rect.left;
-      const screenY = e.clientY - rect.top;
-      const worldPos = screenToWorld(screenX, screenY, rect);
-      const newPoint: MeasurePoint = { worldPos, screenPos: [screenX, screenY] };
-
-      if (measureMode === 'distance') {
-        const allPoints = [...measurePoints, newPoint];
-        if (allPoints.length >= 2) {
-          const p1 = allPoints[0];
-          const p2 = allPoints[1];
-          const dx = p2.worldPos[0] - p1.worldPos[0];
-          const dy = p2.worldPos[1] - p1.worldPos[1];
-          const dz = p2.worldPos[2] - p1.worldPos[2];
-          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-
-          const id = `meas-${++labelCounter.current}`;
-          addMeasureLabel({
-            id,
-            text: `${dist.toFixed(3)} m`,
-            position: p1.worldPos,
-            endPosition: p2.worldPos,
-            screenPos: p1.screenPos,
-            screenEndPos: p2.screenPos,
-          });
-          clearMeasurePoints();
-        } else {
-          addMeasurePoint(newPoint);
-        }
-      } else if (measureMode === 'angle') {
-        const allPoints = [...measurePoints, newPoint];
-        if (allPoints.length >= 3) {
-          const p1 = allPoints[0];
-          const p2 = allPoints[1]; // vertex
-          const p3 = allPoints[2];
-          const v1 = [p1.worldPos[0] - p2.worldPos[0], p1.worldPos[1] - p2.worldPos[1], p1.worldPos[2] - p2.worldPos[2]];
-          const v2 = [p3.worldPos[0] - p2.worldPos[0], p3.worldPos[1] - p2.worldPos[1], p3.worldPos[2] - p2.worldPos[2]];
-          const dot = v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2];
-          const mag1 = Math.sqrt(v1[0] * v1[0] + v1[1] * v1[1] + v1[2] * v1[2]);
-          const mag2 = Math.sqrt(v2[0] * v2[0] + v2[1] * v2[1] + v2[2] * v2[2]);
-          const angle = mag1 > 0 && mag2 > 0
-            ? (Math.acos(Math.max(-1, Math.min(1, dot / (mag1 * mag2)))) * 180 / Math.PI).toFixed(1)
-            : '0.0';
-
-          const id = `meas-${++labelCounter.current}`;
-          addMeasureLabel({
-            id,
-            text: `${angle} deg`,
-            position: p2.worldPos,
-            screenPos: p2.screenPos,
-          });
-          clearMeasurePoints();
-        } else {
-          addMeasurePoint(newPoint);
-        }
-      } else if (measureMode === 'area') {
-        const area = (0.5 + Math.random() * 2.0).toFixed(4);
-        const id = `meas-${++labelCounter.current}`;
-        addMeasureLabel({
-          id,
-          text: `${area} m^2`,
-          position: worldPos,
-          screenPos: [screenX, screenY],
-        });
-        clearMeasurePoints();
-      }
-    },
-    [measureMode, measurePoints, addMeasureLabel, addMeasurePoint, clearMeasurePoints, screenToWorld]
-  );
 
   if (!measureMode && measureLabels.length === 0) return null;
 
   return (
     <div
-      ref={overlayRef}
-      onClick={handleClick}
       style={{
         position: 'absolute',
         top: 0,
         left: 0,
         width: '100%',
         height: '100%',
-        pointerEvents: measureMode ? 'auto' : 'none',
+        pointerEvents: 'none',
         zIndex: measureMode ? 20 : 5,
-        cursor: measureMode ? 'crosshair' : 'default',
+        cursor: 'default',
       }}
     >
       {/* Instruction banner when measure is active */}

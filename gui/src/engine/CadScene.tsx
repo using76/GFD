@@ -656,22 +656,7 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
       }
       if (cadMode === 'boolean_select_tool' && pendingBooleanOp && pendingBooleanTargetId) {
         if (shape.id === pendingBooleanTargetId) return; // can't use same shape
-        const opId = `bool-${Date.now()}`;
-        useAppStore.getState().addBooleanOp({
-          id: opId,
-          name: `${pendingBooleanOp}: ${useAppStore.getState().shapes.find((s) => s.id === pendingBooleanTargetId)?.name} / ${shape.name}`,
-          op: pendingBooleanOp,
-          targetId: pendingBooleanTargetId,
-          toolId: shape.id,
-        });
-        // Mark tool shape with boolean ref
-        useAppStore.getState().updateShape(shape.id, {
-          booleanRef: opId,
-          group: 'boolean',
-        });
-        useAppStore.getState().setCadMode('select');
-        useAppStore.getState().setPendingBooleanOp(null);
-        useAppStore.getState().setPendingBooleanTargetId(null);
+        useAppStore.getState().performBoolean(pendingBooleanTargetId, shape.id);
         return;
       }
 
@@ -756,7 +741,7 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
           <bufferGeometry>
             <bufferAttribute
               attach="attributes-position"
-              args={[(stlVerts instanceof Float32Array ? stlVerts : new Float32Array(stlVerts as any)) as Float32Array, 3]}
+              args={[(stlVerts ?? new Float32Array(0)) as Float32Array, 3]}
             />
           </bufferGeometry>
         ) : solidKind === 'sphere' ? (
@@ -792,7 +777,7 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
                 <bufferGeometry>
                   <bufferAttribute
                     attach="attributes-position"
-                    args={[(stlVerts instanceof Float32Array ? stlVerts : new Float32Array(stlVerts as any)) as Float32Array, 3]}
+                    args={[(stlVerts ?? new Float32Array(0)) as Float32Array, 3]}
                   />
                 </bufferGeometry>
               ) : solidKind === 'sphere' ? (
@@ -1065,7 +1050,7 @@ const ExtractedCutout: React.FC = () => {
         <bufferGeometry>
           <bufferAttribute
             attach="attributes-position"
-            args={[verts instanceof Float32Array ? verts : new Float32Array(verts as any), 3]}
+            args={[verts instanceof Float32Array ? verts : new Float32Array(verts as ArrayLike<number>), 3]}
           />
         </bufferGeometry>
       );
@@ -1321,6 +1306,302 @@ const MeshZoneOverlays: React.FC = () => {
   );
 };
 
+// ============================================================
+// Vector Arrows — velocity field visualization
+// ============================================================
+const VectorArrows: React.FC = () => {
+  const showVectors = useAppStore((s) => s.showVectors);
+  const fieldData = useAppStore((s) => s.fieldData);
+  const meshDisplayData = useAppStore((s) => s.meshDisplayData);
+  const vectorConfig = useAppStore((s) => s.vectorConfig);
+
+  const arrows = useMemo(() => {
+    if (!showVectors || !meshDisplayData) return null;
+    const positions = meshDisplayData.positions;
+    const nVerts = positions.length / 3;
+    if (nVerts === 0) return null;
+
+    // Compute domain bounds
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity, zMin = Infinity, zMax = -Infinity;
+    for (let i = 0; i < nVerts; i++) {
+      const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+      if (x < xMin) xMin = x; if (x > xMax) xMax = x;
+      if (y < yMin) yMin = y; if (y > yMax) yMax = y;
+      if (z < zMin) zMin = z; if (z > zMax) zMax = z;
+    }
+    const xRange = xMax - xMin || 1;
+    const yRange = yMax - yMin || 1;
+    const zRange = zMax - zMin || 1;
+
+    // Sample a grid of arrow positions
+    const density = vectorConfig.density;
+    const scale = vectorConfig.scale;
+    const nx = Math.max(3, Math.round(8 * density));
+    const ny = Math.max(3, Math.round(8 * density));
+    const nz = Math.max(2, Math.round(4 * density));
+    const arrowData: { pos: [number, number, number]; dir: [number, number, number]; mag: number }[] = [];
+
+    for (let ix = 0; ix < nx; ix++) {
+      for (let iy = 0; iy < ny; iy++) {
+        for (let iz = 0; iz < nz; iz++) {
+          const t = (ix + 0.5) / nx;
+          const u = (iy + 0.5) / ny;
+          const w = (iz + 0.5) / nz;
+          const x = xMin + t * xRange;
+          const y = yMin + u * yRange;
+          const z = zMin + w * zRange;
+          // Analytical velocity (same as solver generates)
+          const vx = Math.sin(Math.PI * t) * Math.cos(Math.PI * u);
+          const vy = -Math.cos(Math.PI * t) * Math.sin(Math.PI * u);
+          const vz = 0.3 * Math.sin(Math.PI * w);
+          const mag = Math.sqrt(vx * vx + vy * vy + vz * vz);
+          if (mag > 0.01) {
+            arrowData.push({
+              pos: [x, y, z],
+              dir: [vx / mag, vy / mag, vz / mag],
+              mag,
+            });
+          }
+        }
+      }
+    }
+
+    const maxMag = Math.max(...arrowData.map(a => a.mag), 0.01);
+    const arrowLength = (Math.min(xRange, yRange, zRange) / nx) * scale * 0.8;
+
+    return arrowData.map((a, i) => {
+      const len = arrowLength * (a.mag / maxMag);
+      const dir = new THREE.Vector3(a.dir[0], a.dir[1], a.dir[2]);
+      const origin = new THREE.Vector3(a.pos[0], a.pos[1], a.pos[2]);
+      // Color by magnitude: blue(low) → red(high)
+      const t = a.mag / maxMag;
+      const r = t;
+      const g = 0.2;
+      const b = 1 - t;
+      return (
+        <arrowHelper
+          key={`vec-${i}`}
+          args={[dir, origin, len, new THREE.Color(r, g, b).getHex(), len * 0.3, len * 0.15]}
+        />
+      );
+    });
+  }, [showVectors, meshDisplayData, vectorConfig, fieldData]);
+
+  if (!showVectors || !arrows) return null;
+  return <group>{arrows}</group>;
+};
+
+// ============================================================
+// Streamline Traces — RK4 integration of velocity field
+// ============================================================
+const StreamlineTraces: React.FC = () => {
+  const showStreamlines = useAppStore((s) => s.showStreamlines);
+  const meshDisplayData = useAppStore((s) => s.meshDisplayData);
+  const vectorConfig = useAppStore((s) => s.vectorConfig);
+
+  const lines = useMemo(() => {
+    if (!showStreamlines || !meshDisplayData) return null;
+    const positions = meshDisplayData.positions;
+    const nVerts = positions.length / 3;
+    if (nVerts === 0) return null;
+
+    // Compute domain bounds
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity, zMin = Infinity, zMax = -Infinity;
+    for (let i = 0; i < nVerts; i++) {
+      const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+      if (x < xMin) xMin = x; if (x > xMax) xMax = x;
+      if (y < yMin) yMin = y; if (y > yMax) yMax = y;
+      if (z < zMin) zMin = z; if (z > zMax) zMax = z;
+    }
+    const xRange = xMax - xMin || 1;
+    const yRange = yMax - yMin || 1;
+    const zRange = zMax - zMin || 1;
+
+    // Analytical velocity field (same as solver)
+    const vel = (x: number, y: number, z: number): [number, number, number] => {
+      const tx = (x - xMin) / xRange;
+      const ty = (y - yMin) / yRange;
+      const tz = (z - zMin) / zRange;
+      return [
+        Math.sin(Math.PI * tx) * Math.cos(Math.PI * ty),
+        -Math.cos(Math.PI * tx) * Math.sin(Math.PI * ty),
+        0.3 * Math.sin(Math.PI * tz),
+      ];
+    };
+
+    // RK4 integration
+    const dt = 0.02 * Math.min(xRange, yRange, zRange);
+    const maxSteps = 200;
+    const density = vectorConfig.density;
+    const nSeeds = Math.max(4, Math.round(12 * density));
+
+    const streamlines: Float32Array[] = [];
+
+    for (let si = 0; si < nSeeds; si++) {
+      // Seed points on the inlet face (xMin)
+      const sy = yMin + (si + 0.5) / nSeeds * yRange;
+      const sz = zMin + zRange * 0.5;
+      let px = xMin + xRange * 0.05;
+      let py = sy;
+      let pz = sz;
+
+      const pts: number[] = [px, py, pz];
+
+      for (let step = 0; step < maxSteps; step++) {
+        // RK4
+        const k1 = vel(px, py, pz);
+        const k2 = vel(px + 0.5 * dt * k1[0], py + 0.5 * dt * k1[1], pz + 0.5 * dt * k1[2]);
+        const k3 = vel(px + 0.5 * dt * k2[0], py + 0.5 * dt * k2[1], pz + 0.5 * dt * k2[2]);
+        const k4 = vel(px + dt * k3[0], py + dt * k3[1], pz + dt * k3[2]);
+
+        px += dt / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]);
+        py += dt / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
+        pz += dt / 6 * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
+
+        // Stop if outside domain
+        if (px < xMin || px > xMax || py < yMin || py > yMax || pz < zMin || pz > zMax) break;
+
+        pts.push(px, py, pz);
+      }
+
+      if (pts.length >= 6) {
+        streamlines.push(new Float32Array(pts));
+      }
+    }
+
+    return streamlines;
+  }, [showStreamlines, meshDisplayData, vectorConfig]);
+
+  if (!showStreamlines || !lines || lines.length === 0) return null;
+
+  return (
+    <group>
+      {lines.map((pts, i) => {
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(pts, 3));
+        const t = i / lines.length;
+        const color = new THREE.Color().setHSL(t * 0.7, 0.9, 0.5);
+        const mat = new THREE.LineBasicMaterial({ color, linewidth: 2 });
+        const lineObj = new THREE.Line(geom, mat);
+        return <primitive key={`sl-${i}`} object={lineObj} />;
+      })}
+    </group>
+  );
+};
+
+// ============================================================
+// Measure Click Handler — raycasts on click to collect 3D points
+// ============================================================
+const MeasureClickHandler: React.FC = () => {
+  const measureMode = useAppStore((s) => s.measureMode);
+  const measurePoints = useAppStore((s) => s.measurePoints);
+  const addMeasurePoint = useAppStore((s) => s.addMeasurePoint);
+  const addMeasureLabel = useAppStore((s) => s.addMeasureLabel);
+  const clearMeasurePoints = useAppStore((s) => s.clearMeasurePoints);
+  const { camera, scene, gl } = useThree();
+  const raycaster = useMemo(() => new THREE.Raycaster(), []);
+
+  const handleClick = useCallback((event: MouseEvent) => {
+    if (!measureMode) return;
+
+    const rect = gl.domElement.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    raycaster.setFromCamera(mouse, camera);
+
+    // Raycast against all visible meshes in the scene
+    const intersects = raycaster.intersectObjects(scene.children, true);
+    const hit = intersects.find(i => i.object.type === 'Mesh' && i.object.visible);
+    if (!hit) return;
+
+    const worldPos: [number, number, number] = [hit.point.x, hit.point.y, hit.point.z];
+    const screenPos: [number, number] = [event.clientX - rect.left, event.clientY - rect.top];
+    const pt = { worldPos, screenPos };
+
+    if (measureMode === 'distance') {
+      if (measurePoints.length === 0) {
+        addMeasurePoint(pt);
+      } else {
+        // Two points collected — compute distance
+        const p1 = measurePoints[0].worldPos;
+        const p2 = worldPos;
+        const dx = p2[0]-p1[0], dy = p2[1]-p1[1], dz = p2[2]-p1[2];
+        const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        addMeasureLabel({
+          id: `meas-${Date.now()}`,
+          text: `${dist.toFixed(4)} m`,
+          position: p1,
+          endPosition: p2,
+          screenPos: measurePoints[0].screenPos,
+          screenEndPos: screenPos,
+        });
+        clearMeasurePoints();
+      }
+    } else if (measureMode === 'angle') {
+      if (measurePoints.length < 2) {
+        addMeasurePoint(pt);
+      } else {
+        // Three points: angle at the second point
+        const a = measurePoints[0].worldPos;
+        const b = measurePoints[1].worldPos;
+        const c = worldPos;
+        const ba = [a[0]-b[0], a[1]-b[1], a[2]-b[2]];
+        const bc = [c[0]-b[0], c[1]-b[1], c[2]-b[2]];
+        const dot = ba[0]*bc[0] + ba[1]*bc[1] + ba[2]*bc[2];
+        const magBA = Math.sqrt(ba[0]*ba[0]+ba[1]*ba[1]+ba[2]*ba[2]);
+        const magBC = Math.sqrt(bc[0]*bc[0]+bc[1]*bc[1]+bc[2]*bc[2]);
+        const angle = Math.acos(Math.max(-1, Math.min(1, dot/(magBA*magBC)))) * 180 / Math.PI;
+        addMeasureLabel({
+          id: `meas-${Date.now()}`,
+          text: `${angle.toFixed(2)}°`,
+          position: b,
+          screenPos: measurePoints[1].screenPos,
+        });
+        // Also show the two arms
+        addMeasureLabel({ id: `meas-arm1-${Date.now()}`, text: '', position: a, endPosition: b });
+        addMeasureLabel({ id: `meas-arm2-${Date.now()}`, text: '', position: b, endPosition: c });
+        clearMeasurePoints();
+      }
+    } else if (measureMode === 'area') {
+      // Use the hit face normal and triangle to estimate area
+      if (hit.face) {
+        const geom = (hit.object as THREE.Mesh).geometry;
+        const pos = geom.getAttribute('position');
+        if (pos && hit.face) {
+          const ia = hit.face.a, ib = hit.face.b, ic = hit.face.c;
+          const va = new THREE.Vector3().fromBufferAttribute(pos, ia);
+          const vb = new THREE.Vector3().fromBufferAttribute(pos, ib);
+          const vc = new THREE.Vector3().fromBufferAttribute(pos, ic);
+          // Transform to world
+          hit.object.localToWorld(va);
+          hit.object.localToWorld(vb);
+          hit.object.localToWorld(vc);
+          const ab = new THREE.Vector3().subVectors(vb, va);
+          const ac = new THREE.Vector3().subVectors(vc, va);
+          const triArea = ab.cross(ac).length() * 0.5;
+          addMeasureLabel({
+            id: `meas-${Date.now()}`,
+            text: `Face area: ${triArea.toFixed(6)} m²`,
+            position: worldPos,
+            screenPos: screenPos,
+          });
+        }
+      }
+    }
+  }, [measureMode, measurePoints, addMeasurePoint, addMeasureLabel, clearMeasurePoints, camera, scene, gl, raycaster]);
+
+  useEffect(() => {
+    if (!measureMode) return;
+    const el = gl.domElement;
+    el.addEventListener('click', handleClick);
+    return () => el.removeEventListener('click', handleClick);
+  }, [measureMode, handleClick, gl]);
+
+  return null;
+};
+
 const CadScene: React.FC = () => {
   const shapes = useAppStore((s) => s.shapes);
   const selectedShapeId = useAppStore((s) => s.selectedShapeId);
@@ -1357,7 +1638,7 @@ const CadScene: React.FC = () => {
 
       {/* Regular shapes — hidden when mesh is generated and on mesh-related tabs */}
       {!hideCadShapes && shapes
-        .filter((s) => s.id !== selectedShapeId && s.group !== 'extracted_solid')
+        .filter((s) => s.id !== selectedShapeId && s.group !== 'extracted_solid' && s.visible !== false)
         .map((shape) => {
           const pos = exploded && shape.group !== 'enclosure'
             ? getExplodedPosition(shape.position, sceneCenter, explodeFactor)
@@ -1371,7 +1652,7 @@ const CadScene: React.FC = () => {
             />
           );
         })}
-      {!hideCadShapes && selectedShape && selectedShape.group !== 'extracted_solid' && (
+      {!hideCadShapes && selectedShape && selectedShape.group !== 'extracted_solid' && selectedShape.visible !== false && (
         <SelectedShapeWithTransform
           key={selectedShape.id}
           shape={selectedShape}
@@ -1392,6 +1673,9 @@ const CadScene: React.FC = () => {
       {/* Repair issue markers in 3D */}
       <RepairMarkers />
 
+      {/* Measure raycasting handler */}
+      <MeasureClickHandler />
+
       {/* Measure points and lines in 3D */}
       <MeasureElements />
 
@@ -1403,6 +1687,12 @@ const CadScene: React.FC = () => {
 
       {/* Mesh zone overlays (Fluent-style volumes & boundary faces) */}
       <MeshZoneOverlays />
+
+      {/* Vector arrows for velocity field visualization */}
+      <VectorArrows />
+
+      {/* Streamline traces */}
+      <StreamlineTraces />
     </group>
   );
 };

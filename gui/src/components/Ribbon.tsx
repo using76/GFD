@@ -402,7 +402,7 @@ const DesignRibbon: React.FC = () => {
               addShape({
                 id,
                 name: file.name.replace(/\.stl$/i, ''),
-                kind: 'stl' as any,
+                kind: 'stl',
                 position: [0, 0, 0],
                 rotation: [0, 0, 0],
                 dimensions: {},
@@ -463,8 +463,8 @@ const DisplayRibbon: React.FC = () => {
       }} />
       <GroupSep label="Views" />
 
-      <RibbonButton icon={<EyeOutlined />} label="Show" onClick={() => { useAppStore.getState().shapes.forEach(s => useAppStore.getState().updateShape(s.id, {})); message.info('All shapes visible'); }} />
-      <RibbonButton icon={<EyeInvisibleOutlined />} label="Hide" onClick={() => { const sel = useAppStore.getState().selectedShapeId; if (sel) { useAppStore.getState().removeShape(sel); message.info('Shape hidden'); } else { message.warning('Select a shape first'); } }} />
+      <RibbonButton icon={<EyeOutlined />} label="Show" onClick={() => { useAppStore.getState().showAllShapes(); message.info('All shapes visible'); }} />
+      <RibbonButton icon={<EyeInvisibleOutlined />} label="Hide" onClick={() => { const sel = useAppStore.getState().selectedShapeId; if (sel) { useAppStore.getState().toggleShapeVisibility(sel); message.info('Shape visibility toggled'); } else { message.warning('Select a shape first'); } }} />
       <GroupSep label="Visibility" />
 
       <RibbonButton icon={<BgColorsOutlined />} label="Appearance" onClick={() => {
@@ -533,7 +533,7 @@ const MeasureRibbon: React.FC = () => {
         setActiveTool(next ? 'measure' : 'select');
         if (next) message.info('Click a face to measure area');
       }} />
-      <RibbonButton icon={<BlockOutlined />} label="Volume" onClick={() => { const st = useAppStore.getState(); const sid = st.selectedShapeId; if (sid) { const s = st.shapes.find(x=>x.id===sid); const d = s?.dimensions||{}; const v = (d.width||1)*(d.height||1)*(d.depth||1); message.success(`Volume of "${s?.name}": ${v.toFixed(4)} m^3`); } else { message.warning('Select a shape to measure volume.'); } }} />
+      <RibbonButton icon={<BlockOutlined />} label="Volume" onClick={() => { const st = useAppStore.getState(); const sid = st.selectedShapeId; if (sid) { const s = st.shapes.find(x=>x.id===sid); if (!s) return; const d = s.dimensions; let v = 0; if (s.kind === 'sphere') { const r = d.radius ?? 0.5; v = (4/3)*Math.PI*r*r*r; } else if (s.kind === 'cylinder') { const r = d.radius ?? 0.3; const h = d.height ?? 1; v = Math.PI*r*r*h; } else if (s.kind === 'cone') { const r = d.radius ?? 0.4; const h = d.height ?? 1; v = (1/3)*Math.PI*r*r*h; } else if (s.kind === 'torus') { const R = d.majorRadius ?? 0.5; const r = d.minorRadius ?? 0.15; v = 2*Math.PI*Math.PI*R*r*r; } else if (s.kind === 'pipe') { const ro = d.outerRadius ?? 0.4; const ri = d.innerRadius ?? 0.3; const h = d.height ?? 1.5; v = Math.PI*(ro*ro - ri*ri)*h; } else { v = (d.width||1)*(d.height||1)*(d.depth||1); } message.success(`Volume of "${s.name}": ${v.toFixed(6)} m³`); } else { message.warning('Select a shape to measure volume.'); } }} />
       <RibbonButton icon={<ColumnWidthOutlined />} label="Length" active={measureMode === 'distance'} onClick={() => {
         const next = measureMode === 'distance' ? null : 'distance' as const;
         setMeasureMode(next);
@@ -550,10 +550,17 @@ const MeasureRibbon: React.FC = () => {
         const s = st.shapes.find(x => x.id === sid);
         if (!s) return;
         const d = s.dimensions;
-        const vol = (d.width || d.radius ? Math.PI * (d.radius || 0.5) ** 2 * (d.height || 1) : (d.width || 1) * (d.height || 1) * (d.depth || 1));
+        let vol = 0;
+        if (s.kind === 'sphere') { const r = d.radius ?? 0.5; vol = (4/3)*Math.PI*r*r*r; }
+        else if (s.kind === 'cylinder') { const r = d.radius ?? 0.3; const h = d.height ?? 1; vol = Math.PI*r*r*h; }
+        else if (s.kind === 'cone') { const r = d.radius ?? 0.4; const h = d.height ?? 1; vol = (1/3)*Math.PI*r*r*h; }
+        else if (s.kind === 'torus') { const R = d.majorRadius ?? 0.5; const r = d.minorRadius ?? 0.15; vol = 2*Math.PI*Math.PI*R*r*r; }
+        else if (s.kind === 'pipe') { const ro = d.outerRadius ?? 0.4; const ri = d.innerRadius ?? 0.3; const h = d.height ?? 1.5; vol = Math.PI*(ro*ro - ri*ri)*h; }
+        else { vol = (d.width||1)*(d.height||1)*(d.depth||1); }
         const density = st.material.density;
         const mass = vol * density;
-        message.success(`"${s.name}": Vol=${vol.toFixed(4)} m^3, Mass=${mass.toFixed(4)} kg (rho=${density})`);
+        const cx = s.position[0], cy = s.position[1], cz = s.position[2];
+        message.success(`"${s.name}": Vol=${vol.toFixed(6)} m³, Mass=${mass.toFixed(4)} kg, CoG=(${cx.toFixed(2)}, ${cy.toFixed(2)}, ${cz.toFixed(2)}), ρ=${density}`);
       }} />
       <GroupSep label="Properties" />
     </div>
@@ -569,51 +576,98 @@ const RepairRibbon: React.FC = () => {
   const generateRepairIssues = () => {
     const state = useAppStore.getState();
     state.clearRepairIssues();
-    const kinds: Array<'missing_face' | 'extra_edge' | 'gap' | 'non_manifold' | 'self_intersect'> = [
-      'missing_face', 'extra_edge', 'gap', 'non_manifold', 'self_intersect',
-    ];
-    const descriptions: Record<string, string> = {
-      missing_face: 'Missing face detected',
-      extra_edge: 'Extra edge found',
-      gap: 'Gap between surfaces',
-      non_manifold: 'Non-manifold edge',
-      self_intersect: 'Self-intersection detected',
-    };
-    const activeShapes = state.shapes.filter(s => s.group !== 'enclosure');
+    const activeShapes = state.shapes.filter(s => s.group !== 'enclosure' && s.visible !== false);
     if (activeShapes.length === 0) {
-      // Generate near origin when no shapes
-      for (let i = 0; i < 3; i++) {
-        const kind = kinds[i % kinds.length];
-        state.addRepairIssue({
-          id: `repair-${Date.now()}-${i}`,
-          kind,
-          position: [(Math.random() - 0.5) * 2, Math.random() * 1.5, (Math.random() - 0.5) * 2],
-          description: descriptions[kind],
-          fixed: false,
-        });
-      }
-      return 3;
+      return 0;
     }
     let count = 0;
+    // Deterministic geometry analysis per shape
     activeShapes.forEach((shape) => {
-      const numIssues = 1 + Math.floor(Math.random() * 3);
-      for (let i = 0; i < numIssues; i++) {
-        const kind = kinds[Math.floor(Math.random() * kinds.length)];
-        const offset = () => (Math.random() - 0.5) * 0.8;
+      const d = shape.dimensions;
+      const pos = shape.position;
+      const hw = (d.width ?? d.radius ?? 0.5) / 2;
+      const hh = (d.height ?? d.radius ?? 0.5) / 2;
+      const hd = (d.depth ?? d.radius ?? 0.5) / 2;
+
+      // Check thin features (potential missing faces)
+      const dims = [hw * 2, hh * 2, hd * 2];
+      const minDim = Math.min(...dims);
+      if (minDim < 0.05) {
         state.addRepairIssue({
-          id: `repair-${Date.now()}-${count}`,
-          kind,
-          position: [
-            shape.position[0] + offset(),
-            shape.position[1] + offset(),
-            shape.position[2] + offset(),
-          ],
-          description: `${descriptions[kind]} on "${shape.name}"`,
+          id: `repair-${Date.now()}-${count++}`,
+          kind: 'missing_face',
+          position: [pos[0], pos[1] + hh, pos[2]],
+          description: `Thin feature on "${shape.name}" (${minDim.toFixed(3)}m) — potential missing face`,
           fixed: false,
         });
-        count++;
+      }
+
+      // Check for non-manifold edges (shapes with fillets/chamfers)
+      if ((d.filletRadius ?? 0) > 0 || (d.chamferSize ?? 0) > 0) {
+        state.addRepairIssue({
+          id: `repair-${Date.now()}-${count++}`,
+          kind: 'non_manifold',
+          position: [pos[0] + hw, pos[1] + hh, pos[2]],
+          description: `Non-manifold edge at fillet/chamfer on "${shape.name}"`,
+          fixed: false,
+        });
+      }
+
+      // Check for extra edges (shell shapes)
+      if ((d.isShell ?? 0) > 0) {
+        state.addRepairIssue({
+          id: `repair-${Date.now()}-${count++}`,
+          kind: 'extra_edge',
+          position: [pos[0], pos[1], pos[2] + hd],
+          description: `Extra edge from shell operation on "${shape.name}"`,
+          fixed: false,
+        });
       }
     });
+
+    // Check gaps between adjacent shapes
+    for (let i = 0; i < activeShapes.length; i++) {
+      for (let j = i + 1; j < activeShapes.length; j++) {
+        const a = activeShapes[i], b = activeShapes[j];
+        const dist = Math.sqrt(
+          (a.position[0] - b.position[0]) ** 2 +
+          (a.position[1] - b.position[1]) ** 2 +
+          (a.position[2] - b.position[2]) ** 2
+        );
+        const aSize = Math.max(a.dimensions.width ?? 0, a.dimensions.radius ?? 0) + Math.max(a.dimensions.height ?? 0, a.dimensions.depth ?? 0);
+        const bSize = Math.max(b.dimensions.width ?? 0, b.dimensions.radius ?? 0) + Math.max(b.dimensions.height ?? 0, b.dimensions.depth ?? 0);
+        const gapDist = dist - (aSize + bSize) / 4;
+        if (gapDist > 0 && gapDist < 0.2) {
+          state.addRepairIssue({
+            id: `repair-${Date.now()}-${count++}`,
+            kind: 'gap',
+            position: [(a.position[0] + b.position[0]) / 2, (a.position[1] + b.position[1]) / 2, (a.position[2] + b.position[2]) / 2],
+            description: `Gap ${gapDist.toFixed(4)}m between "${a.name}" and "${b.name}"`,
+            fixed: false,
+          });
+        }
+
+        // Check for self-intersection (overlapping bounding boxes)
+        const aHw = (a.dimensions.width ?? a.dimensions.radius ?? 0.5) / 2;
+        const aHh = (a.dimensions.height ?? a.dimensions.radius ?? 0.5) / 2;
+        const aHd = (a.dimensions.depth ?? a.dimensions.radius ?? 0.5) / 2;
+        const bHw = (b.dimensions.width ?? b.dimensions.radius ?? 0.5) / 2;
+        const bHh = (b.dimensions.height ?? b.dimensions.radius ?? 0.5) / 2;
+        const bHd = (b.dimensions.depth ?? b.dimensions.radius ?? 0.5) / 2;
+        const overlapX = (aHw + bHw) - Math.abs(a.position[0] - b.position[0]);
+        const overlapY = (aHh + bHh) - Math.abs(a.position[1] - b.position[1]);
+        const overlapZ = (aHd + bHd) - Math.abs(a.position[2] - b.position[2]);
+        if (overlapX > 0 && overlapY > 0 && overlapZ > 0) {
+          state.addRepairIssue({
+            id: `repair-${Date.now()}-${count++}`,
+            kind: 'self_intersect',
+            position: [(a.position[0] + b.position[0]) / 2, (a.position[1] + b.position[1]) / 2, (a.position[2] + b.position[2]) / 2],
+            description: `Overlap between "${a.name}" and "${b.name}"`,
+            fixed: false,
+          });
+        }
+      }
+    }
     return count;
   };
 
@@ -639,43 +693,55 @@ const RepairRibbon: React.FC = () => {
 
       <RibbonButton icon={<HighlightOutlined />} label="Missing" onClick={() => {
         const state = useAppStore.getState();
-        const activeShapes = state.shapes.filter(s => s.group !== 'enclosure');
+        const activeShapes = state.shapes.filter(s => s.group !== 'enclosure' && s.visible !== false);
         if (activeShapes.length === 0) {
           addRepairLog('[Missing] No shapes to scan');
           message.info('No shapes to scan for missing faces');
           return;
         }
-        const shape = activeShapes[Math.floor(Math.random() * activeShapes.length)];
-        const issue = {
-          id: `repair-miss-${Date.now()}`,
-          kind: 'missing_face' as const,
-          position: [shape.position[0] + (Math.random() - 0.5) * 0.6, shape.position[1] + 0.4, shape.position[2] + (Math.random() - 0.5) * 0.6] as [number, number, number],
-          description: `Missing face on "${shape.name}"`,
-          fixed: false,
-        };
-        state.addRepairIssue(issue);
-        addRepairLog(`[Missing] Found 1 missing face on "${shape.name}"`);
-        message.warning(`Found 1 missing face on "${shape.name}"`);
+        let found = 0;
+        activeShapes.forEach(shape => {
+          const d = shape.dimensions;
+          const dims = [d.width ?? d.radius ?? 0.5, d.height ?? d.radius ?? 0.5, d.depth ?? d.radius ?? 0.5];
+          const minDim = Math.min(...dims);
+          if (minDim < 0.1) {
+            state.addRepairIssue({
+              id: `repair-miss-${Date.now()}-${found}`,
+              kind: 'missing_face',
+              position: [shape.position[0], shape.position[1] + dims[1] / 2, shape.position[2]],
+              description: `Thin feature on "${shape.name}" (${minDim.toFixed(3)}m) — potential missing face`,
+              fixed: false,
+            });
+            found++;
+          }
+        });
+        addRepairLog(`[Missing] Found ${found} potential missing face(s)`);
+        message.info(`Found ${found} potential missing face(s)`);
       }} />
       <RibbonButton icon={<ScissorOutlined />} label="Extra" onClick={() => {
         const state = useAppStore.getState();
-        const activeShapes = state.shapes.filter(s => s.group !== 'enclosure');
+        const activeShapes = state.shapes.filter(s => s.group !== 'enclosure' && s.visible !== false);
         if (activeShapes.length === 0) {
           addRepairLog('[Extra] No shapes to scan');
           message.info('No shapes to scan');
           return;
         }
-        const shape = activeShapes[Math.floor(Math.random() * activeShapes.length)];
-        const issue = {
-          id: `repair-extra-${Date.now()}`,
-          kind: 'extra_edge' as const,
-          position: [shape.position[0] + (Math.random() - 0.5) * 0.6, shape.position[1] + 0.3, shape.position[2] + (Math.random() - 0.5) * 0.6] as [number, number, number],
-          description: `Extra edge on "${shape.name}"`,
-          fixed: false,
-        };
-        state.addRepairIssue(issue);
-        addRepairLog(`[Extra] Found 1 extra edge on "${shape.name}"`);
-        message.warning(`Found 1 extra edge on "${shape.name}"`);
+        let found = 0;
+        activeShapes.forEach(shape => {
+          const d = shape.dimensions;
+          if ((d.filletRadius ?? 0) > 0 || (d.chamferSize ?? 0) > 0 || (d.isShell ?? 0) > 0) {
+            state.addRepairIssue({
+              id: `repair-extra-${Date.now()}-${found}`,
+              kind: 'extra_edge',
+              position: [shape.position[0], shape.position[1], shape.position[2]],
+              description: `Extra edge from feature modification on "${shape.name}"`,
+              fixed: false,
+            });
+            found++;
+          }
+        });
+        addRepairLog(`[Extra] Found ${found} extra edge(s)`);
+        message.info(`Found ${found} extra edge(s)`);
       }} />
       <RibbonButton icon={<MergeCellsOutlined />} label="Stitch" onClick={() => {
         const state = useAppStore.getState();
@@ -755,36 +821,40 @@ const PrepareRibbon: React.FC = () => {
       {/* Defeaturing Group: Defeaturing + Auto Fix + Topology */}
       <RibbonButton icon={<BugOutlined />} label="Defeaturing" active={prepareSubPanel === 'defeaturing'} onClick={() => {
         setPrepareSubPanel(prepareSubPanel === 'defeaturing' ? null : 'defeaturing');
-        const activeShapes = shapes.filter(s => s.group !== 'enclosure');
+        // Deterministic geometry-based defeaturing analysis
+        const activeShapes = shapes.filter(s => s.group !== 'enclosure' && s.visible !== false);
         const issues: Array<{ id: string; kind: 'small_face' | 'short_edge' | 'small_hole' | 'sliver_face' | 'gap'; description: string; size: number; fixed: boolean; position: [number, number, number]; shapeId: string }> = [];
-        const kinds: Array<'small_face' | 'short_edge' | 'small_hole' | 'sliver_face' | 'gap'> = ['small_face', 'short_edge', 'small_hole', 'sliver_face', 'gap'];
+        let id = 0;
         activeShapes.forEach((shape) => {
-          const numIssues = 1 + Math.floor(Math.random() * 3);
-          for (let i = 0; i < numIssues; i++) {
-            const kind = kinds[Math.floor(Math.random() * kinds.length)];
-            issues.push({
-              id: `df-${Date.now()}-${issues.length}`,
-              kind,
-              description: `${kind.replace(/_/g, ' ')} on "${shape.name}"`,
-              size: 0.001 + Math.random() * 0.02,
-              fixed: false,
-              position: [
-                shape.position[0] + (Math.random() - 0.5) * 0.6,
-                shape.position[1] + (Math.random() - 0.5) * 0.6,
-                shape.position[2] + (Math.random() - 0.5) * 0.6,
-              ],
-              shapeId: shape.id,
-            });
+          const d = shape.dimensions;
+          const pos = shape.position;
+          const hw = (d.width ?? d.radius ?? 0.5) / 2;
+          const hh = (d.height ?? d.radius ?? 0.5) / 2;
+          const hd = (d.depth ?? d.radius ?? 0.5) / 2;
+          // Check face areas
+          const faceAreas = [hw*2*hh*2, hw*2*hd*2, hh*2*hd*2];
+          faceAreas.forEach((area, fi) => {
+            if (area < 0.01) {
+              issues.push({ id: `df-${id++}`, kind: 'small_face', description: `Small face on "${shape.name}" (${area.toFixed(4)} m²)`, size: area, fixed: false, position: [pos[0], pos[1] + (fi===0?hh:0), pos[2] + (fi===1?hd:0)], shapeId: shape.id });
+            }
+          });
+          // Check edge lengths
+          [hw*2, hh*2, hd*2].forEach((len, ei) => {
+            if (len < 0.05) {
+              issues.push({ id: `df-${id++}`, kind: 'short_edge', description: `Short edge on "${shape.name}" (${len.toFixed(4)} m)`, size: len, fixed: false, position: [pos[0]+(ei===0?hw:0), pos[1]+(ei===1?hh:0), pos[2]+(ei===2?hd:0)], shapeId: shape.id });
+            }
+          });
+          // Check fillets
+          if ((d.filletRadius ?? 0) > 0 && d.filletRadius < 0.02) {
+            issues.push({ id: `df-${id++}`, kind: 'small_face', description: `Small fillet R=${d.filletRadius.toFixed(3)}m on "${shape.name}"`, size: d.filletRadius, fixed: false, position: [pos[0]+hw, pos[1]+hh, pos[2]], shapeId: shape.id });
+          }
+          // Check pipe holes
+          if (shape.kind === 'pipe' && (d.innerRadius ?? 0) > 0 && d.innerRadius * 2 < 0.05) {
+            issues.push({ id: `df-${id++}`, kind: 'small_hole', description: `Small hole dia=${(d.innerRadius*2).toFixed(3)}m on "${shape.name}"`, size: d.innerRadius*2, fixed: false, position: [pos[0], pos[1]+hh, pos[2]], shapeId: shape.id });
           }
         });
-        if (issues.length === 0) {
-          issues.push(
-            { id: 'df-p1', kind: 'small_face', description: 'Small face detected', size: 0.001, fixed: false, position: [0.3, 0.2, 0], shapeId: '' },
-            { id: 'df-p2', kind: 'small_hole', description: 'Small hole detected', size: 0.01, fixed: false, position: [-0.1, 0.4, 0.2], shapeId: '' },
-          );
-        }
         setDefeatureIssues(issues);
-        message.success(`${issues.length} defeaturing issues found`);
+        message.success(issues.length > 0 ? `${issues.length} defeaturing issues found` : 'No defeaturing issues detected');
       }} />
       <RibbonButton icon={<ThunderboltOutlined />} label="Auto Fix" onClick={() => { fixAllDefeatureIssues(); message.success('All defeaturing issues auto-fixed.'); }} />
       <RibbonButton icon={<BorderInnerOutlined />} label="Topology" onClick={() => { setTopologyShared(true); message.success('Topology shared: conformal interfaces created.'); }} />
@@ -818,26 +888,27 @@ const PrepareRibbon: React.FC = () => {
       <RibbonButton icon={<DeleteOutlined />} label="Rm Holes" onClick={() => {
         const activeShapes = shapes.filter(s => s.group !== 'enclosure');
         const issues: Array<{ id: string; kind: 'small_face' | 'short_edge' | 'small_hole' | 'sliver_face' | 'gap'; description: string; size: number; fixed: boolean; position: [number, number, number]; shapeId: string }> = [];
+        let removed = 0;
         activeShapes.forEach((shape) => {
-          const numHoles = Math.floor(Math.random() * 2) + 1;
-          for (let i = 0; i < numHoles; i++) {
+          // Remove actual pipe inner holes
+          if (shape.kind === 'pipe' && (shape.dimensions.innerRadius ?? 0) > 0) {
+            const holeDia = shape.dimensions.innerRadius * 2;
             issues.push({
               id: `df-hole-${Date.now()}-${issues.length}`,
               kind: 'small_hole',
-              description: `Small hole on "${shape.name}"`,
-              size: 0.005 + Math.random() * 0.015,
+              description: `Hole dia=${holeDia.toFixed(3)}m removed from "${shape.name}"`,
+              size: holeDia,
               fixed: true,
-              position: [
-                shape.position[0] + (Math.random() - 0.5) * 0.5,
-                shape.position[1] + (Math.random() - 0.5) * 0.5,
-                shape.position[2] + (Math.random() - 0.5) * 0.5,
-              ],
+              position: [shape.position[0], shape.position[1] + (shape.dimensions.height ?? 1) / 2, shape.position[2]],
               shapeId: shape.id,
             });
+            // Convert pipe to solid cylinder by removing inner radius
+            useAppStore.getState().updateShape(shape.id, { dimensions: { ...shape.dimensions, innerRadius: 0 } });
+            removed++;
           }
         });
         if (issues.length > 0) setDefeatureIssues(issues);
-        message.success(`Removed ${issues.length} hole(s) from ${activeShapes.length} shape(s).`);
+        message.success(removed > 0 ? `Removed ${removed} hole(s)` : 'No holes found to remove');
       }} />
       <RibbonButton icon={<DeleteOutlined />} label="Rm Chamfers" onClick={() => {
         const activeShapes = shapes.filter(s => s.group !== 'enclosure');
@@ -972,12 +1043,16 @@ const ResultsRibbon: React.FC = () => {
       <RibbonButton icon={<ArrowsAltOutlined />} label="Vectors" onClick={() => {
         setRenderMode('contour');
         setActiveField('velocity');
+        const cur = useAppStore.getState().showVectors;
+        useAppStore.getState().setShowVectors(!cur);
         useAppStore.getState().setActiveRibbonTab('results');
         switchResultsSection('vectors');
       }} />
       <RibbonButton icon={<SwapOutlined />} label="Streamlines" onClick={() => {
         setRenderMode('contour');
         setActiveField('velocity');
+        const cur = useAppStore.getState().showStreamlines;
+        useAppStore.getState().setShowStreamlines(!cur);
         useAppStore.getState().setActiveRibbonTab('results');
         switchResultsSection('streamlines');
       }} />

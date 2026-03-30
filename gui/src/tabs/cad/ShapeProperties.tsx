@@ -1,5 +1,5 @@
 import React from 'react';
-import { Typography, Button, Divider, Tag } from 'antd';
+import { Typography, Button, Divider, Tag, message } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 import PropertyGrid from '../../components/PropertyGrid';
 import type { PropertyField } from '../../components/PropertyGrid';
@@ -83,8 +83,33 @@ const ShapeProperties: React.FC = () => {
       updateShape(shape.id, { rotation: value as [number, number, number] });
     } else if (key.startsWith('dim_')) {
       const dimKey = key.replace('dim_', '');
+      let numVal = value as number;
+      // Enforce positive dimensions
+      if (typeof numVal === 'number' && numVal < 0.001) {
+        numVal = 0.001;
+      }
+      // Pipe: enforce innerRadius < outerRadius
+      if (shape.kind === 'pipe') {
+        const newDims = { ...shape.dimensions, [dimKey]: numVal };
+        if (dimKey === 'innerRadius' && numVal >= (newDims.outerRadius ?? 0.4)) {
+          message.warning('Inner radius must be less than outer radius');
+          numVal = (newDims.outerRadius ?? 0.4) - 0.01;
+        }
+        if (dimKey === 'outerRadius' && numVal <= (newDims.innerRadius ?? 0.3)) {
+          message.warning('Outer radius must be greater than inner radius');
+          numVal = (newDims.innerRadius ?? 0.3) + 0.01;
+        }
+      }
+      // Torus: enforce minorRadius < majorRadius
+      if (shape.kind === 'torus') {
+        const newDims = { ...shape.dimensions, [dimKey]: numVal };
+        if (dimKey === 'minorRadius' && numVal >= (newDims.majorRadius ?? 0.5)) {
+          message.warning('Minor radius must be less than major radius');
+          numVal = (newDims.majorRadius ?? 0.5) - 0.01;
+        }
+      }
       updateShape(shape.id, {
-        dimensions: { ...shape.dimensions, [dimKey]: value as number },
+        dimensions: { ...shape.dimensions, [dimKey]: numVal },
       });
     }
   };

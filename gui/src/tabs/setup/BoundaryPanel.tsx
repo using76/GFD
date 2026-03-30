@@ -1,5 +1,6 @@
 import React from 'react';
-import { Select, Typography, Divider, Empty, Form, InputNumber, Tag } from 'antd';
+import { Select, Typography, Divider, Empty, Form, InputNumber, Tag, Button } from 'antd';
+import { PlusOutlined } from '@ant-design/icons';
 import { useAppStore } from '../../store/useAppStore';
 import type { BoundaryType, WallThermalCondition } from '../../store/useAppStore';
 
@@ -22,14 +23,69 @@ const BoundaryPanel: React.FC = () => {
   const selectedBoundaryId = useAppStore((s) => s.selectedBoundaryId);
   const selectBoundary = useAppStore((s) => s.selectBoundary);
   const updateBoundary = useAppStore((s) => s.updateBoundary);
+  const addBoundary = useAppStore((s) => s.addBoundary);
   const meshGenerated = useAppStore((s) => s.meshGenerated);
+  const meshSurfaces = useAppStore((s) => s.meshSurfaces);
 
   const selected = boundaries.find((b) => b.id === selectedBoundaryId);
+
+  const handleAddCustomBC = () => {
+    const id = `bc-custom-${Date.now()}`;
+    addBoundary({
+      id,
+      name: `custom-${boundaries.length + 1}`,
+      type: 'wall',
+      velocity: [0, 0, 0],
+      pressure: 0,
+      temperature: 300,
+      turbulenceIntensity: 0.05,
+      wallThermalCondition: 'adiabatic',
+      heatFlux: 0,
+      movingWallVelocity: [0, 0, 0],
+    });
+    selectBoundary(id);
+  };
+
+  // Auto-sync: if mesh surfaces exist but no boundaries, create from surfaces
+  const handleSyncFromMesh = () => {
+    if (meshSurfaces.length === 0) return;
+    meshSurfaces.forEach((surf) => {
+      const exists = boundaries.find(b => b.id === surf.id);
+      if (!exists) {
+        const type: BoundaryType = surf.boundaryType === 'inlet' ? 'inlet'
+          : surf.boundaryType === 'outlet' ? 'outlet'
+          : surf.boundaryType === 'symmetry' ? 'symmetry'
+          : 'wall';
+        addBoundary({
+          id: surf.id,
+          name: surf.name,
+          type,
+          velocity: type === 'inlet' ? [1, 0, 0] : [0, 0, 0],
+          pressure: 0,
+          temperature: 300,
+          turbulenceIntensity: 0.05,
+          wallThermalCondition: 'adiabatic',
+          heatFlux: 0,
+          movingWallVelocity: [0, 0, 0],
+        });
+      }
+    });
+  };
 
   if (boundaries.length === 0) {
     return (
       <div style={{ padding: 16 }}>
         <Empty description={meshGenerated ? "No boundary patches found." : "Generate mesh first to define boundary conditions."} />
+        {meshGenerated && meshSurfaces.length > 0 && (
+          <Button type="primary" block style={{ marginTop: 12 }} onClick={handleSyncFromMesh}>
+            Create BCs from Mesh Surfaces ({meshSurfaces.length})
+          </Button>
+        )}
+        {meshGenerated && (
+          <Button block style={{ marginTop: 8 }} icon={<PlusOutlined />} onClick={handleAddCustomBC}>
+            Add Custom BC
+          </Button>
+        )}
       </div>
     );
   }
@@ -74,6 +130,9 @@ const BoundaryPanel: React.FC = () => {
             </div>
           ))}
         </div>
+        <Button size="small" icon={<PlusOutlined />} block style={{ marginTop: 4 }} onClick={handleAddCustomBC}>
+          Add BC
+        </Button>
       </div>
 
       {selected && (

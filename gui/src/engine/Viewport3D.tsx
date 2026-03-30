@@ -1,11 +1,44 @@
-import { Canvas } from '@react-three/fiber';
+import { useEffect } from 'react';
+import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport, Grid } from '@react-three/drei';
 import { useAppStore } from '../store/useAppStore';
-// CameraControls replaced by MiniToolbar in App.tsx
-// import CameraControls from './CameraControls';
 import MeshRenderer from './MeshRenderer';
 import SelectionManager from './SelectionManager';
 import CadScene from './CadScene';
+import * as THREE from 'three';
+
+/** Listens for gfd-camera-preset events and animates camera to target position */
+function CameraPresetListener() {
+  const { camera } = useThree();
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.position) {
+        const [x, y, z] = detail.position;
+        // Animate camera to target position
+        const target = new THREE.Vector3(x, y, z);
+        const start = camera.position.clone();
+        const duration = 300;
+        const startTime = performance.now();
+
+        const animate = () => {
+          const elapsed = performance.now() - startTime;
+          const t = Math.min(elapsed / duration, 1);
+          const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+          camera.position.lerpVectors(start, target, ease);
+          camera.lookAt(0, 0, 0);
+          if (t < 1) requestAnimationFrame(animate);
+        };
+        animate();
+      }
+    };
+    window.addEventListener('gfd-camera-preset', handler);
+    return () => window.removeEventListener('gfd-camera-preset', handler);
+  }, [camera]);
+
+  return null;
+}
 
 function SceneContent() {
   const lightingIntensity = useAppStore((s) => s.lightingIntensity);
@@ -51,6 +84,9 @@ function SceneContent() {
           labelColor="white"
         />
       </GizmoHelper>
+
+      {/* Camera preset event handler */}
+      <CameraPresetListener />
 
       {/* CAD shapes */}
       <CadScene />

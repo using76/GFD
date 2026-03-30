@@ -135,26 +135,97 @@ export default function MenuBar() {
         } catch { message.error('Export failed.'); }
         break;
       }
-      case 'file:import':
-        useAppStore.getState().setActiveRibbonTab('design');
-        message.info('Use the Import button in the Design ribbon to import STL files.');
+      case 'file:import': {
+        // Open STL file dialog
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = '.stl,.STL';
+        fileInput.onchange = (ev) => {
+          const file = (ev.target as HTMLInputElement).files?.[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = (re) => {
+            try {
+              const buf = re.target?.result as ArrayBuffer;
+              if (!buf || buf.byteLength < 84) { message.error('Invalid STL file'); return; }
+              const headerBytes = new Uint8Array(buf, 0, 6);
+              const headerStr = String.fromCharCode(...headerBytes);
+              let verts: Float32Array;
+              let fc: number;
+              if (headerStr.startsWith('solid') && buf.byteLength > 84) {
+                const text = new TextDecoder().decode(buf);
+                const regex = /vertex\s+([-\d.eE+]+)\s+([-\d.eE+]+)\s+([-\d.eE+]+)/g;
+                const coords: number[] = [];
+                let m;
+                while ((m = regex.exec(text)) !== null) {
+                  coords.push(parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3]));
+                }
+                if (coords.length >= 9) {
+                  verts = new Float32Array(coords);
+                  fc = coords.length / 9;
+                } else {
+                  // Binary fallback
+                  const dv = new DataView(buf);
+                  fc = dv.getUint32(80, true);
+                  verts = new Float32Array(fc * 9);
+                  let off = 84;
+                  for (let i = 0; i < fc; i++) { off += 12; for (let v = 0; v < 3; v++) { verts[i*9+v*3]=dv.getFloat32(off,true); verts[i*9+v*3+1]=dv.getFloat32(off+4,true); verts[i*9+v*3+2]=dv.getFloat32(off+8,true); off+=12; } off+=2; }
+                }
+              } else {
+                const dv = new DataView(buf);
+                fc = dv.getUint32(80, true);
+                verts = new Float32Array(fc * 9);
+                let off = 84;
+                for (let i = 0; i < fc; i++) { off += 12; for (let v = 0; v < 3; v++) { verts[i*9+v*3]=dv.getFloat32(off,true); verts[i*9+v*3+1]=dv.getFloat32(off+4,true); verts[i*9+v*3+2]=dv.getFloat32(off+8,true); off+=12; } off+=2; }
+              }
+              const id = `shape-stl-${Date.now()}`;
+              useAppStore.getState().addShape({
+                id, name: file.name.replace(/\.stl$/i, ''), kind: 'stl',
+                position: [0,0,0], rotation: [0,0,0], dimensions: {},
+                stlData: { vertices: verts!, faceCount: fc! }, group: 'body',
+              });
+              useAppStore.getState().setActiveRibbonTab('design');
+              message.success(`Imported ${file.name} (${fc!} triangles)`);
+            } catch (err: any) { message.error(`Import failed: ${err.message || err}`); }
+          };
+          reader.readAsArrayBuffer(file);
+        };
+        fileInput.click();
         break;
+      }
       case 'file:export': {
         const state = useAppStore.getState();
-        if (state.fieldData.length === 0) {
-          message.warning('No field data to export. Run the solver first.');
-        } else {
-          const lines = ['# GFD Field Data Export'];
-          state.fieldData.forEach(f => {
-            lines.push(`\n# ${f.name} (min=${f.min.toFixed(4)}, max=${f.max.toFixed(4)})`);
-          });
-          const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url; a.download = 'gfd_fields.vtk'; a.click();
-          URL.revokeObjectURL(url);
-          message.success('Field data exported.');
+        const mesh = state.meshDisplayData;
+        if (!mesh || mesh.positions.length === 0) {
+          message.warning('No mesh data to export. Generate a mesh first.');
+          break;
         }
+        const lines: string[] = ['# vtk DataFile Version 3.0', 'GFD Export', 'ASCII', 'DATASET UNSTRUCTURED_GRID'];
+        const nTriVerts = mesh.positions.length / 3;
+        const nTris = nTriVerts / 3;
+        lines.push(`POINTS ${nTriVerts} float`);
+        for (let i = 0; i < nTriVerts; i++) {
+          lines.push(`${mesh.positions[i*3].toFixed(6)} ${mesh.positions[i*3+1].toFixed(6)} ${mesh.positions[i*3+2].toFixed(6)}`);
+        }
+        lines.push(`CELLS ${nTris} ${nTris * 4}`);
+        for (let i = 0; i < nTris; i++) lines.push(`3 ${i*3} ${i*3+1} ${i*3+2}`);
+        lines.push(`CELL_TYPES ${nTris}`);
+        for (let i = 0; i < nTris; i++) lines.push('5');
+        if (state.fieldData.length > 0) {
+          lines.push(`POINT_DATA ${nTriVerts}`);
+          state.fieldData.forEach(f => {
+            lines.push(`SCALARS ${f.name} float 1`, 'LOOKUP_TABLE default');
+            const nV = Math.min(f.values.length, nTriVerts);
+            for (let i = 0; i < nV; i++) lines.push(f.values[i].toFixed(6));
+            for (let i = nV; i < nTriVerts; i++) lines.push('0.000000');
+          });
+        }
+        const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'gfd_export.vtk'; a.click();
+        URL.revokeObjectURL(url);
+        message.success(`Exported VTK: ${nTris} triangles`);
         break;
       }
       case 'file:exit':
@@ -164,10 +235,9 @@ export default function MenuBar() {
         break;
       case 'edit:undo': {
         const state = useAppStore.getState();
-        if (state.shapes.length > 0) {
-          const last = state.shapes[state.shapes.length - 1];
-          state.removeShape(last.id);
-          message.info(`Undo: removed "${last.name}"`);
+        if (state.undoStack.length > 0) {
+          state.undo();
+          message.info('Undo');
         } else {
           message.info('Nothing to undo');
         }
@@ -175,9 +245,9 @@ export default function MenuBar() {
       }
       case 'edit:redo': {
         const state = useAppStore.getState();
-        if (state.clipboardShape) {
-          state.addShape({ ...state.clipboardShape, id: `shape-redo-${Date.now()}` });
-          message.info('Redo: restored from clipboard');
+        if (state.redoStack.length > 0) {
+          state.redo();
+          message.info('Redo');
         } else {
           message.info('Nothing to redo');
         }
@@ -216,7 +286,7 @@ export default function MenuBar() {
         message.info('Documentation: Design > Prepare > Mesh > Setup > Calculation > Results workflow.');
         break;
       default:
-        console.log('[Menu]', info.key);
+        break;
     }
   };
 

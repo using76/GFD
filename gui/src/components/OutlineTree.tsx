@@ -10,7 +10,7 @@ import {
 
 export interface TreeItem {
   key: string;
-  title: string;
+  title: React.ReactNode;
   icon?: React.ReactNode;
   children?: TreeItem[];
   isLeaf?: boolean;

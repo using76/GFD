@@ -1,0 +1,185 @@
+# GFD — Generalized Fluid Dynamics
+
+Rust 기반 통합 멀티피직스 솔버 + Electron GUI 워크벤치
+
+> ANSYS Fluent/SpaceClaim 수준의 CFD 워크플로우를 단일 오픈소스 패키지로 제공하는 것이 목표입니다.
+
+---
+
+## 스크린샷
+
+```
+┌─ File ─ Quick Access ──────────────────────────────────────────────────┐
+│ [Design] [Display] [Measure] [Repair] [Prepare] [Mesh] [Setup] [Calc] [Results] │
+├─ Ribbon: Box Sphere Cylinder ... Import STL ... Boolean ... ───────────┤
+│ ┌─ CAD Tree ─────┐ ┌─ 3D Viewport ─────────────┐ ┌─ Properties ─────┐ │
+│ │ Bodies (3)      │ │                           │ │ Width: 1.0       │ │
+│ │  ├ box-1       │ │    [Three.js Scene]       │ │ Height: 1.0      │ │
+│ │  ├ sphere-2    │ │    Grid + Axes + Gizmo    │ │ Depth: 1.0       │ │
+│ │  └ cylinder-3  │ │                           │ │                  │ │
+│ │ Enclosures (1)  │ │                           │ │ [Delete Shape]   │ │
+│ └────────────────┘ └───────────────────────────┘ └──────────────────┘ │
+├─ Status: Ready │ Tool: Select │ Filter: Face │ 0 cells ───────────────┤
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+## 주요 특징
+
+| 영역 | 내용 |
+|------|------|
+| **Solver** | SIMPLE/PISO/SIMPLEC 압력-속도 커플링, Roe/HLLC/AUSM+ 리만 솔버 |
+| **난류** | k-epsilon, k-omega SST, Spalart-Allmaras, Realizable k-e, LES |
+| **다상** | VOF+CSF, Level Set, Euler-Euler, Mixture, DPM |
+| **열전달** | 전도/대류/복사(P-1, DO), 상변화, 공액열전달 |
+| **고체역학** | Hex8 FEM, Von Mises 소성, Newmark-beta 동역학 |
+| **메시** | Cartesian Hex, Tet, Poly, Delaunay, O-grid, Prism layer, Octree AMR |
+| **GUI** | Electron + React + Three.js, SpaceClaim 스타일 리본 UI |
+| **GPU** | CUDA 가속 (cudarc), AmgX 지원 (feature flag) |
+
+## 프로젝트 규모
+
+| 항목 | 수치 |
+|------|------|
+| Rust 소스 | 262 파일, 63,805 줄 |
+| GUI (TypeScript/React) | 50 파일, 14,290 줄 |
+| Crate 수 | 19 |
+| Rust 테스트 | **805 passed**, 0 failed |
+| TypeScript 에러 | **0** |
+
+## 빌드 방법
+
+### 요구사항
+
+- Rust 1.75+ (`rustup`)
+- Node.js 18+ (`npm`)
+- (선택) CUDA Toolkit 12+ (GPU 가속)
+
+### Solver 빌드
+
+```bash
+cargo build --release
+cargo test --workspace                    # 805 tests
+cargo run --release --bin gfd -- run examples/lid_driven_cavity.json
+```
+
+### GUI 빌드 및 실행
+
+```bash
+cd gui
+npm install
+npm run dev          # 개발 서버 (Vite, http://localhost:5173)
+npm run electron:dev # Electron 데스크톱 앱 (개발 모드)
+npm run build        # 프로덕션 빌드
+```
+
+### GPU 빌드 (선택)
+
+```bash
+cargo build --release --features gpu
+```
+
+## 아키텍처
+
+```
+Layer 0 (leaf):    gfd-core          gfd-expression
+                      |                    |
+Layer 1:     gfd-matrix  gfd-discretize  gfd-boundary  gfd-source  gfd-material
+             gfd-turbulence  gfd-coupling  gfd-gpu  gfd-io  gfd-parallel
+             gfd-postprocess  gfd-vdb
+                      |
+Layer 2:           gfd-linalg (-> gfd-core + gfd-matrix)
+                      |
+Layer 3 (physics): gfd-fluid  gfd-thermal  gfd-solid
+                      |
+Layer 4:           gfd-mesh (Cartesian, Delaunay, O-grid, Cut-cell, AMR)
+                      |
+Layer 5 (binary):  src/main.rs  src/server.rs (JSON-RPC)
+                      |
+Layer 6 (GUI):     gui/ (Electron + React + Three.js)
+```
+
+## GUI 워크플로우
+
+```
+1. Design → Shape 생성 / STL Import
+2. Prepare → Enclosure → Volume Extract → Named Selections
+3. Mesh → Settings (Type/Size) → Generate
+4. Setup → Models / Materials / Boundary Conditions / Solver
+5. Calculation → Start → Residual Plot → Console
+6. Results → Contours / Vectors / Streamlines / Reports → Export VTK
+```
+
+## 현재 진척도
+
+### 완료된 기능 (Working)
+
+| 기능 | 상태 | 상세 |
+|------|------|------|
+| Shape 생성 (Box/Sphere/Cylinder/Cone/Torus/Pipe) | **완료** | 6종 프리미티브, dimensions 편집 |
+| STL Import (ASCII + Binary) | **완료** | 자동 포맷 감지 |
+| Copy/Cut/Paste | **완료** | Ctrl+C/X/V + 리본 버튼 |
+| Undo/Redo (30단계) | **완료** | Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y |
+| Boolean 연산 (Union/Subtract/Intersect/Split) | **완료** | 선택 UI + 상태 관리 |
+| Fillet/Chamfer 토글 | **완료** | dimension 기반 |
+| Shell/Offset/Mirror | **완료** | |
+| Enclosure 생성 | **완료** | AABB + padding |
+| Volume Extract | **완료** | Fluid/Solid zone, 7 mesh surfaces |
+| Named Selections | **완료** | 타입별 색상, 메시 색상 매핑 |
+| Display (Wireframe/Solid/Contour/Transparent/Section/Exploded) | **완료** | |
+| Camera Presets (Front/Top/Iso 등) | **완료** | 애니메이션 이동 |
+| Camera (Perspective/Orthographic) | **완료** | |
+| Colormaps (Jet/Rainbow/Grayscale/Cool-Warm) | **완료** | 4종 |
+| Shape Visibility (Hide/Show) | **완료** | 삭제가 아닌 숨김 |
+| Measure (Distance/Angle/Area) | **완료** | Three.js raycasting |
+| Volume/Mass Properties | **완료** | 형상별 정확 공식 |
+| Mesh Generation (Hex/Tet/Poly) | **완료** | 3D grid + solid hole cutting |
+| Mesh Zone/Boundary Management | **완료** | Fluent 스타일 트리 |
+| Mesh Quality Statistics | **완료** | Orthogonality/Skewness/AR/Histogram |
+| Physics Models (Flow/Turbulence/Energy/Multiphase/Radiation) | **완료** | UI |
+| Material Presets (Air/Water/Steel/Aluminum) | **완료** | |
+| Boundary Conditions (Inlet/Outlet/Wall/Symmetry) | **완료** | 속도/압력/온도 편집 |
+| Solver Settings (SIMPLE/PISO, Relaxation, Tolerance) | **완료** | |
+| Solver Execution (Start/Pause/Stop) | **완료** | 시뮬레이션 모드 |
+| Residual Convergence Plot | **완료** | Recharts |
+| Console Output | **완료** | 타임스탬프, 자동 스크롤 |
+| Field Data (Pressure/Velocity/Temperature) | **완료** | per-vertex 색상 |
+| Vector Arrows | **완료** | 3D ArrowHelper |
+| Streamline Traces | **완료** | RK4 적분 |
+| Report Statistics (min/avg/max) | **완료** | CSV 내보내기 |
+| VTK Export | **완료** | Legacy ASCII 포맷 |
+| File Save/Open (JSON) | **완료** | 파일 다이얼로그 |
+| Keyboard Shortcuts (30+) | **완료** | Ctrl+S/Z/Y/C/X/V, F11, Del, 0-6 |
+| Defeaturing Analysis | **완료** | 형상 기반 결정론적 분석 |
+| Revolve/Sweep/Loft | **완료** | Shape dimension 기반 |
+| Fullscreen (F11) | **완료** | |
+
+### 미비한 점 (Known Limitations)
+
+| 항목 | 심각도 | 상세 |
+|------|--------|------|
+| **Solver가 시뮬레이션** | CRITICAL | GUI solver는 모의(fake) — `Math.exp()` 기반 잔차. 실제 SIMPLE/PISO는 Rust backend에 구현되어 있으나 GUI와 IPC 미연결 |
+| **Rust↔GUI IPC 미연결** | CRITICAL | `gfd-server` JSON-RPC 서버 존재하나 Electron에서 호출하지 않음. `gfdClient.ts` 스텁만 있음 |
+| **Repair 탭 분석** | HIGH | Check/Fix 버튼이 랜덤 이슈 생성 (실제 B-rep 분석 없음) |
+| **Boolean CSG 미구현** | HIGH | 상태 관리만 작동, 실제 메시 부울 연산 없음 (three-bvh-csg 등 필요) |
+| **STL→Solid AABB 근사** | MEDIUM | STL의 point-in-solid 판별이 바운딩 박스만 사용 (ray casting 미구현) |
+| **Mesh type 제한** | MEDIUM | Tet/Poly는 시각적 변형만 (실제 비정렬 알고리즘 미구현) |
+| **Turbulence model 미반영** | MEDIUM | 모델 선택이 콘솔 로그에만 반영, solver 알고리즘 변경 없음 |
+| **BC→Solver 미연결** | MEDIUM | BC 데이터가 모의 solver에 전달되지 않음 |
+| **Named Selection 3D 클릭** | MEDIUM | 면 직접 클릭 선택 미구현 (수동 입력) |
+| **Setup 탭 이벤트 라우팅** | LOW | Custom event 기반 — Zustand 상태로 전환 필요 |
+
+### 로드맵
+
+1. **Phase 1**: Rust gfd-server ↔ Electron IPC 연결 (solve.start → 실제 SIMPLE 실행)
+2. **Phase 2**: 실제 CSG Boolean (three-bvh-csg 또는 Rust manifold3d)
+3. **Phase 3**: Ray casting 기반 정확한 point-in-solid
+4. **Phase 4**: GPU solver 가속 연동 (gfd-gpu CUDA)
+5. **Phase 5**: 병렬 MPI 실행 (gfd-parallel)
+
+## 라이선스
+
+Modified MIT License — 자세한 내용은 [LICENSE](LICENSE) 참조.
+
+## 기여
+
+이슈 및 PR 환영합니다.

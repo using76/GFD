@@ -221,10 +221,14 @@ const PrimitiveToolbar: React.FC = () => {
         if (!selectedShapeId) { message.warning('Select a shape to revolve.'); return; }
         const shape = shapes.find(s => s.id === selectedShapeId);
         if (!shape) return;
+        // Revolve: create torus with major radius from shape offset and minor radius from profile
+        const profileR = shape.dimensions.radius ?? Math.min(shape.dimensions.width ?? 0.5, shape.dimensions.height ?? 0.5) / 2;
+        const majorR = Math.max(profileR * 2, 0.5);
         const rev = makeShape('torus', `${shape.name}-revolve`);
         rev.position = [...shape.position] as [number, number, number];
+        rev.dimensions = { majorRadius: majorR, minorRadius: profileR };
         addShape(rev);
-        message.success(`Revolved "${shape.name}" into torus.`);
+        message.success(`Revolved "${shape.name}" (R=${majorR.toFixed(2)}, r=${profileR.toFixed(2)})`);
       },
     },
     {
@@ -235,11 +239,14 @@ const PrimitiveToolbar: React.FC = () => {
         if (!selectedShapeId) { message.warning('Select a shape to sweep.'); return; }
         const shape = shapes.find(s => s.id === selectedShapeId);
         if (!shape) return;
+        // Sweep: extrude profile along Y axis
+        const profileR = shape.dimensions.radius ?? (shape.dimensions.width ?? 0.5) / 2;
+        const sweepLen = parseFloat(prompt('Sweep length (m):', '2') ?? '2') || 2;
         const swept = makeShape('cylinder', `${shape.name}-sweep`);
-        swept.position = [...shape.position] as [number, number, number];
-        swept.dimensions = { radius: (shape.dimensions.radius || shape.dimensions.width || 0.3) * 0.5, height: 2 };
+        swept.position = [shape.position[0], shape.position[1] + sweepLen / 2, shape.position[2]] as [number, number, number];
+        swept.dimensions = { radius: profileR, height: sweepLen };
         addShape(swept);
-        message.success(`Swept "${shape.name}" along axis.`);
+        message.success(`Swept "${shape.name}" (R=${profileR.toFixed(2)}, L=${sweepLen}m)`);
       },
     },
     {
@@ -250,11 +257,14 @@ const PrimitiveToolbar: React.FC = () => {
         if (!selectedShapeId) { message.warning('Select a shape to loft.'); return; }
         const shape = shapes.find(s => s.id === selectedShapeId);
         if (!shape) return;
+        // Loft: create cone transitioning from base radius to tip
+        const baseR = shape.dimensions.radius ?? (shape.dimensions.width ?? 0.5) / 2;
+        const loftH = parseFloat(prompt('Loft height (m):', '1.5') ?? '1.5') || 1.5;
         const lofted = makeShape('cone', `${shape.name}-loft`);
-        lofted.position = [...shape.position] as [number, number, number];
-        lofted.dimensions = { radius: shape.dimensions.radius || shape.dimensions.width || 0.4, height: 1.5 };
+        lofted.position = [shape.position[0], shape.position[1] + loftH / 2, shape.position[2]] as [number, number, number];
+        lofted.dimensions = { radius: baseR, height: loftH };
         addShape(lofted);
-        message.success(`Lofted "${shape.name}" into cone.`);
+        message.success(`Lofted "${shape.name}" (R=${baseR.toFixed(2)}, H=${loftH}m)`);
       },
     },
   ];

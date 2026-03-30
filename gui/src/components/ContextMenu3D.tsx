@@ -21,6 +21,7 @@ const ContextMenu3D: React.FC = () => {
   const contextMenu = useAppStore((s) => s.contextMenu);
   const setContextMenu = useAppStore((s) => s.setContextMenu);
   const removeShape = useAppStore((s) => s.removeShape);
+  const toggleShapeVisibility = useAppStore((s) => s.toggleShapeVisibility);
   const addShape = useAppStore((s) => s.addShape);
   const shapes = useAppStore((s) => s.shapes);
   const selectShape = useAppStore((s) => s.selectShape);
@@ -28,19 +29,18 @@ const ContextMenu3D: React.FC = () => {
 
   // Close on escape or any other click
   useEffect(() => {
+    if (!contextMenu) return;
     const handleClose = () => setContextMenu(null);
-    if (contextMenu) {
-      // Delay to avoid closing on the same click
-      const timer = setTimeout(() => {
-        window.addEventListener('click', handleClose);
-        window.addEventListener('keydown', handleClose);
-      }, 50);
-      return () => {
-        clearTimeout(timer);
-        window.removeEventListener('click', handleClose);
-        window.removeEventListener('keydown', handleClose);
-      };
-    }
+    // Add listeners immediately but on next microtask to avoid the triggering click
+    const raf = requestAnimationFrame(() => {
+      window.addEventListener('click', handleClose);
+      window.addEventListener('keydown', handleClose);
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('click', handleClose);
+      window.removeEventListener('keydown', handleClose);
+    };
   }, [contextMenu, setContextMenu]);
 
   const handleAction = useCallback(
@@ -98,7 +98,7 @@ const ContextMenu3D: React.FC = () => {
       key: 'hide',
       icon: <EyeInvisibleOutlined />,
       label: 'Hide',
-      action: () => { removeShape(shape.id); message.info(`Hidden ${shape.name}`); },
+      action: () => { toggleShapeVisibility(shape.id); message.info(`Hidden ${shape.name}`); },
     });
     items.push({
       key: 'properties',

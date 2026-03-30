@@ -45,6 +45,7 @@ import SolverSettingsPanel from '../tabs/setup/SolverSettingsPanel';
 import RunControls from '../tabs/calc/RunControls';
 import ContourSettings from '../tabs/results/ContourSettings';
 import VectorSettings from '../tabs/results/VectorSettings';
+import StreamlineSettings from '../tabs/results/StreamlineSettings';
 import ReportPanel from '../tabs/results/ReportPanel';
 
 // ============================================================
@@ -744,7 +745,7 @@ const LeftPanelStack: React.FC = () => {
   const resultsPanelMap: Record<string, React.ReactNode> = {
     contours: <ContourSettings />,
     vectors: <VectorSettings />,
-    streamlines: <VectorSettings />,
+    streamlines: <StreamlineSettings />,
     reports: <ReportPanel />,
   };
 

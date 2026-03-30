@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Checkbox, Radio, InputNumber, Form, Slider } from 'antd';
+import { Checkbox, Radio, InputNumber, Form, Slider, Button, message } from 'antd';
 import { useAppStore } from '../store/useAppStore';
 
 // ============================================================
@@ -38,6 +38,24 @@ const PullOptions: React.FC = () => {
   const [symmetric, setSymmetric] = useState(false);
   const [draftAngle, setDraftAngle] = useState(0);
   const [directionLock, setDirectionLock] = useState<'none' | 'x' | 'y' | 'z'>('none');
+
+  const applyPull = () => {
+    const state = useAppStore.getState();
+    const sid = state.selectedShapeId;
+    if (!sid) { message.warning('Select a shape first'); return; }
+    const shape = state.shapes.find(s => s.id === sid);
+    if (!shape) return;
+    const d = { ...shape.dimensions };
+    const dir = directionLock === 'none' ? 'y' : directionLock;
+    const amount = mode === 'cut' ? -distance : distance;
+    const symMult = symmetric ? 2 : 1;
+    // Modify the dimension in the pull direction
+    if (dir === 'x') d.width = Math.max(0.01, (d.width ?? 1) + amount * symMult);
+    else if (dir === 'y') d.height = Math.max(0.01, (d.height ?? 1) + amount * symMult);
+    else if (dir === 'z') d.depth = Math.max(0.01, (d.depth ?? 1) + amount * symMult);
+    state.updateShape(sid, { dimensions: d });
+    message.success(`Pull ${mode}: ${dir} += ${amount.toFixed(2)}m`);
+  };
 
   return (
     <div style={{ padding: 10, fontSize: 12 }}>
@@ -91,7 +109,7 @@ const PullOptions: React.FC = () => {
       </div>
 
       <Form layout="vertical" size="small" style={{ marginTop: 8 }}>
-        <Form.Item label="Draft angle" style={{ marginBottom: 0 }}>
+        <Form.Item label="Draft angle" style={{ marginBottom: 6 }}>
           <InputNumber
             value={draftAngle}
             min={-45}
@@ -104,6 +122,9 @@ const PullOptions: React.FC = () => {
           />
         </Form.Item>
       </Form>
+      <Button type="primary" size="small" block onClick={applyPull} style={{ marginTop: 8 }}>
+        Apply Pull
+      </Button>
     </div>
   );
 };
@@ -116,6 +137,35 @@ const MoveOptions: React.FC = () => {
   const [snapToGrid, setSnapToGrid] = useState(true);
   const [moveDistance, setMoveDistance] = useState(1.0);
   const [moveAngle, setMoveAngle] = useState(0);
+  const [moveAxis, setMoveAxis] = useState<'x' | 'y' | 'z'>('x');
+
+  const applyMove = () => {
+    const state = useAppStore.getState();
+    const sid = state.selectedShapeId;
+    if (!sid) { message.warning('Select a shape first'); return; }
+    const shape = state.shapes.find(s => s.id === sid);
+    if (!shape) return;
+    const pos: [number, number, number] = [...shape.position];
+    const rot: [number, number, number] = [...shape.rotation];
+    const d = snapToGrid ? Math.round(moveDistance * 10) / 10 : moveDistance;
+    if (moveAxis === 'x') pos[0] += d;
+    else if (moveAxis === 'y') pos[1] += d;
+    else pos[2] += d;
+    if (moveAngle !== 0) {
+      if (moveAxis === 'x') rot[0] += moveAngle;
+      else if (moveAxis === 'y') rot[1] += moveAngle;
+      else rot[2] += moveAngle;
+    }
+    if (copy) {
+      const newId = `shape-mv-${Date.now()}`;
+      state.addShape({ ...shape, id: newId, name: `${shape.name}-copy`, position: pos, rotation: rot });
+      state.selectShape(newId);
+      message.success(`Copy+Move: ${moveAxis} += ${d}m`);
+    } else {
+      state.updateShape(sid, { position: pos, rotation: rot });
+      message.success(`Move: ${moveAxis} += ${d}m`);
+    }
+  };
 
   return (
     <div style={{ padding: 10, fontSize: 12 }}>
@@ -129,11 +179,18 @@ const MoveOptions: React.FC = () => {
         </Checkbox>
       </div>
 
+      <div style={{ color: '#889', fontSize: 11, marginBottom: 4, fontWeight: 500 }}>Axis</div>
+      <Radio.Group value={moveAxis} onChange={(e) => setMoveAxis(e.target.value)} size="small" style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+        <Radio value="x" style={{ fontSize: 11, color: '#ff4444' }}>X</Radio>
+        <Radio value="y" style={{ fontSize: 11, color: '#44ff44' }}>Y</Radio>
+        <Radio value="z" style={{ fontSize: 11, color: '#4444ff' }}>Z</Radio>
+      </Radio.Group>
+
       <Form layout="vertical" size="small">
         <Form.Item label="Distance" style={{ marginBottom: 6 }}>
           <InputNumber
             value={moveDistance}
-            min={0}
+            min={-100}
             max={100}
             step={0.1}
             onChange={(v) => setMoveDistance(v ?? 1.0)}
@@ -142,7 +199,7 @@ const MoveOptions: React.FC = () => {
             size="small"
           />
         </Form.Item>
-        <Form.Item label="Rotation angle" style={{ marginBottom: 0 }}>
+        <Form.Item label="Rotation angle" style={{ marginBottom: 6 }}>
           <InputNumber
             value={moveAngle}
             min={-360}
@@ -155,6 +212,9 @@ const MoveOptions: React.FC = () => {
           />
         </Form.Item>
       </Form>
+      <Button type="primary" size="small" block onClick={applyMove} style={{ marginTop: 4 }}>
+        Apply Move
+      </Button>
     </div>
   );
 };
@@ -165,6 +225,18 @@ const MoveOptions: React.FC = () => {
 const FillOptions: React.FC = () => {
   const [fillMode, setFillMode] = useState<'auto' | 'manual'>('auto');
   const [detectBoundary, setDetectBoundary] = useState(true);
+
+  const applyFill = () => {
+    const state = useAppStore.getState();
+    // Fix all repair issues (gaps/missing faces) as a "fill" operation
+    const unfixed = state.repairIssues.filter(i => !i.fixed && (i.kind === 'gap' || i.kind === 'missing_face'));
+    if (unfixed.length > 0) {
+      state.fixAllRepairIssues();
+      message.success(`Auto-filled ${unfixed.length} gap(s)/missing face(s)`);
+    } else {
+      message.info('No gaps or missing faces to fill. Run Repair > Check first.');
+    }
+  };
 
   return (
     <div style={{ padding: 10, fontSize: 12 }}>
@@ -187,7 +259,7 @@ const FillOptions: React.FC = () => {
 
       {fillMode === 'auto' && (
         <div style={{ marginTop: 8, padding: 6, background: '#1a1a30', borderRadius: 4, color: '#667', fontSize: 11 }}>
-          Auto mode: automatically detects and fills holes and gaps based on surrounding geometry.
+          Auto mode: fixes gaps and missing faces detected by Repair Check.
         </div>
       )}
       {fillMode === 'manual' && (
@@ -195,6 +267,9 @@ const FillOptions: React.FC = () => {
           Manual mode: select edges to define the fill boundary, then confirm.
         </div>
       )}
+      <Button type="primary" size="small" block onClick={applyFill} style={{ marginTop: 8 }}>
+        Apply Fill
+      </Button>
     </div>
   );
 };

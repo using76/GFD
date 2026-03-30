@@ -32,20 +32,32 @@ const AppMenu: React.FC = () => {
   const menuItems = [
     { key: 'new', icon: <FileOutlined />, label: 'New Project', action: () => { if (confirm('Create a new project?')) window.location.reload(); } },
     { key: 'open', icon: <FolderOpenOutlined />, label: 'Open...', action: () => {
-      try {
-        const data = localStorage.getItem('gfd-project');
-        if (data) {
-          const saved = JSON.parse(data);
-          const state = useAppStore.getState();
-          if (saved.shapes) saved.shapes.forEach((s: any) => state.addShape(s));
-          if (saved.physicsModels) state.updatePhysicsModels(saved.physicsModels);
-          if (saved.material) state.updateMaterial(saved.material);
-          if (saved.solverSettings) state.updateSolverSettings(saved.solverSettings);
-          message.success('Project loaded from local storage.');
-        } else {
-          message.info('No saved project found in local storage.');
-        }
-      } catch { message.error('Failed to load project.'); }
+      // Use file input dialog to load .json project file
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json,.gfd';
+      input.onchange = (e) => {
+        const file = (e.target as HTMLInputElement).files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const saved = JSON.parse(ev.target?.result as string);
+            const state = useAppStore.getState();
+            // Clear existing shapes
+            state.shapes.forEach(s => state.removeShape(s.id));
+            if (saved.shapes) saved.shapes.forEach((s: any) => state.addShape(s));
+            if (saved.physicsModels) state.updatePhysicsModels(saved.physicsModels);
+            if (saved.material) state.updateMaterial(saved.material);
+            if (saved.solverSettings) state.updateSolverSettings(saved.solverSettings);
+            if (saved.boundaries) saved.boundaries.forEach((b: any) => state.addBoundary(b));
+            if (saved.meshConfig) state.updateMeshConfig(saved.meshConfig);
+            message.success(`Project loaded: ${file.name}`);
+          } catch { message.error('Failed to parse project file.'); }
+        };
+        reader.readAsText(file);
+      };
+      input.click();
     }},
     { key: 'save', icon: <SaveOutlined />, label: 'Save', action: () => {
       try {
@@ -90,28 +102,61 @@ const AppMenu: React.FC = () => {
     }},
     { key: 'export', icon: <ExportOutlined />, label: 'Export VTK...', action: () => {
       const state = useAppStore.getState();
-      if (state.fieldData.length === 0) {
-        message.warning('No field data to export. Run the solver first.');
+      const mesh = state.meshDisplayData;
+      if (!mesh || mesh.positions.length === 0) {
+        message.warning('No mesh data to export. Generate a mesh first.');
         return;
       }
-      const lines: string[] = ['# GFD Field Data Export'];
-      lines.push(`# Fields: ${state.fieldData.map(f => f.name).join(', ')}`);
-      lines.push(`# Mesh: ${state.meshDisplayData?.cellCount ?? 0} cells`);
-      state.fieldData.forEach(f => {
-        lines.push(`\n# ${f.name} (min=${f.min.toFixed(4)}, max=${f.max.toFixed(4)})`);
-        lines.push(`# ${f.values.length} values`);
-        const sample = Math.min(f.values.length, 100);
-        for (let i = 0; i < sample; i++) lines.push(f.values[i].toFixed(6));
-        if (f.values.length > sample) lines.push(`# ... ${f.values.length - sample} more values`);
-      });
+      // Build VTK Legacy ASCII format
+      const lines: string[] = [];
+      lines.push('# vtk DataFile Version 3.0');
+      lines.push('GFD Export');
+      lines.push('ASCII');
+      lines.push('DATASET UNSTRUCTURED_GRID');
+
+      // Extract unique vertices from triangle positions
+      const nTriVerts = mesh.positions.length / 3;
+      const nTris = nTriVerts / 3;
+      lines.push(`POINTS ${nTriVerts} float`);
+      for (let i = 0; i < nTriVerts; i++) {
+        lines.push(`${mesh.positions[i*3].toFixed(6)} ${mesh.positions[i*3+1].toFixed(6)} ${mesh.positions[i*3+2].toFixed(6)}`);
+      }
+
+      // Cells: each triangle = 3 vertices
+      lines.push(`CELLS ${nTris} ${nTris * 4}`);
+      for (let i = 0; i < nTris; i++) {
+        lines.push(`3 ${i*3} ${i*3+1} ${i*3+2}`);
+      }
+
+      // Cell types: 5 = VTK_TRIANGLE
+      lines.push(`CELL_TYPES ${nTris}`);
+      for (let i = 0; i < nTris; i++) lines.push('5');
+
+      // Point data (field values)
+      if (state.fieldData.length > 0) {
+        lines.push(`POINT_DATA ${nTriVerts}`);
+        state.fieldData.forEach(f => {
+          lines.push(`SCALARS ${f.name} float 1`);
+          lines.push('LOOKUP_TABLE default');
+          const nVals = Math.min(f.values.length, nTriVerts);
+          for (let i = 0; i < nVals; i++) {
+            lines.push(f.values[i].toFixed(6));
+          }
+          // Pad if field values are shorter
+          for (let i = nVals; i < nTriVerts; i++) {
+            lines.push('0.000000');
+          }
+        });
+      }
+
       const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'gfd_fields.vtk';
+      a.download = 'gfd_export.vtk';
       a.click();
       URL.revokeObjectURL(url);
-      message.success('Field data exported as gfd_fields.vtk');
+      message.success(`Exported VTK: ${nTris} triangles, ${state.fieldData.length} fields`);
     }},
     { key: 'div2', divider: true },
     { key: 'settings', icon: <SettingOutlined />, label: 'Settings', action: () => {
@@ -162,15 +207,16 @@ const AppMenu: React.FC = () => {
             boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
           }}>
             {menuItems.map((item) => {
-              if ((item as any).divider) {
+              if ('divider' in item && item.divider) {
                 return <div key={item.key} style={{ height: 1, background: '#303050', margin: '4px 8px' }} />;
               }
+              const mi = item as { key: string; icon?: React.ReactNode; label?: string; action?: () => void };
               return (
                 <div
-                  key={item.key}
+                  key={mi.key}
                   onClick={() => {
                     setOpen(false);
-                    (item as any).action?.();
+                    mi.action?.();
                   }}
                   style={{
                     display: 'flex',
@@ -185,9 +231,9 @@ const AppMenu: React.FC = () => {
                   onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                 >
                   <span style={{ fontSize: 13, width: 16, textAlign: 'center', color: '#889' }}>
-                    {(item as any).icon}
+                    {mi.icon}
                   </span>
-                  {item.label}
+                  {mi.label}
                 </div>
               );
             })}
@@ -206,19 +252,18 @@ const QuickAccess: React.FC = () => (
     {[
       { icon: <UndoOutlined />, tip: 'Undo', action: () => {
         const state = useAppStore.getState();
-        if (state.shapes.length > 0) {
-          const last = state.shapes[state.shapes.length - 1];
-          state.removeShape(last.id);
-          message.info(`Undo: removed "${last.name}"`);
+        if (state.undoStack.length > 0) {
+          state.undo();
+          message.info('Undo');
         } else {
           message.info('Nothing to undo');
         }
       }},
       { icon: <RedoOutlined />, tip: 'Redo', action: () => {
         const state = useAppStore.getState();
-        if (state.clipboardShape) {
-          state.addShape({ ...state.clipboardShape, id: `shape-redo-${Date.now()}` });
-          message.info('Redo: restored from clipboard');
+        if (state.redoStack.length > 0) {
+          state.redo();
+          message.info('Redo');
         } else {
           message.info('Nothing to redo');
         }
@@ -388,35 +433,90 @@ function useKeyboardShortcuts() {
         switch (e.key.toLowerCase()) {
           case 'z':
             e.preventDefault();
-            store.undoLastFix();
-            message.info('Undo');
+            if (e.shiftKey) {
+              if (store.redoStack.length > 0) {
+                store.redo();
+                message.info('Redo');
+              }
+            } else {
+              if (store.undoStack.length > 0) {
+                store.undo();
+                message.info('Undo');
+              }
+            }
+            return;
+          case 's':
+            e.preventDefault();
+            try {
+              const data = {
+                shapes: store.shapes.map(s => ({ ...s, stlData: undefined })),
+                physicsModels: store.physicsModels,
+                material: store.material,
+                solverSettings: store.solverSettings,
+                boundaries: store.boundaries,
+                meshConfig: store.meshConfig,
+              };
+              localStorage.setItem('gfd-project', JSON.stringify(data));
+              message.success('Project saved');
+            } catch { message.error('Save failed'); }
+            return;
+          case 'x':
+            e.preventDefault();
+            if (store.selectedShapeId) {
+              const shape = store.shapes.find(s => s.id === store.selectedShapeId);
+              if (shape) {
+                store.setClipboardShape({ ...shape });
+                store.setClipboardShapeId(store.selectedShapeId);
+                store.removeShape(store.selectedShapeId);
+                message.info(`Cut "${shape.name}"`);
+              }
+            }
             return;
           case 'c':
             e.preventDefault();
             if (store.selectedShapeId) {
+              const shape = store.shapes.find(s => s.id === store.selectedShapeId);
+              if (shape) store.setClipboardShape({ ...shape });
               store.setClipboardShapeId(store.selectedShapeId);
               message.info('Shape copied');
             }
             return;
-          case 'v':
+          case 'v': {
             e.preventDefault();
-            const clipId = store.clipboardShapeId;
-            if (clipId) {
-              const original = store.shapes.find(s => s.id === clipId);
-              if (original) {
-                const id = `shape-${pasteCounter++}`;
-                store.addShape({
-                  ...original,
-                  id,
-                  name: `${original.name}-paste`,
-                  position: [original.position[0] + 0.5, original.position[1], original.position[2] + 0.5],
-                  stlData: original.stlData,
-                });
-                store.selectShape(id);
-                message.success('Shape pasted');
-              }
+            // Prefer full clipboardShape (works even after source is deleted via cut)
+            const source = store.clipboardShape ?? store.shapes.find(s => s.id === store.clipboardShapeId);
+            if (source) {
+              const id = `shape-${pasteCounter++}`;
+              store.addShape({
+                ...source,
+                id,
+                name: `${source.name}-paste`,
+                position: [source.position[0] + 0.5, source.position[1], source.position[2] + 0.5],
+                stlData: source.stlData,
+              });
+              store.selectShape(id);
+              message.success('Shape pasted');
             }
             return;
+          }
+          case 'y':
+            e.preventDefault();
+            if (store.redoStack.length > 0) {
+              store.redo();
+              message.info('Redo');
+            }
+            return;
+        }
+        return;
+      }
+
+      // Function keys
+      if (e.key === 'F11') {
+        e.preventDefault();
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen().catch(() => {});
+        } else {
+          document.exitFullscreen().catch(() => {});
         }
         return;
       }

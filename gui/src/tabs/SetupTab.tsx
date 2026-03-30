@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   ExperimentOutlined,
   GoldOutlined,
@@ -57,6 +57,18 @@ const panelMap: Record<SetupSection, React.ReactNode> = {
 
 const SetupTab: React.FC<SetupTabProps> = ({ viewport }) => {
   const [section, setSection] = useState<SetupSection>('models');
+
+  // Listen for section change events from Ribbon buttons
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.section && ['models', 'materials', 'boundaries', 'solver'].includes(detail.section)) {
+        setSection(detail.section as SetupSection);
+      }
+    };
+    window.addEventListener('gfd-setup-section', handler);
+    return () => window.removeEventListener('gfd-setup-section', handler);
+  }, []);
 
   const leftPanel = (
     <div>

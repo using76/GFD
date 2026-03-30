@@ -9,6 +9,7 @@ import {
   FileOutlined,
   ExpandOutlined,
   InteractionOutlined,
+  EyeInvisibleOutlined,
 } from '@ant-design/icons';
 import OutlineTree from '../../components/OutlineTree';
 import type { TreeItem } from '../../components/OutlineTree';
@@ -75,7 +76,9 @@ const CadTree: React.FC = () => {
       title: `Bodies (${bodies.length})`,
       children: bodies.map((s) => ({
         key: s.id,
-        title: s.name,
+        title: s.visible === false
+          ? <span style={{ opacity: 0.4 }}><EyeInvisibleOutlined style={{ marginRight: 4, fontSize: 10 }} />{s.name}</span>
+          : s.name,
         icon: kindIcon(s.kind),
         isLeaf: true,
       })),
@@ -103,7 +106,9 @@ const CadTree: React.FC = () => {
       icon: <ExpandOutlined style={{ color: '#52c41a' }} />,
       children: enclosures.map((s) => ({
         key: s.id,
-        title: s.name,
+        title: s.visible === false
+          ? <span style={{ opacity: 0.4 }}><EyeInvisibleOutlined style={{ marginRight: 4, fontSize: 10 }} />{s.name}</span>
+          : s.name,
         icon: kindIcon(s.kind, true),
         isLeaf: true,
       })),

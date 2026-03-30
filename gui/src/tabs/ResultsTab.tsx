@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   HeatMapOutlined,
   ArrowsAltOutlined,
@@ -10,6 +10,7 @@ import OutlineTree from '../components/OutlineTree';
 import type { TreeItem } from '../components/OutlineTree';
 import ContourSettings from './results/ContourSettings';
 import VectorSettings from './results/VectorSettings';
+import StreamlineSettings from './results/StreamlineSettings';
 import ReportPanel from './results/ReportPanel';
 
 interface ResultsTabProps {
@@ -39,12 +40,23 @@ const treeItems: TreeItem[] = [
 const panelMap: Record<ResultsSection, React.ReactNode> = {
   contours: <ContourSettings />,
   vectors: <VectorSettings />,
-  streamlines: <VectorSettings />,
+  streamlines: <StreamlineSettings />,
   reports: <ReportPanel />,
 };
 
 const ResultsTab: React.FC<ResultsTabProps> = ({ viewport }) => {
   const [section, setSection] = useState<ResultsSection>('contours');
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.section && ['contours', 'vectors', 'streamlines', 'reports'].includes(detail.section)) {
+        setSection(detail.section as ResultsSection);
+      }
+    };
+    window.addEventListener('gfd-results-section', handler);
+    return () => window.removeEventListener('gfd-results-section', handler);
+  }, []);
 
   const leftPanel = (
     <div>
