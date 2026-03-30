@@ -825,7 +825,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateMeshConfig: (patch) =>
     set((s) => ({ meshConfig: { ...s.meshConfig, ...patch } })),
   generateMesh: () => {
-    set({ meshGenerating: true });
+    set((s) => ({
+      meshGenerating: true,
+      consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [Mesh] Starting mesh generation...`],
+    }));
     // Generate real 3D hex mesh respecting geometry
     setTimeout(() => {
       const state = get();
@@ -1043,6 +1046,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
       }
 
+      // Progress: cell classification complete
+      set((s) => ({ consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [Mesh] Cell classification: ${fluidCellCount} fluid, ${solidCellCount} solid (${totalCells} total)`] }));
+
       // --- Boundary color definitions (RGB 0..1) ---
       const bndColors: Record<string, [number, number, number]> = {
         xmin_inlet: [0.267, 0.533, 1.0],   // #4488ff blue
@@ -1205,6 +1211,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           }
         }
       }
+
+      // Progress: surface extraction complete
+      set((s) => ({ consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [Mesh] Surface extraction: ${triPositions.length / 9} triangles, ${wirePositions.length / 6} wireframe edges`] }));
 
       const meshPositions = new Float32Array(triPositions);
       const meshColors = new Float32Array(triColors);
@@ -1465,6 +1474,46 @@ export const useAppStore = create<AppState>((set, get) => ({
     const state = get();
     if (state.solverStatus === 'running') return;
     const now = new Date().toLocaleTimeString();
+
+    // Pre-flight validation (skip for resume)
+    if (state.solverStatus !== 'paused') {
+      const warnings: string[] = [];
+      if (!state.meshGenerated || !state.meshDisplayData) {
+        warnings.push('No mesh generated. Generate a mesh first.');
+      }
+      if (state.boundaries.length === 0) {
+        warnings.push('No boundary conditions defined.');
+      }
+      const inletBC = state.boundaries.find(b => b.type === 'inlet');
+      if (inletBC) {
+        const vMag = Math.sqrt(inletBC.velocity[0]**2 + inletBC.velocity[1]**2 + inletBC.velocity[2]**2);
+        if (vMag === 0) warnings.push('Inlet velocity is zero.');
+      }
+      if (state.solverSettings.maxIterations < 1) {
+        warnings.push('Max iterations must be >= 1.');
+      }
+      if (warnings.length > 0 && !state.meshGenerated) {
+        // Critical: can't run without mesh
+        set((s) => ({
+          consoleLines: [...s.consoleLines,
+            `[${now}] [GFD] *** PRE-FLIGHT CHECK FAILED ***`,
+            ...warnings.map(w => `[${now}] [GFD]   - ${w}`),
+            `[${now}] [GFD] Solver not started.`,
+          ],
+        }));
+        return;
+      }
+      // Non-critical warnings: log but continue
+      if (warnings.length > 0) {
+        set((s) => ({
+          consoleLines: [...s.consoleLines,
+            `[${now}] [GFD] Warnings:`,
+            ...warnings.map(w => `[${now}] [GFD]   ⚠ ${w}`),
+          ],
+        }));
+      }
+    }
+
     const method = state.solverSettings.method;
     const isResume = state.solverStatus === 'paused';
     const initLines = isResume
