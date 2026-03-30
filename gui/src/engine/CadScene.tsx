@@ -1784,6 +1784,12 @@ const CadScene: React.FC = () => {
       {/* Streamline traces */}
       <StreamlineTraces />
 
+      {/* Refinement zone wireframes */}
+      <RefinementZoneOverlays />
+
+      {/* 3D Annotations */}
+      <Annotations3D />
+
       {/* Probe points */}
       <ProbePointMarkers />
 
@@ -1960,6 +1966,78 @@ const DpmParticles: React.FC = () => {
       </bufferGeometry>
       <pointsMaterial size={0.05} vertexColors sizeAttenuation transparent opacity={0.8} />
     </points>
+  );
+};
+
+// ============================================================
+// Refinement Zone Wireframes
+// ============================================================
+const RefinementZoneOverlays: React.FC = () => {
+  const zones = useAppStore((s) => s.refinementZones);
+  if (zones.length === 0) return null;
+  return (
+    <group>
+      {zones.map((z) => (
+        <mesh key={z.id} position={z.center}>
+          <boxGeometry args={z.size} />
+          <meshBasicMaterial color="#ff8800" wireframe transparent opacity={0.4} />
+          <Edges color="#ff8800" threshold={0} />
+        </mesh>
+      ))}
+    </group>
+  );
+};
+
+// ============================================================
+// 3D Annotations — text labels in 3D space
+// ============================================================
+const Annotations3D: React.FC = () => {
+  const annotations = useAppStore((s) => s.annotations);
+  if (annotations.length === 0) return null;
+
+  return (
+    <group>
+      {annotations.map((a) => (
+        <group key={a.id} position={a.position}>
+          <mesh>
+            <sphereGeometry args={[0.03, 8, 8]} />
+            <meshBasicMaterial color={a.color} />
+          </mesh>
+          {/* Vertical pin */}
+          <primitive object={(() => {
+            const g = new THREE.BufferGeometry();
+            g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0,0,0, 0,0.25,0]), 3));
+            return new THREE.Line(g, new THREE.LineBasicMaterial({ color: a.color }));
+          })()} />
+          {/* Billboard text sprite */}
+          <sprite position={[0, 0.35, 0]} scale={[a.text.length * 0.08, 0.15, 1]}>
+            <spriteMaterial
+              map={(() => {
+                const canvas = document.createElement('canvas');
+                canvas.width = 256; canvas.height = 64;
+                const ctx = canvas.getContext('2d')!;
+                ctx.fillStyle = 'rgba(20,20,40,0.85)';
+                ctx.roundRect(0, 0, 256, 64, 8);
+                ctx.fill();
+                ctx.strokeStyle = a.color;
+                ctx.lineWidth = 2;
+                ctx.roundRect(0, 0, 256, 64, 8);
+                ctx.stroke();
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 24px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(a.text, 128, 32);
+                const tex = new THREE.CanvasTexture(canvas);
+                return tex;
+              })()}
+              transparent
+              depthTest={false}
+            />
+          </sprite>
+        </group>
+      ))}
+    </group>
   );
 };
 

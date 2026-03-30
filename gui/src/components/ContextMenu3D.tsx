@@ -224,6 +224,36 @@ const ContextMenu3D: React.FC = () => {
         window.dispatchEvent(new CustomEvent('gfd-camera-preset', { detail: { position: [5, 5, 5] } }));
       },
     });
+    items.push({ key: 'div3', icon: null, label: '', action: () => {}, divider: true });
+    items.push({
+      key: 'add-note',
+      icon: <InfoCircleOutlined />,
+      label: 'Add Note Here',
+      action: () => {
+        const text = prompt('Enter annotation text:', 'Note');
+        if (text) {
+          useAppStore.getState().addAnnotation(text, [0, 0, 0]);
+          message.success(`Note added: "${text}"`);
+        }
+      },
+    });
+  }
+
+  // Shape-specific: add note at shape position
+  if (shape) {
+    items.push({ key: 'div-note', icon: null, label: '', action: () => {}, divider: true });
+    items.push({
+      key: 'add-note-at',
+      icon: <InfoCircleOutlined />,
+      label: 'Add Note at Shape',
+      action: () => {
+        const text = prompt('Enter annotation text:', shape.name);
+        if (text) {
+          useAppStore.getState().addAnnotation(text, [...shape.position] as [number, number, number]);
+          message.success(`Note added: "${text}"`);
+        }
+      },
+    });
   }
 
   // Position the menu, keeping it within viewport

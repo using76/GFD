@@ -256,6 +256,23 @@ export interface SelectedEntity {
   id: number;
 }
 
+// ---- Mesh Refinement Zone ----
+export interface RefinementZone {
+  id: string;
+  name: string;
+  center: [number, number, number];
+  size: [number, number, number];
+  level: number; // refinement level (2 = 2x finer)
+}
+
+// ---- 3D Annotation ----
+export interface Annotation3D {
+  id: string;
+  text: string;
+  position: [number, number, number];
+  color: string;
+}
+
 // ---- Probe Point ----
 export interface ProbePoint {
   id: string;
@@ -450,6 +467,17 @@ interface AppState {
   addProbePoint: (pos: [number, number, number]) => void;
   removeProbePoint: (id: string) => void;
   clearProbePoints: () => void;
+
+  // Mesh refinement zones
+  refinementZones: RefinementZone[];
+  addRefinementZone: (zone: RefinementZone) => void;
+  removeRefinementZone: (id: string) => void;
+
+  // 3D Annotations
+  annotations: Annotation3D[];
+  addAnnotation: (text: string, position: [number, number, number]) => void;
+  removeAnnotation: (id: string) => void;
+  clearAnnotations: () => void;
 
   // Iso-surface
   isoSurfaceEnabled: boolean;
@@ -868,7 +896,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         ['sphere', 'cylinder', 'cone', 'torus', 'pipe', 'stl'].includes(s.kind)
       );
       const curveFactor = state.meshConfig.curvatureRefine && hasCurvedBodies ? 1.5 : 1.0;
-      const effectiveGs = gs / curveFactor;
+      // Refinement zones: increase resolution if any zones are defined
+      const refZones = state.refinementZones;
+      const maxRefLevel = refZones.length > 0 ? Math.max(...refZones.map(z => z.level)) : 1;
+      const refineFactor = maxRefLevel > 1 ? Math.min(maxRefLevel, 4) : 1;
+      const effectiveGs = gs / (curveFactor * refineFactor);
       const nx = Math.max(3, effectiveGs > 0 ? Math.round(domainLx / effectiveGs) : 20);
       const ny = Math.max(3, effectiveGs > 0 ? Math.round(domainLy / effectiveGs) : 20);
       const nz = Math.max(3, effectiveGs > 0 ? Math.round(domainLz / effectiveGs) : 20);
@@ -1319,6 +1351,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         `[${now}] [Mesh] Global size: ${gs}, Growth rate: ${state.meshConfig.growthRate}`,
         `[${now}] [Mesh] Grid: ${nx} x ${nyActual} x ${nz} = ${totalCells} cells (${nodeCount} nodes)`,
         ...(nPrismLayers > 0 ? [`[${now}] [Mesh] Boundary layers: ${nPrismLayers} layers, first height=${firstH}m, ratio=${layerR}`] : []),
+        ...(refZones.length > 0 ? [`[${now}] [Mesh] Refinement zones: ${refZones.length} (max level ${maxRefLevel}x)`] : []),
       ];
       if (solidCellCount > 0) {
         logLines.push(`[${now}] [Mesh] Solid cells excluded: ${solidCellCount} (${bodyShapes.length} solid bodies detected)`);
@@ -1841,6 +1874,20 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   removeProbePoint: (id) => set((s) => ({ probePoints: s.probePoints.filter(p => p.id !== id) })),
   clearProbePoints: () => set({ probePoints: [] }),
+
+  // Mesh refinement zones
+  refinementZones: [],
+  addRefinementZone: (zone) => set((s) => ({ refinementZones: [...s.refinementZones, zone] })),
+  removeRefinementZone: (id) => set((s) => ({ refinementZones: s.refinementZones.filter(z => z.id !== id) })),
+
+  // 3D Annotations
+  annotations: [],
+  addAnnotation: (text, position) => {
+    const annotation: Annotation3D = { id: `note-${Date.now()}`, text, position, color: '#ffcc00' };
+    set((s) => ({ annotations: [...s.annotations, annotation] }));
+  },
+  removeAnnotation: (id) => set((s) => ({ annotations: s.annotations.filter(a => a.id !== id) })),
+  clearAnnotations: () => set({ annotations: [] }),
 
   // Iso-surface
   isoSurfaceEnabled: false,
