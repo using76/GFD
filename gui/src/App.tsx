@@ -158,6 +158,90 @@ const AppMenu: React.FC = () => {
       URL.revokeObjectURL(url);
       message.success(`Exported VTK: ${nTris} triangles, ${state.fieldData.length} fields`);
     }},
+    { key: 'exportfoam', icon: <ExportOutlined />, label: 'Export OpenFOAM...', action: () => {
+      const state = useAppStore.getState();
+      const ss = state.solverSettings;
+      const pm = state.physicsModels;
+      const mat = state.material;
+      const bcs = state.boundaries;
+      const mc = state.meshConfig;
+
+      // controlDict
+      const controlDict = [
+        'FoamFile { version 2.0; format ascii; class dictionary; object controlDict; }',
+        `application ${pm.turbulence !== 'none' ? 'simpleFoam' : 'icoFoam'};`,
+        `startFrom startTime;`, `startTime 0;`,
+        `stopAt endTime;`, `endTime ${ss.timeMode === 'transient' ? ss.totalTime : ss.maxIterations};`,
+        `deltaT ${ss.timeMode === 'transient' ? ss.timeStepSize : 1};`,
+        `writeControl timeStep;`, `writeInterval 100;`,
+        `purgeWrite 0;`, `writeFormat ascii;`,
+        `writePrecision 6;`, `writeCompression off;`,
+        `timeFormat general;`, `timePrecision 6;`,
+        `runTimeModifiable true;`,
+      ].join('\n');
+
+      // fvSchemes
+      const fvSchemes = [
+        'FoamFile { version 2.0; format ascii; class dictionary; object fvSchemes; }',
+        'ddtSchemes { default Euler; }',
+        `divSchemes { default none; div(phi,U) Gauss ${ss.momentumScheme === 'QUICK' ? 'QUICK' : 'linearUpwind grad(U)'}; }`,
+        'gradSchemes { default Gauss linear; }',
+        'laplacianSchemes { default Gauss linear corrected; }',
+        'interpolationSchemes { default linear; }',
+        'snGradSchemes { default corrected; }',
+      ].join('\n');
+
+      // fvSolution
+      const fvSolution = [
+        'FoamFile { version 2.0; format ascii; class dictionary; object fvSolution; }',
+        `solvers { U { solver smoothSolver; smoother symGaussSeidel; tolerance ${ss.tolerance}; relTol 0.1; } p { solver GAMG; tolerance ${ss.tolerance}; relTol 0.01; smoother GaussSeidel; } }`,
+        `${ss.method} { nNonOrthogonalCorrectors 0; pRefCell 0; pRefValue 0; }`,
+        `relaxationFactors { fields { p ${ss.relaxPressure}; } equations { U ${ss.relaxVelocity}; } }`,
+      ].join('\n');
+
+      // transportProperties
+      const transport = [
+        'FoamFile { version 2.0; format ascii; class dictionary; object transportProperties; }',
+        `transportModel Newtonian;`,
+        `nu nu [0 2 -1 0 0 0 0] ${(mat.viscosity / mat.density).toExponential(6)};`,
+      ].join('\n');
+
+      // Boundary conditions (0/U, 0/p)
+      const bcU = bcs.map(b => {
+        if (b.type === 'inlet') return `  ${b.name.replace(/[^a-zA-Z0-9_]/g, '_')} { type fixedValue; value uniform (${b.velocity.join(' ')}); }`;
+        if (b.type === 'outlet') return `  ${b.name.replace(/[^a-zA-Z0-9_]/g, '_')} { type zeroGradient; }`;
+        if (b.type === 'wall') return `  ${b.name.replace(/[^a-zA-Z0-9_]/g, '_')} { type noSlip; }`;
+        return `  ${b.name.replace(/[^a-zA-Z0-9_]/g, '_')} { type symmetryPlane; }`;
+      }).join('\n');
+      const uFile = `FoamFile { version 2.0; format ascii; class volVectorField; object U; }\ndimensions [0 1 -1 0 0 0 0];\ninternalField uniform (0 0 0);\nboundaryField {\n${bcU}\n}`;
+
+      const bcP = bcs.map(b => {
+        if (b.type === 'outlet') return `  ${b.name.replace(/[^a-zA-Z0-9_]/g, '_')} { type fixedValue; value uniform ${b.pressure}; }`;
+        return `  ${b.name.replace(/[^a-zA-Z0-9_]/g, '_')} { type zeroGradient; }`;
+      }).join('\n');
+      const pFile = `FoamFile { version 2.0; format ascii; class volScalarField; object p; }\ndimensions [0 2 -2 0 0 0 0];\ninternalField uniform 0;\nboundaryField {\n${bcP}\n}`;
+
+      // Bundle as a single file with markers
+      const bundle = [
+        '=== system/controlDict ===', controlDict,
+        '=== system/fvSchemes ===', fvSchemes,
+        '=== system/fvSolution ===', fvSolution,
+        '=== constant/transportProperties ===', transport,
+        '=== 0/U ===', uFile,
+        '=== 0/p ===', pFile,
+        `=== README ===`,
+        `OpenFOAM case exported from GFD GUI`,
+        `Mesh: ${mc.type} ${mc.globalSize}m, Solver: ${ss.method}`,
+        `Split this file at "===" markers to create the case directory structure.`,
+      ].join('\n\n');
+
+      const blob = new Blob([bundle], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'gfd_openfoam_case.txt'; a.click();
+      URL.revokeObjectURL(url);
+      message.success('OpenFOAM case exported (controlDict, fvSchemes, fvSolution, BCs)');
+    }},
     { key: 'exportstl', icon: <ExportOutlined />, label: 'Export STL...', action: async () => {
       const state = useAppStore.getState();
       const sel = state.selectedShapeId;
@@ -682,6 +766,10 @@ function useKeyboardShortcuts() {
           store.setContextMenu(null);
           store.setCadMode('select');
           return;
+        case '?':
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent('gfd-show-shortcuts'));
+          return;
       }
 
       // Number keys for view presets
@@ -702,6 +790,78 @@ function useKeyboardShortcuts() {
 // ============================================================
 // Main App
 // ============================================================
+// ============================================================
+// Keyboard Shortcuts Overlay
+// ============================================================
+function ShortcutsOverlay() {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const handler = () => setVisible(true);
+    window.addEventListener('gfd-show-shortcuts', handler);
+    return () => window.removeEventListener('gfd-show-shortcuts', handler);
+  }, []);
+
+  if (!visible) return null;
+
+  const shortcuts = [
+    ['Ctrl+S', 'Save project'],
+    ['Ctrl+Z', 'Undo'],
+    ['Ctrl+Shift+Z / Ctrl+Y', 'Redo'],
+    ['Ctrl+C', 'Copy shape'],
+    ['Ctrl+X', 'Cut shape'],
+    ['Ctrl+V', 'Paste shape'],
+    ['Ctrl+P', 'Screenshot'],
+    ['S', 'Select tool'],
+    ['P', 'Pull tool'],
+    ['M', 'Move tool'],
+    ['F', 'Fill tool'],
+    ['R', 'Cycle transform: Translate/Rotate/Scale'],
+    ['H', 'Home camera'],
+    ['Delete', 'Delete selected'],
+    ['Escape', 'Deselect / Cancel'],
+    ['F11', 'Fullscreen toggle'],
+    ['0-6', 'Camera presets (Iso/Front/Back/Top/Bottom/Left/Right)'],
+    ['?', 'Show this help'],
+    ['Double-click', 'Place probe point (when field data available)'],
+  ];
+
+  return (
+    <div
+      onClick={() => setVisible(false)}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 9999,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: '#1a1a2e', border: '1px solid #303050', borderRadius: 12,
+          padding: '24px 32px', maxWidth: 500, width: '90%',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+        }}
+      >
+        <div style={{ fontSize: 16, fontWeight: 700, color: '#ccd', marginBottom: 16, borderBottom: '1px solid #303050', paddingBottom: 8 }}>
+          Keyboard Shortcuts
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 16px' }}>
+          {shortcuts.map(([key, desc]) => (
+            <React.Fragment key={key}>
+              <span style={{ fontSize: 12, color: '#4096ff', fontFamily: 'monospace', fontWeight: 600 }}>{key}</span>
+              <span style={{ fontSize: 12, color: '#aab' }}>{desc}</span>
+            </React.Fragment>
+          ))}
+        </div>
+        <div style={{ marginTop: 16, textAlign: 'center', color: '#556', fontSize: 11 }}>
+          Press Escape or click outside to close
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const TITLE_BAR_H = 36;
   const STATUS_BAR_H = 28;
@@ -785,6 +945,9 @@ export default function App() {
 
       {/* ============ Context Menu (rendered at top level for z-index) ============ */}
       <ContextMenu3D />
+
+      {/* ============ Keyboard Shortcuts Overlay ============ */}
+      <ShortcutsOverlay />
     </ConfigProvider>
   );
 }

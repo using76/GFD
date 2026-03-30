@@ -8,6 +8,7 @@ import {
   Legend,
   ResponsiveContainer,
   CartesianGrid,
+  ReferenceLine,
 } from 'recharts';
 import { Typography, Empty } from 'antd';
 import { useAppStore } from '../../store/useAppStore';
@@ -21,6 +22,7 @@ const COLORS = {
 
 const ResidualPlot: React.FC = () => {
   const residuals = useAppStore((s) => s.residuals);
+  const tolerance = useAppStore((s) => s.solverSettings.tolerance);
 
   const data = useMemo(
     () =>
@@ -89,6 +91,13 @@ const ResidualPlot: React.FC = () => {
               contentStyle={{ background: '#1f1f1f', border: '1px solid #444' }}
             />
             <Legend />
+            <ReferenceLine
+              y={tolerance}
+              stroke="#ff4d4f"
+              strokeDasharray="6 3"
+              strokeWidth={1}
+              label={{ value: `Tol: ${tolerance.toExponential(0)}`, position: 'right', fill: '#ff4d4f', fontSize: 10 }}
+            />
             <Line
               type="monotone"
               dataKey="continuity"
