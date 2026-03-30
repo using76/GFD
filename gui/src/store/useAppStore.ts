@@ -905,8 +905,10 @@ export const useAppStore = create<AppState>((set, get) => ({
             const ddx = px - pos[0], ddz = pz - pos[2];
             if (ddx * ddx + ddz * ddz < r * r && Math.abs(py - pos[1]) < h) return true;
           } else if (s.kind === 'stl' && s.stlData) {
-            // AABB approximation from STL vertices
+            // Ray-casting point-in-solid: cast ray in +X direction, count intersections
             const verts = s.stlData.vertices;
+            const fc = s.stlData.faceCount;
+            // Quick AABB pre-check
             let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
             for (let vi = 0; vi < verts.length; vi += 3) {
               if (verts[vi] < minX) minX = verts[vi];
@@ -916,12 +918,71 @@ export const useAppStore = create<AppState>((set, get) => ({
               if (verts[vi + 2] < minZ) minZ = verts[vi + 2];
               if (verts[vi + 2] > maxZ) maxZ = verts[vi + 2];
             }
-            if (px >= minX && px <= maxX && py >= minY && py <= maxY && pz >= minZ && pz <= maxZ) return true;
+            if (px < minX || px > maxX || py < minY || py > maxY || pz < minZ || pz > maxZ) {
+              continue; // Outside AABB, skip expensive ray test
+            }
+            // Moller-Trumbore ray-triangle intersection, ray direction = (1,0,0)
+            let crossings = 0;
+            for (let fi = 0; fi < fc; fi++) {
+              const i0 = fi * 9;
+              const v0x = verts[i0], v0y = verts[i0+1], v0z = verts[i0+2];
+              const v1x = verts[i0+3], v1y = verts[i0+4], v1z = verts[i0+5];
+              const v2x = verts[i0+6], v2y = verts[i0+7], v2z = verts[i0+8];
+              // edge1 = v1-v0, edge2 = v2-v0
+              const e1y = v1y - v0y, e1z = v1z - v0z;
+              const e2y = v2y - v0y, e2z = v2z - v0z;
+              // h = dir × edge2 = (1,0,0) × (e2x,e2y,e2z) = (0,-e2z,e2y)
+              const hy = -e2z, hz = e2y;
+              // a = edge1 · h
+              const a = e1y * hy + e1z * hz;
+              if (a > -1e-10 && a < 1e-10) continue;
+              const f = 1.0 / a;
+              // s = origin - v0
+              const sy = py - v0y, sz = pz - v0z;
+              // u = f * (s · h)
+              const u = f * (sy * hy + sz * hz);
+              if (u < 0 || u > 1) continue;
+              // q = s × edge1
+              const e1x = v1x - v0x;
+              const qx = sy * e1z - sz * e1y;
+              const e2x = v2x - v0x;
+              // v = f * (dir · q) = f * qx (since dir=(1,0,0))
+              const v = f * qx;
+              if (v < 0 || u + v > 1) continue;
+              // t = f * (edge2 · q)
+              const t = f * (e2x * qx + e2y * (sz * e1x - (px - v0x) * e1z) + e2z * ((px - v0x) * e1y - sy * e1x));
+              if (t > 1e-10) crossings++;
+            }
+            if (crossings % 2 === 1) return true; // odd = inside
+          } else if (s.kind === 'cone') {
+            const r = dims.radius ?? 0.4;
+            const h = (dims.height ?? 1) / 2;
+            const dy = py - pos[1];
+            if (Math.abs(dy) < h) {
+              // Cone radius decreases linearly from base to tip
+              const t = (dy + h) / (2 * h); // 0 at bottom, 1 at top
+              const rAt = r * (1 - t);
+              const ddx = px - pos[0], ddz = pz - pos[2];
+              if (ddx * ddx + ddz * ddz < rAt * rAt) return true;
+            }
+          } else if (s.kind === 'torus') {
+            const R = dims.majorRadius ?? 0.5;
+            const r = dims.minorRadius ?? 0.15;
+            const ddx = px - pos[0], ddy = py - pos[1], ddz = pz - pos[2];
+            const distToAxis = Math.sqrt(ddx * ddx + ddz * ddz) - R;
+            if (distToAxis * distToAxis + ddy * ddy < r * r) return true;
+          } else if (s.kind === 'pipe') {
+            const ro = dims.outerRadius ?? 0.4;
+            const ri = dims.innerRadius ?? 0.3;
+            const h = (dims.height ?? 1.5) / 2;
+            const ddx = px - pos[0], ddz = pz - pos[2];
+            const rr = ddx * ddx + ddz * ddz;
+            if (rr < ro * ro && rr > ri * ri && Math.abs(py - pos[1]) < h) return true;
           } else {
-            // Box / AABB test for box, cone, torus, pipe, etc.
-            const hw = (dims.width ?? dims.radius ?? 0.5) / 2;
-            const hh = (dims.height ?? dims.radius ?? 0.5) / 2;
-            const hd = (dims.depth ?? dims.radius ?? 0.5) / 2;
+            // Box AABB test
+            const hw = (dims.width ?? 0.5) / 2;
+            const hh = (dims.height ?? 0.5) / 2;
+            const hd = (dims.depth ?? 0.5) / 2;
             if (
               px >= pos[0] - hw && px <= pos[0] + hw &&
               py >= pos[1] - hh && py <= pos[1] + hh &&

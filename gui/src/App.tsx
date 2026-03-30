@@ -158,12 +158,62 @@ const AppMenu: React.FC = () => {
       URL.revokeObjectURL(url);
       message.success(`Exported VTK: ${nTris} triangles, ${state.fieldData.length} fields`);
     }},
+    { key: 'exportstl', icon: <ExportOutlined />, label: 'Export STL...', action: () => {
+      const state = useAppStore.getState();
+      const sel = state.selectedShapeId;
+      const shape = sel ? state.shapes.find(s => s.id === sel) : null;
+      if (!shape) { message.warning('Select a shape to export as STL.'); return; }
+      // Generate binary STL from shape geometry
+      if (shape.kind === 'stl' && shape.stlData) {
+        // Re-export existing STL data
+        const fc = shape.stlData.faceCount;
+        const verts = shape.stlData.vertices;
+        const buf = new ArrayBuffer(84 + fc * 50);
+        const dv = new DataView(buf);
+        // Header (80 bytes)
+        const header = `GFD Export: ${shape.name}`;
+        for (let i = 0; i < Math.min(80, header.length); i++) dv.setUint8(i, header.charCodeAt(i));
+        dv.setUint32(80, fc, true);
+        let off = 84;
+        for (let i = 0; i < fc; i++) {
+          // Normal (0,0,0)
+          dv.setFloat32(off, 0, true); dv.setFloat32(off+4, 0, true); dv.setFloat32(off+8, 0, true); off += 12;
+          for (let v = 0; v < 3; v++) {
+            dv.setFloat32(off, verts[i*9+v*3], true);
+            dv.setFloat32(off+4, verts[i*9+v*3+1], true);
+            dv.setFloat32(off+8, verts[i*9+v*3+2], true);
+            off += 12;
+          }
+          dv.setUint16(off, 0, true); off += 2;
+        }
+        const blob = new Blob([buf], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `${shape.name}.stl`; a.click();
+        URL.revokeObjectURL(url);
+        message.success(`Exported ${shape.name}.stl (${fc} triangles)`);
+      } else {
+        message.info(`STL export for ${shape.kind} shapes: use Import → modify → re-export. Currently only STL shapes can be exported.`);
+      }
+    }},
     { key: 'div2', divider: true },
     { key: 'settings', icon: <SettingOutlined />, label: 'Settings', action: () => {
       useAppStore.getState().setActiveRibbonTab('setup');
       window.dispatchEvent(new CustomEvent('gfd-setup-section', { detail: { section: 'solver' } }));
     }},
-    { key: 'about', icon: <InfoCircleOutlined />, label: 'About GFD', action: () => message.info('GFD - Generalized Fluid Dynamics v0.1.0 | Rust multi-physics solver | 203 files, 28K lines, 18 crates') },
+    { key: 'about', icon: <InfoCircleOutlined />, label: 'About GFD', action: () => {
+      const state = useAppStore.getState();
+      const shapeCount = state.shapes.length;
+      const meshCells = state.meshDisplayData?.cellCount ?? 0;
+      message.info({
+        content: `GFD — Generalized Fluid Dynamics v0.1.0\n` +
+          `Rust solver: 262 files, 63K lines, 19 crates, 805 tests\n` +
+          `GUI: 50 files, 14K lines (React + Three.js)\n` +
+          `Current: ${shapeCount} shapes, ${meshCells} mesh cells\n` +
+          `License: Modified MIT`,
+        duration: 8,
+      });
+    }},
   ];
 
   return (

@@ -15,8 +15,8 @@
 *.swp
 *.swo
 
-# Simulation output
-results/
+# Simulation output (root level only, not gui/src/tabs/results)
+/results/
 *.vdb
 *.vtu
 *.vtk
