@@ -451,6 +451,12 @@ interface AppState {
   removeProbePoint: (id: string) => void;
   clearProbePoints: () => void;
 
+  // Iso-surface
+  isoSurfaceEnabled: boolean;
+  isoSurfaceField: string;
+  isoSurfaceValue: number;
+  setIsoSurface: (enabled: boolean, field?: string, value?: number) => void;
+
   // Camera / Render / Selection (used by engine components)
   cameraMode: CameraMode;
   setCameraMode: (mode: CameraMode) => void;
@@ -1786,6 +1792,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   removeProbePoint: (id) => set((s) => ({ probePoints: s.probePoints.filter(p => p.id !== id) })),
   clearProbePoints: () => set({ probePoints: [] }),
+
+  // Iso-surface
+  isoSurfaceEnabled: false,
+  isoSurfaceField: 'pressure',
+  isoSurfaceValue: 50,
+  setIsoSurface: (enabled, field, value) => set((s) => ({
+    isoSurfaceEnabled: enabled,
+    isoSurfaceField: field ?? s.isoSurfaceField,
+    isoSurfaceValue: value ?? s.isoSurfaceValue,
+  })),
 
   // Camera / Render / Selection
   cameraMode: { type: 'perspective' },

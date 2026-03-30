@@ -158,7 +158,7 @@ const AppMenu: React.FC = () => {
       URL.revokeObjectURL(url);
       message.success(`Exported VTK: ${nTris} triangles, ${state.fieldData.length} fields`);
     }},
-    { key: 'exportstl', icon: <ExportOutlined />, label: 'Export STL...', action: () => {
+    { key: 'exportstl', icon: <ExportOutlined />, label: 'Export STL...', action: async () => {
       const state = useAppStore.getState();
       const sel = state.selectedShapeId;
       const shape = sel ? state.shapes.find(s => s.id === sel) : null;
@@ -193,7 +193,61 @@ const AppMenu: React.FC = () => {
         URL.revokeObjectURL(url);
         message.success(`Exported ${shape.name}.stl (${fc} triangles)`);
       } else {
-        message.info(`STL export for ${shape.kind} shapes: use Import → modify → re-export. Currently only STL shapes can be exported.`);
+        // Generate triangulated surface from primitive using Three.js geometry
+        const THREE = await import('three');
+        let geom: InstanceType<typeof THREE.BufferGeometry>;
+        const d = shape.dimensions;
+        switch (shape.kind) {
+          case 'box': case 'enclosure':
+            geom = new THREE.BoxGeometry(d.width ?? 1, d.height ?? 1, d.depth ?? 1); break;
+          case 'sphere':
+            geom = new THREE.SphereGeometry(d.radius ?? 0.5, 32, 32); break;
+          case 'cylinder':
+            geom = new THREE.CylinderGeometry(d.radius ?? 0.3, d.radius ?? 0.3, d.height ?? 1, 32); break;
+          case 'cone':
+            geom = new THREE.ConeGeometry(d.radius ?? 0.4, d.height ?? 1, 32); break;
+          case 'torus':
+            geom = new THREE.TorusGeometry(d.majorRadius ?? 0.5, d.minorRadius ?? 0.15, 16, 48); break;
+          case 'pipe':
+            geom = new THREE.CylinderGeometry(d.outerRadius ?? 0.4, d.outerRadius ?? 0.4, d.height ?? 1.5, 32); break;
+          default:
+            geom = new THREE.BoxGeometry(1, 1, 1);
+        }
+        // Extract non-indexed triangles
+        const nonIndexed = geom.index ? geom.toNonIndexed() : geom;
+        const posAttr = nonIndexed.getAttribute('position') as InstanceType<typeof THREE.BufferAttribute>;
+        const nVerts = posAttr.count;
+        const fc = nVerts / 3;
+        const buf = new ArrayBuffer(84 + fc * 50);
+        const dv = new DataView(buf);
+        const header = `GFD Export: ${shape.name}`;
+        for (let i = 0; i < Math.min(80, header.length); i++) dv.setUint8(i, header.charCodeAt(i));
+        dv.setUint32(80, fc, true);
+        let off = 84;
+        for (let i = 0; i < fc; i++) {
+          // Compute normal
+          const i0 = i * 3, i1 = i * 3 + 1, i2 = i * 3 + 2;
+          const ax = posAttr.getX(i0) + shape.position[0], ay = posAttr.getY(i0) + shape.position[1], az = posAttr.getZ(i0) + shape.position[2];
+          const bx = posAttr.getX(i1) + shape.position[0], by = posAttr.getY(i1) + shape.position[1], bz = posAttr.getZ(i1) + shape.position[2];
+          const cx = posAttr.getX(i2) + shape.position[0], cy = posAttr.getY(i2) + shape.position[1], cz = posAttr.getZ(i2) + shape.position[2];
+          const e1x = bx-ax, e1y = by-ay, e1z = bz-az;
+          const e2x = cx-ax, e2y = cy-ay, e2z = cz-az;
+          const nx = e1y*e2z - e1z*e2y, ny = e1z*e2x - e1x*e2z, nz = e1x*e2y - e1y*e2x;
+          const nl = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
+          dv.setFloat32(off, nx/nl, true); dv.setFloat32(off+4, ny/nl, true); dv.setFloat32(off+8, nz/nl, true); off += 12;
+          dv.setFloat32(off, ax, true); dv.setFloat32(off+4, ay, true); dv.setFloat32(off+8, az, true); off += 12;
+          dv.setFloat32(off, bx, true); dv.setFloat32(off+4, by, true); dv.setFloat32(off+8, bz, true); off += 12;
+          dv.setFloat32(off, cx, true); dv.setFloat32(off+4, cy, true); dv.setFloat32(off+8, cz, true); off += 12;
+          dv.setUint16(off, 0, true); off += 2;
+        }
+        geom.dispose();
+        nonIndexed.dispose();
+        const blob = new Blob([buf], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `${shape.name}.stl`; a.click();
+        URL.revokeObjectURL(url);
+        message.success(`Exported ${shape.name}.stl (${fc} triangles)`);
       }
     }},
     { key: 'div2', divider: true },

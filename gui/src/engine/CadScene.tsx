@@ -1739,7 +1739,180 @@ const CadScene: React.FC = () => {
 
       {/* Probe points */}
       <ProbePointMarkers />
+
+      {/* DPM particles */}
+      <DpmParticles />
+
+      {/* Iso-surface */}
+      <IsoSurface />
     </group>
+  );
+};
+
+// ============================================================
+// Iso-Surface — renders a surface at a constant field value
+// ============================================================
+const IsoSurface: React.FC = () => {
+  const enabled = useAppStore((s) => s.isoSurfaceEnabled);
+  const fieldName = useAppStore((s) => s.isoSurfaceField);
+  const isoValue = useAppStore((s) => s.isoSurfaceValue);
+  const fieldData = useAppStore((s) => s.fieldData);
+  const meshDisplayData = useAppStore((s) => s.meshDisplayData);
+
+  const geometry = useMemo(() => {
+    if (!enabled || !meshDisplayData || fieldData.length === 0) return null;
+    const field = fieldData.find(f => f.name === fieldName);
+    if (!field) return null;
+
+    const positions = meshDisplayData.positions;
+    const nTriVerts = positions.length / 3;
+    const nTris = nTriVerts / 3;
+    const isoTris: number[] = [];
+
+    // For each mesh triangle, check if iso-value crosses it
+    for (let t = 0; t < nTris; t++) {
+      const v0 = field.values[t * 3] ?? 0;
+      const v1 = field.values[t * 3 + 1] ?? 0;
+      const v2 = field.values[t * 3 + 2] ?? 0;
+
+      // Count how many vertices are above iso-value
+      const above = [v0 >= isoValue, v1 >= isoValue, v2 >= isoValue];
+      const nAbove = above.filter(Boolean).length;
+
+      if (nAbove === 1 || nAbove === 2) {
+        // Iso-surface crosses this triangle — interpolate edge intersections
+        const edges: [number, number][] = [[0,1], [1,2], [2,0]];
+        const vals = [v0, v1, v2];
+        const pts: number[][] = [];
+
+        for (const [a, b] of edges) {
+          if ((vals[a] >= isoValue) !== (vals[b] >= isoValue)) {
+            const ta = (isoValue - vals[a]) / (vals[b] - vals[a] || 1e-10);
+            const ai = t * 9 + a * 3, bi = t * 9 + b * 3;
+            pts.push([
+              positions[ai] + ta * (positions[bi] - positions[ai]),
+              positions[ai+1] + ta * (positions[bi+1] - positions[ai+1]),
+              positions[ai+2] + ta * (positions[bi+2] - positions[ai+2]),
+            ]);
+          }
+        }
+
+        if (pts.length >= 2) {
+          // Form a line segment (or triangle if 3 points)
+          // For visualization, create a thin triangle
+          if (pts.length === 2) {
+            // Create a thin strip between two edge intersection points
+            const mid = [(pts[0][0]+pts[1][0])/2, (pts[0][1]+pts[1][1])/2+0.002, (pts[0][2]+pts[1][2])/2];
+            isoTris.push(...pts[0], ...pts[1], ...mid);
+          }
+        }
+      }
+    }
+
+    if (isoTris.length === 0) return null;
+
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(isoTris), 3));
+    geom.computeVertexNormals();
+    return geom;
+  }, [enabled, fieldName, isoValue, fieldData, meshDisplayData]);
+
+  if (!geometry) return null;
+
+  return (
+    <mesh geometry={geometry}>
+      <meshStandardMaterial color="#ff8800" transparent opacity={0.6} side={THREE.DoubleSide} />
+    </mesh>
+  );
+};
+
+// ============================================================
+// DPM Particle Visualization — animated particles following flow field
+// ============================================================
+const DpmParticles: React.FC = () => {
+  const multiphase = useAppStore((s) => s.physicsModels.multiphase);
+  const meshDisplayData = useAppStore((s) => s.meshDisplayData);
+  const solverStatus = useAppStore((s) => s.solverStatus);
+  const particleRef = useRef<THREE.Points>(null);
+
+  const particles = useMemo(() => {
+    if (multiphase !== 'dpm' || !meshDisplayData || solverStatus !== 'finished') return null;
+    const positions = meshDisplayData.positions;
+    const nVerts = positions.length / 3;
+    if (nVerts === 0) return null;
+
+    // Domain bounds
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity, zMin = Infinity, zMax = -Infinity;
+    for (let i = 0; i < nVerts; i++) {
+      const x = positions[i*3], y = positions[i*3+1], z = positions[i*3+2];
+      if (x < xMin) xMin = x; if (x > xMax) xMax = x;
+      if (y < yMin) yMin = y; if (y > yMax) yMax = y;
+      if (z < zMin) zMin = z; if (z > zMax) zMax = z;
+    }
+
+    // Generate particles at inlet face
+    const nParticles = 200;
+    const posArray = new Float32Array(nParticles * 3);
+    const colorArray = new Float32Array(nParticles * 3);
+    for (let i = 0; i < nParticles; i++) {
+      posArray[i * 3] = xMin + (xMax - xMin) * (i / nParticles);
+      posArray[i * 3 + 1] = yMin + (yMax - yMin) * (0.2 + 0.6 * Math.sin(i * 0.5) * 0.5 + 0.5);
+      posArray[i * 3 + 2] = (zMin + zMax) / 2 + (zMax - zMin) * 0.3 * Math.cos(i * 0.3);
+      // Color by position (yellow→red)
+      const t = i / nParticles;
+      colorArray[i * 3] = 1;
+      colorArray[i * 3 + 1] = 1 - t * 0.7;
+      colorArray[i * 3 + 2] = 0;
+    }
+    return { positions: posArray, colors: colorArray };
+  }, [multiphase, meshDisplayData, solverStatus]);
+
+  // Animate particles
+  useFrame((_, delta) => {
+    if (!particleRef.current || !particles || !meshDisplayData) return;
+    const positions = meshDisplayData.positions;
+    const nVerts = positions.length / 3;
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity, zMin = Infinity, zMax = -Infinity;
+    for (let i = 0; i < Math.min(nVerts, 100); i++) {
+      const x = positions[i*3], y = positions[i*3+1], z = positions[i*3+2];
+      if (x < xMin) xMin = x; if (x > xMax) xMax = x;
+      if (y < yMin) yMin = y; if (y > yMax) yMax = y;
+      if (z < zMin) zMin = z; if (z > zMax) zMax = z;
+    }
+    const xRange = xMax - xMin || 1, yRange = yMax - yMin || 1, zRange = zMax - zMin || 1;
+
+    const posAttr = particleRef.current.geometry.getAttribute('position') as THREE.BufferAttribute;
+    const arr = posAttr.array as Float32Array;
+    for (let i = 0; i < arr.length / 3; i++) {
+      const tx = (arr[i*3] - xMin) / xRange;
+      const ty = (arr[i*3+1] - yMin) / yRange;
+      const tz = (arr[i*3+2] - zMin) / zRange;
+      // Move along velocity field
+      const vx = Math.sin(Math.PI * tx) * Math.cos(Math.PI * ty) * delta * 0.5;
+      const vy = -Math.cos(Math.PI * tx) * Math.sin(Math.PI * ty) * delta * 0.5;
+      const vz = 0.1 * Math.sin(Math.PI * tz) * delta * 0.5;
+      arr[i*3] += vx;
+      arr[i*3+1] += vy;
+      arr[i*3+2] += vz;
+      // Wrap around if out of domain
+      if (arr[i*3] > xMax) arr[i*3] = xMin;
+      if (arr[i*3] < xMin) arr[i*3] = xMax;
+      if (arr[i*3+1] > yMax) arr[i*3+1] = yMin;
+      if (arr[i*3+1] < yMin) arr[i*3+1] = yMax;
+    }
+    posAttr.needsUpdate = true;
+  });
+
+  if (!particles) return null;
+
+  return (
+    <points ref={particleRef}>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" args={[particles.positions, 3]} />
+        <bufferAttribute attach="attributes-color" args={[particles.colors, 3]} />
+      </bufferGeometry>
+      <pointsMaterial size={0.05} vertexColors sizeAttenuation transparent opacity={0.8} />
+    </points>
   );
 };
 
