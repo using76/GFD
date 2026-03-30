@@ -228,7 +228,7 @@ export interface ResidualPoint {
 
 // ---- Results types ----
 export type ColormapType = 'jet' | 'rainbow' | 'grayscale' | 'coolwarm';
-export type ResultField = 'pressure' | 'velocity' | 'temperature';
+export type ResultField = 'pressure' | 'velocity' | 'temperature' | 'tke';
 
 export interface ContourConfig {
   field: ResultField;
@@ -295,6 +295,7 @@ export interface MeasureLabel {
 // ---- Ribbon / Tool types ----
 export type RibbonTab = 'design' | 'display' | 'measure' | 'repair' | 'prepare' | 'mesh' | 'setup' | 'calc' | 'results';
 export type ActiveTool = 'select' | 'pull' | 'move' | 'fill' | 'measure' | 'section' | 'none';
+export type TransformMode = 'translate' | 'rotate' | 'scale';
 export type SelectionFilterType = 'face' | 'edge' | 'vertex' | 'body' | 'component';
 
 // ---- Store ----
@@ -308,6 +309,10 @@ interface AppState {
   setActiveRibbonTab: (tab: RibbonTab) => void;
   activeTool: ActiveTool;
   setActiveTool: (tool: ActiveTool) => void;
+  transformMode: TransformMode;
+  setTransformMode: (mode: TransformMode) => void;
+  hoveredShapeId: string | null;
+  setHoveredShapeId: (id: string | null) => void;
   selectionFilter: SelectionFilterType;
   setSelectionFilter: (filter: SelectionFilterType) => void;
   leftPanelCollapsed: Record<string, boolean>;
@@ -543,6 +548,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   setActiveRibbonTab: (tab) => set({ activeRibbonTab: tab }),
   activeTool: 'select',
   setActiveTool: (tool) => set({ activeTool: tool }),
+  transformMode: 'translate',
+  setTransformMode: (mode) => set({ transformMode: mode }),
+  hoveredShapeId: null,
+  setHoveredShapeId: (id) => set({ hoveredShapeId: id }),
   selectionFilter: 'face',
   setSelectionFilter: (filter) => set({ selectionFilter: filter }),
   leftPanelCollapsed: {},
@@ -836,8 +845,45 @@ export const useAppStore = create<AppState>((set, get) => ({
       const nz = Math.max(3, gs > 0 ? Math.round(domainLz / gs) : 20);
 
       const dx = domainLx / nx;
-      const dy = domainLy / ny;
       const dz = domainLz / nz;
+
+      // --- Boundary layer distribution for Y axis ---
+      const nPrismLayers = state.meshConfig.prismLayers;
+      const firstH = state.meshConfig.firstHeight;
+      const layerR = state.meshConfig.layerRatio;
+      // Build Y-coordinates: uniform in interior, graded near Y boundaries
+      const yCoords: number[] = [domainMin[1]];
+      if (nPrismLayers > 0 && firstH > 0) {
+        // Bottom prism layers
+        let currentH = firstH;
+        for (let pl = 0; pl < nPrismLayers && yCoords[yCoords.length - 1] < domainMin[1] + domainLy * 0.4; pl++) {
+          yCoords.push(yCoords[yCoords.length - 1] + currentH);
+          currentH *= layerR;
+        }
+        // Interior uniform cells
+        const remaining = domainMax[1] - yCoords[yCoords.length - 1];
+        const nInterior = Math.max(2, ny - 2 * nPrismLayers);
+        const intDy = remaining > 0 ? remaining / (nInterior + nPrismLayers) : domainLy / ny;
+        for (let j = 0; j < nInterior; j++) {
+          yCoords.push(yCoords[yCoords.length - 1] + intDy);
+        }
+        // Top prism layers (reverse)
+        currentH = firstH * Math.pow(layerR, nPrismLayers - 1);
+        for (let pl = 0; pl < nPrismLayers && yCoords[yCoords.length - 1] < domainMax[1] - firstH * 0.5; pl++) {
+          yCoords.push(yCoords[yCoords.length - 1] + currentH);
+          currentH /= layerR;
+        }
+        // Ensure last coord reaches domain max
+        if (yCoords[yCoords.length - 1] < domainMax[1]) {
+          yCoords.push(domainMax[1]);
+        }
+      } else {
+        // Uniform Y distribution
+        const dy = domainLy / ny;
+        for (let j = 1; j <= ny; j++) yCoords.push(domainMin[1] + j * dy);
+      }
+      const nyActual = yCoords.length - 1;
+      const dy = domainLy / nyActual; // average dy for quality metrics
 
       // --- Collect solid (non-enclosure) body shapes for hole-cutting ---
       const bodyShapes = state.shapes.filter(
@@ -887,18 +933,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       // --- Determine cell types (fluid=0, solid=1) for full 3D grid ---
-      const totalCells = nx * ny * nz;
+      const totalCells = nx * nyActual * nz;
       const cellTypes = new Uint8Array(totalCells);
       let fluidCellCount = 0;
       let solidCellCount = 0;
 
       for (let k = 0; k < nz; k++) {
-        for (let j = 0; j < ny; j++) {
+        for (let j = 0; j < nyActual; j++) {
           for (let i = 0; i < nx; i++) {
             const cx = domainMin[0] + (i + 0.5) * dx;
-            const cy = domainMin[1] + (j + 0.5) * dy;
+            const cy = (yCoords[j] + yCoords[j + 1]) / 2;
             const cz = domainMin[2] + (k + 0.5) * dz;
-            const cellIdx = k * ny * nx + j * nx + i;
+            const cellIdx = k * nyActual * nx + j * nx + i;
             if (bodyShapes.length > 0 && isPointInsideSolid(cx, cy, cz)) {
               cellTypes[cellIdx] = 1;
               solidCellCount++;
@@ -1021,50 +1067,50 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       for (let k = 0; k < nz; k++) {
-        for (let j = 0; j < ny; j++) {
+        for (let j = 0; j < nyActual; j++) {
           for (let i = 0; i < nx; i++) {
-            const cellIdx = k * ny * nx + j * nx + i;
+            const cellIdx = k * nyActual * nx + j * nx + i;
             if (cellTypes[cellIdx] === 1) continue; // skip solid cells
 
             const x0 = domainMin[0] + i * dx;
             const x1 = x0 + dx;
-            const y0 = domainMin[1] + j * dy;
-            const y1 = y0 + dy;
+            const y0 = yCoords[j];
+            const y1 = yCoords[j + 1];
             const z0 = domainMin[2] + k * dz;
             const z1 = z0 + dz;
 
             // -X face: visible if i==0 or neighbor is solid
-            if (i === 0 || cellTypes[k * ny * nx + j * nx + (i - 1)] === 1) {
+            if (i === 0 || cellTypes[k * nyActual * nx + j * nx + (i - 1)] === 1) {
               const faceType = i === 0 ? 'xmin' : 'solid_interface';
               const color = getBoundaryFaceColor(faceType);
               addQuadWithColor(x0, y0, z0, x0, y1, z0, x0, y0, z1, x0, y1, z1, color);
             }
             // +X face
-            if (i === nx - 1 || cellTypes[k * ny * nx + j * nx + (i + 1)] === 1) {
+            if (i === nx - 1 || cellTypes[k * nyActual * nx + j * nx + (i + 1)] === 1) {
               const faceType = i === nx - 1 ? 'xmax' : 'solid_interface';
               const color = getBoundaryFaceColor(faceType);
               addQuadWithColor(x1, y0, z0, x1, y0, z1, x1, y1, z0, x1, y1, z1, color);
             }
             // -Y face
-            if (j === 0 || cellTypes[k * ny * nx + (j - 1) * nx + i] === 1) {
+            if (j === 0 || cellTypes[k * nyActual * nx + (j - 1) * nx + i] === 1) {
               const faceType = j === 0 ? 'ymin' : 'solid_interface';
               const color = getBoundaryFaceColor(faceType);
               addQuadWithColor(x0, y0, z0, x0, y0, z1, x1, y0, z0, x1, y0, z1, color);
             }
             // +Y face
-            if (j === ny - 1 || cellTypes[k * ny * nx + (j + 1) * nx + i] === 1) {
-              const faceType = j === ny - 1 ? 'ymax' : 'solid_interface';
+            if (j === nyActual - 1 || cellTypes[k * nyActual * nx + (j + 1) * nx + i] === 1) {
+              const faceType = j === nyActual - 1 ? 'ymax' : 'solid_interface';
               const color = getBoundaryFaceColor(faceType);
               addQuadWithColor(x0, y1, z0, x1, y1, z0, x0, y1, z1, x1, y1, z1, color);
             }
             // -Z face
-            if (k === 0 || cellTypes[(k - 1) * ny * nx + j * nx + i] === 1) {
+            if (k === 0 || cellTypes[(k - 1) * nyActual * nx + j * nx + i] === 1) {
               const faceType = k === 0 ? 'zmin' : 'solid_interface';
               const color = getBoundaryFaceColor(faceType);
               addQuadWithColor(x0, y0, z0, x1, y0, z0, x0, y1, z0, x1, y1, z0, color);
             }
             // +Z face
-            if (k === nz - 1 || cellTypes[(k + 1) * ny * nx + j * nx + i] === 1) {
+            if (k === nz - 1 || cellTypes[(k + 1) * nyActual * nx + j * nx + i] === 1) {
               const faceType = k === nz - 1 ? 'zmax' : 'solid_interface';
               const color = getBoundaryFaceColor(faceType);
               addQuadWithColor(x0, y0, z1, x0, y1, z1, x1, y0, z1, x1, y1, z1, color);
@@ -1079,7 +1125,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       // Node count for the structured grid
       const tetMultiplier = isTet ? 5 : 1; // each hex splits into 5 tets
-      const nodeCount = (nx + 1) * (ny + 1) * (nz + 1) + (isTet ? fluidCellCount : 0);
+      const nodeCount = (nx + 1) * (nyActual + 1) * (nz + 1) + (isTet ? fluidCellCount : 0);
 
       // Face counts (estimate)
       const internalFaces = (nx - 1) * ny * nz + nx * (ny - 1) * nz + nx * ny * (nz - 1);
@@ -1175,7 +1221,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         `[${now}] [Mesh] Generating 3D ${meshType} mesh...`,
         `[${now}] [Mesh] Domain: [${domainMin[0].toFixed(2)}, ${domainMax[0].toFixed(2)}] x [${domainMin[1].toFixed(2)}, ${domainMax[1].toFixed(2)}] x [${domainMin[2].toFixed(2)}, ${domainMax[2].toFixed(2)}]`,
         `[${now}] [Mesh] Global size: ${gs}, Growth rate: ${state.meshConfig.growthRate}`,
-        `[${now}] [Mesh] Grid: ${nx} x ${ny} x ${nz} = ${totalCells} cells (${nodeCount} nodes)`,
+        `[${now}] [Mesh] Grid: ${nx} x ${nyActual} x ${nz} = ${totalCells} cells (${nodeCount} nodes)`,
+        ...(nPrismLayers > 0 ? [`[${now}] [Mesh] Boundary layers: ${nPrismLayers} layers, first height=${firstH}m, ratio=${layerR}`] : []),
       ];
       if (solidCellCount > 0) {
         logLines.push(`[${now}] [Mesh] Solid cells excluded: ${solidCellCount} (${bodyShapes.length} solid bodies detected)`);
@@ -1362,16 +1409,34 @@ export const useAppStore = create<AppState>((set, get) => ({
       const s = get();
       if (s.solverStatus !== 'running') return;
       const iter = s.currentIteration + 1;
-      // Realistic convergence: fast initial drop, then slower exponential decay
-      const phase1 = Math.exp(-iter * 0.025); // fast drop first 80 iters
-      const phase2 = Math.exp(-iter * 0.008); // slower tail
+      // Physics-aware convergence rate based on turbulence model and solver method
+      const turbModel = s.physicsModels.turbulence;
+      const method = s.solverSettings.method;
+      // Turbulence model affects convergence speed
+      const turbFactor = turbModel === 'none' ? 1.0
+        : turbModel === 'k-epsilon' ? 0.85
+        : turbModel === 'k-omega-sst' ? 0.80
+        : turbModel === 'sa' ? 0.90
+        : turbModel === 'les' ? 0.70 : 0.85;
+      // Solver method affects convergence
+      const methodFactor = method === 'SIMPLE' ? 1.0 : method === 'PISO' ? 1.15 : 0.95; // SIMPLEC faster
+      const relaxP = s.solverSettings.relaxPressure;
+      const relaxU = s.solverSettings.relaxVelocity;
+      // Effective convergence rate
+      const rate1 = 0.025 * turbFactor * methodFactor * (relaxP + relaxU);
+      const rate2 = 0.008 * turbFactor * methodFactor;
+      const phase1 = Math.exp(-iter * rate1);
+      const phase2 = Math.exp(-iter * rate2);
       const decay = iter < 80 ? phase1 : phase2 * 0.15;
+      // Seeded pseudo-random noise (deterministic per iteration)
+      const noise = (seed: number) => Math.sin(seed * 12.9898 + iter * 78.233) * 0.5 + 0.5;
+      const energyEnabled = s.physicsModels.energy;
       const point: ResidualPoint = {
         iteration: iter,
-        continuity: 1e-1 * decay * (0.85 + 0.3 * Math.random()),
-        xMomentum: 5e-2 * decay * (0.85 + 0.3 * Math.random()),
-        yMomentum: 5e-2 * decay * (0.85 + 0.3 * Math.random()),
-        energy: 1e-2 * decay * (0.85 + 0.3 * Math.random()),
+        continuity: 1e-1 * decay * (0.85 + 0.3 * noise(1)),
+        xMomentum: 5e-2 * decay * (0.85 + 0.3 * noise(2)),
+        yMomentum: 5e-2 * decay * (0.85 + 0.3 * noise(3)),
+        energy: energyEnabled ? 1e-2 * decay * (0.85 + 0.3 * noise(4)) : 0,
       };
       const ts = new Date().toLocaleTimeString();
       const line = `[${ts}] [Iter ${String(iter).padStart(4)}] continuity=${point.continuity.toExponential(3)}  x-mom=${point.xMomentum.toExponential(3)}  y-mom=${point.yMomentum.toExponential(3)}  energy=${point.energy.toExponential(3)}`;
@@ -1408,50 +1473,92 @@ export const useAppStore = create<AppState>((set, get) => ({
           const yRange = yMax - yMin || 1;
           const zRange = zMax - zMin || 1;
 
-          // Pressure field: gradient from left to right
+          // --- Physics-aware field generation using BCs and settings ---
+          const bcs = s.boundaries;
+          const mat = s.material;
+          const inletBC = bcs.find(b => b.type === 'inlet');
+          const outletBC = bcs.find(b => b.type === 'outlet');
+          const wallBCs = bcs.filter(b => b.type === 'wall');
+          // Reference values from BCs
+          const inletVel = inletBC ? Math.sqrt(inletBC.velocity[0]**2 + inletBC.velocity[1]**2 + inletBC.velocity[2]**2) : 1.0;
+          const inletDir = inletBC ? inletBC.velocity.map(v => v / (inletVel || 1)) : [1, 0, 0];
+          const inletTemp = inletBC?.temperature ?? 300;
+          const outletP = outletBC?.pressure ?? 0;
+          const wallTemp = wallBCs.length > 0 && wallBCs[0].wallThermalCondition === 'fixed-temp' ? wallBCs[0].temperature : inletTemp;
+
+          // Pressure field: based on inlet velocity and outlet pressure
+          const pDrop = 0.5 * mat.density * inletVel * inletVel; // dynamic pressure
           const pressureValues = new Float32Array(nVerts);
           let pMin = Infinity, pMax = -Infinity;
           for (let i = 0; i < nVerts; i++) {
             const x = (meshData.positions[i * 3] - xMin) / xRange;
             const y = (meshData.positions[i * 3 + 1] - yMin) / yRange;
             const z = (meshData.positions[i * 3 + 2] - zMin) / zRange;
-            const v = 100 * (1 - x) + 20 * Math.sin(Math.PI * y) + 10 * Math.sin(Math.PI * z) + 3 * Math.random();
+            // Linear pressure drop + sinusoidal perturbation
+            const v = outletP + pDrop * (1 - x) + pDrop * 0.1 * Math.sin(Math.PI * y) * Math.sin(Math.PI * z);
             pressureValues[i] = v;
             if (v < pMin) pMin = v;
             if (v > pMax) pMax = v;
           }
           fields.push({ name: 'pressure', values: pressureValues, min: pMin, max: pMax });
 
-          // Velocity field: 3D cavity-like pattern
+          // Velocity field: cavity-like pattern scaled by inlet velocity
           const velValues = new Float32Array(nVerts);
           let vMin = Infinity, vMax = -Infinity;
           for (let i = 0; i < nVerts; i++) {
             const x = (meshData.positions[i * 3] - xMin) / xRange;
             const y = (meshData.positions[i * 3 + 1] - yMin) / yRange;
             const z = (meshData.positions[i * 3 + 2] - zMin) / zRange;
-            const vx = Math.sin(Math.PI * x) * Math.cos(Math.PI * y);
-            const vy = -Math.cos(Math.PI * x) * Math.sin(Math.PI * y);
-            const vz = 0.3 * Math.sin(Math.PI * z);
-            const mag = Math.sqrt(vx * vx + vy * vy + vz * vz);
+            const vx = inletVel * inletDir[0] * Math.sin(Math.PI * x) * Math.cos(Math.PI * y);
+            const vy = inletVel * (inletDir[1] !== 0 ? inletDir[1] : -1) * Math.cos(Math.PI * x) * Math.sin(Math.PI * y);
+            const vz = inletVel * 0.3 * Math.sin(Math.PI * z);
+            // Near-wall damping (turbulent boundary layer effect)
+            const wallDist = Math.min(y, 1 - y, z, 1 - z);
+            const wallDamp = s.physicsModels.turbulence !== 'none' ? Math.min(1, wallDist * 10) : 1;
+            const mag = Math.sqrt(vx * vx + vy * vy + vz * vz) * wallDamp;
             velValues[i] = mag;
             if (mag < vMin) vMin = mag;
             if (mag > vMax) vMax = mag;
           }
           fields.push({ name: 'velocity', values: velValues, min: vMin, max: vMax });
 
-          // Temperature field: hot left, cold right with 3D variation
-          const tempValues = new Float32Array(nVerts);
-          let tMin = Infinity, tMax = -Infinity;
-          for (let i = 0; i < nVerts; i++) {
-            const x = (meshData.positions[i * 3] - xMin) / xRange;
-            const y = (meshData.positions[i * 3 + 1] - yMin) / yRange;
-            const z = (meshData.positions[i * 3 + 2] - zMin) / zRange;
-            const t = 400 - 100 * x + 15 * Math.sin(2 * Math.PI * y) + 10 * Math.sin(2 * Math.PI * z) + 2 * Math.random();
-            tempValues[i] = t;
-            if (t < tMin) tMin = t;
-            if (t > tMax) tMax = t;
+          // Temperature field: only if energy equation is enabled
+          if (s.physicsModels.energy) {
+            const tempValues = new Float32Array(nVerts);
+            let tMin = Infinity, tMax = -Infinity;
+            const deltaT = Math.abs(wallTemp - inletTemp) || 100;
+            for (let i = 0; i < nVerts; i++) {
+              const x = (meshData.positions[i * 3] - xMin) / xRange;
+              const y = (meshData.positions[i * 3 + 1] - yMin) / yRange;
+              const z = (meshData.positions[i * 3 + 2] - zMin) / zRange;
+              // Temperature mixing: inlet temp → wall temp with convective transport
+              const t = inletTemp + deltaT * x * 0.8 + deltaT * 0.1 * Math.sin(2 * Math.PI * y) + deltaT * 0.05 * Math.sin(2 * Math.PI * z);
+              tempValues[i] = t;
+              if (t < tMin) tMin = t;
+              if (t > tMax) tMax = t;
+            }
+            fields.push({ name: 'temperature', values: tempValues, min: tMin, max: tMax });
           }
-          fields.push({ name: 'temperature', values: tempValues, min: tMin, max: tMax });
+
+          // Turbulence kinetic energy field (if turbulence enabled)
+          if (s.physicsModels.turbulence !== 'none') {
+            const tkeValues = new Float32Array(nVerts);
+            let kMin = Infinity, kMax = -Infinity;
+            const TI = inletBC?.turbulenceIntensity ?? 0.05;
+            const kInlet = 1.5 * (inletVel * TI) ** 2;
+            for (let i = 0; i < nVerts; i++) {
+              const x = (meshData.positions[i * 3] - xMin) / xRange;
+              const y = (meshData.positions[i * 3 + 1] - yMin) / yRange;
+              const z = (meshData.positions[i * 3 + 2] - zMin) / zRange;
+              const wallDist = Math.min(y, 1 - y, z, 1 - z);
+              // TKE decays from inlet, peaks near walls
+              const k = kInlet * (0.3 + 0.7 * Math.exp(-2 * x)) * (1 + 3 * Math.exp(-wallDist * 20));
+              tkeValues[i] = k;
+              if (k < kMin) kMin = k;
+              if (k > kMax) kMax = k;
+            }
+            fields.push({ name: 'tke', values: tkeValues, min: kMin, max: kMax });
+          }
         }
 
         const finishTs = new Date().toLocaleTimeString();

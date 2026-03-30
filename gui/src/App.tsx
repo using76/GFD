@@ -538,6 +538,17 @@ function useKeyboardShortcuts() {
           e.preventDefault();
           store.setActiveTool('move');
           return;
+        case 'r':
+        case 'R':
+          e.preventDefault();
+          // Toggle transform mode: translate → rotate → scale → translate
+          { const modes: Array<'translate' | 'rotate' | 'scale'> = ['translate', 'rotate', 'scale'];
+            const cur = store.transformMode;
+            const next = modes[(modes.indexOf(cur) + 1) % modes.length];
+            store.setTransformMode(next);
+            message.info(`Transform mode: ${next}`);
+          }
+          return;
         case 'f':
         case 'F':
           e.preventDefault();

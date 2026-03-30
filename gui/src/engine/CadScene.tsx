@@ -643,6 +643,19 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
   const pendingBooleanTargetId = useAppStore((s) => s.pendingBooleanTargetId);
   const transparencyMode = useAppStore((s) => s.transparencyMode);
   const renderMode = useAppStore((s) => s.renderMode);
+  const hoveredShapeId = useAppStore((s) => s.hoveredShapeId);
+  const isHovered = hoveredShapeId === shape.id;
+
+  const handlePointerOver = useCallback((e: any) => {
+    e.stopPropagation();
+    useAppStore.getState().setHoveredShapeId(shape.id);
+    document.body.style.cursor = 'pointer';
+  }, [shape.id]);
+
+  const handlePointerOut = useCallback(() => {
+    useAppStore.getState().setHoveredShapeId(null);
+    document.body.style.cursor = 'default';
+  }, []);
 
   const handleClick = useCallback(
     (e: any) => {
@@ -692,7 +705,7 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
 
   return (
     <>
-      <mesh position={pos} rotation={rotation} onClick={handleClick}>
+      <mesh position={pos} rotation={rotation} onClick={handleClick} onPointerOver={handlePointerOver} onPointerOut={handlePointerOut}>
         {makeGeometry(shape)}
         {isBooleanTool ? (
           <BooleanGhostMaterial />
@@ -700,16 +713,16 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
           <EnclosureMaterial isSelected={false} />
         ) : isWireframe ? (
           <meshBasicMaterial
-            color={baseColor}
+            color={isHovered ? '#8888cc' : baseColor}
             wireframe
             transparent
             opacity={0.6}
           />
         ) : (
           <meshStandardMaterial
-            color={baseColor}
-            emissive={hasFillet ? '#1a2a4a' : hasChamfer ? '#2a1a0a' : '#000000'}
-            emissiveIntensity={(hasFillet || hasChamfer) ? 0.15 : 0}
+            color={isHovered ? '#8888cc' : baseColor}
+            emissive={isHovered ? '#2244aa' : hasFillet ? '#1a2a4a' : hasChamfer ? '#2a1a0a' : '#000000'}
+            emissiveIntensity={isHovered ? 0.25 : (hasFillet || hasChamfer) ? 0.15 : 0}
             transparent
             opacity={effectiveOpacity}
             roughness={hasFillet ? 0.3 : hasChamfer ? 0.6 : 0.5}
@@ -883,15 +896,21 @@ const SelectedShapeWithTransform: React.FC<{ shape: Shape; explodedPosition?: [n
       {meshNode && (
         <TransformControls
           object={meshNode}
-          mode="translate"
+          mode={useAppStore.getState().transformMode}
           onObjectChange={() => {
             if (meshNode) {
-              const pos = meshNode.position;
+              const p = meshNode.position;
+              const r = meshNode.rotation;
               updateShape(shape.id, {
                 position: [
-                  Math.round(pos.x * 1000) / 1000,
-                  Math.round(pos.y * 1000) / 1000,
-                  Math.round(pos.z * 1000) / 1000,
+                  Math.round(p.x * 1000) / 1000,
+                  Math.round(p.y * 1000) / 1000,
+                  Math.round(p.z * 1000) / 1000,
+                ],
+                rotation: [
+                  Math.round((r.x * 180 / Math.PI) * 100) / 100,
+                  Math.round((r.y * 180 / Math.PI) * 100) / 100,
+                  Math.round((r.z * 180 / Math.PI) * 100) / 100,
                 ],
               });
             }
