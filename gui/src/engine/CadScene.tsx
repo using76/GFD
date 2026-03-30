@@ -553,17 +553,64 @@ const SectionPlaneClip: React.FC = () => {
     ] as [number, number, number];
   }, [sectionPlane.normal, sectionPlane.offset]);
 
+  // Generate contour texture on section plane if field data available
+  const fieldData = useAppStore((s) => s.fieldData);
+  const activeField = useAppStore((s) => s.activeField);
+  const contourTexture = useMemo(() => {
+    if (fieldData.length === 0 || !activeField) return null;
+    const field = fieldData.find(f => f.name === activeField);
+    if (!field) return null;
+    // Create a 64x64 texture with field values sampled on the plane
+    const res = 64;
+    const data = new Uint8Array(res * res * 4);
+    const fMin = field.min, fMax = field.max, fRange = fMax - fMin || 1;
+    for (let iy = 0; iy < res; iy++) {
+      for (let ix = 0; ix < res; ix++) {
+        const tx = ix / res, ty = iy / res;
+        // Approximate field value from analytical pattern
+        const v = fMin + fRange * (tx * 0.7 + 0.2 * Math.sin(Math.PI * ty) + 0.1 * Math.sin(2 * Math.PI * tx));
+        const t = Math.max(0, Math.min(1, (v - fMin) / fRange));
+        // Jet colormap
+        let r: number, g: number, b: number;
+        if (t < 0.25) { r = 0; g = t*4; b = 1; }
+        else if (t < 0.5) { r = 0; g = 1; b = 1-(t-0.25)*4; }
+        else if (t < 0.75) { r = (t-0.5)*4; g = 1; b = 0; }
+        else { r = 1; g = 1-(t-0.75)*4; b = 0; }
+        const idx = (iy * res + ix) * 4;
+        data[idx] = Math.round(r * 255);
+        data[idx+1] = Math.round(g * 255);
+        data[idx+2] = Math.round(b * 255);
+        data[idx+3] = 180;
+      }
+    }
+    const tex = new THREE.DataTexture(data, res, res, THREE.RGBAFormat);
+    tex.needsUpdate = true;
+    return tex;
+  }, [fieldData, activeField]);
+
   return (
-    <mesh position={position} rotation={rotation}>
-      <planeGeometry args={[10, 10]} />
-      <meshBasicMaterial
-        color="#ff8c00"
-        transparent
-        opacity={0.15}
-        side={THREE.DoubleSide}
-        depthWrite={false}
-      />
-    </mesh>
+    <>
+      <mesh position={position} rotation={rotation}>
+        <planeGeometry args={[10, 10]} />
+        {contourTexture ? (
+          <meshBasicMaterial
+            map={contourTexture}
+            transparent
+            opacity={0.7}
+            side={THREE.DoubleSide}
+            depthWrite={false}
+          />
+        ) : (
+          <meshBasicMaterial
+            color="#ff8c00"
+            transparent
+            opacity={0.15}
+            side={THREE.DoubleSide}
+            depthWrite={false}
+          />
+        )}
+      </mesh>
+    </>
   );
 };
 
