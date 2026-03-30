@@ -151,9 +151,9 @@ const MiniToolbar: React.FC = () => {
         <div style={{ height: 1, background: '#303050', margin: '2px 4px' }} />
 
         {/* Fit All */}
-        <Tooltip title="Fit All" placement="right">
+        <Tooltip title="Fit All (zoom to all shapes)" placement="right">
           <div
-            onClick={() => dispatchCameraEvent([5, 5, 5])}
+            onClick={() => window.dispatchEvent(new CustomEvent('gfd-zoom-fit'))}
             style={{
               width: 32,
               height: 24,

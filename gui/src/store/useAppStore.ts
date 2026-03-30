@@ -228,7 +228,7 @@ export interface ResidualPoint {
 
 // ---- Results types ----
 export type ColormapType = 'jet' | 'rainbow' | 'grayscale' | 'coolwarm';
-export type ResultField = 'pressure' | 'velocity' | 'temperature' | 'tke';
+export type ResultField = 'pressure' | 'velocity' | 'temperature' | 'tke' | 'vof_alpha';
 
 export interface ContourConfig {
   field: ResultField;
@@ -1637,6 +1637,25 @@ export const useAppStore = create<AppState>((set, get) => ({
               if (k > kMax) kMax = k;
             }
             fields.push({ name: 'tke', values: tkeValues, min: kMin, max: kMax });
+          }
+
+          // VOF phase fraction field (if multiphase=vof)
+          if (s.physicsModels.multiphase === 'vof') {
+            const alphaValues = new Float32Array(nVerts);
+            let aMin = Infinity, aMax = -Infinity;
+            for (let i = 0; i < nVerts; i++) {
+              const y = (meshData.positions[i * 3 + 1] - yMin) / yRange;
+              const x = (meshData.positions[i * 3] - xMin) / xRange;
+              // Interface at y=0.5 with sinusoidal wave
+              const interfaceY = 0.5 + 0.1 * Math.sin(2 * Math.PI * x) * Math.cos(Math.PI * ((meshData.positions[i * 3 + 2] - zMin) / zRange));
+              // Smooth Heaviside (tanh transition)
+              const eps = 0.05;
+              const alpha = 0.5 * (1 + Math.tanh((interfaceY - y) / eps));
+              alphaValues[i] = alpha;
+              if (alpha < aMin) aMin = alpha;
+              if (alpha > aMax) aMax = alpha;
+            }
+            fields.push({ name: 'vof_alpha', values: alphaValues, min: aMin, max: aMax });
           }
         }
 
