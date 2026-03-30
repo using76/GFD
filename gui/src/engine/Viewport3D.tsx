@@ -1,5 +1,5 @@
-import { useEffect, useCallback, useState } from 'react';
-import { Canvas, useThree } from '@react-three/fiber';
+import { useEffect, useCallback, useState, useRef } from 'react';
+import { Canvas, useThree, useFrame } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport, Grid } from '@react-three/drei';
 import { useAppStore } from '../store/useAppStore';
 import MeshRenderer from './MeshRenderer';
@@ -126,6 +126,9 @@ function SceneContent() {
       {/* Screenshot capture */}
       <ScreenshotCapture />
 
+      {/* FPS monitor */}
+      <FpsMonitor />
+
       {/* CAD shapes */}
       <CadScene />
 
@@ -143,6 +146,23 @@ const bgColors: Record<string, string> = {
   light: '#e8eaed',
   gradient: '#1a2332',
 };
+
+/** FPS monitor: dispatches fps value to the DOM */
+function FpsMonitor() {
+  const frameCount = useRef(0);
+  const lastTime = useRef(performance.now());
+  useFrame(() => {
+    frameCount.current++;
+    const now = performance.now();
+    if (now - lastTime.current >= 1000) {
+      const fps = frameCount.current;
+      frameCount.current = 0;
+      lastTime.current = now;
+      window.dispatchEvent(new CustomEvent('gfd-fps', { detail: fps }));
+    }
+  });
+  return null;
+}
 
 /** Screenshot capture: listens for gfd-screenshot event and saves canvas as PNG */
 function ScreenshotCapture() {
@@ -185,6 +205,16 @@ export default function Viewport3D() {
   const cameraMode = useAppStore((s) => s.cameraMode);
   const backgroundMode = useAppStore((s) => s.backgroundMode);
   const [dragOver, setDragOver] = useState(false);
+  const [fps, setFps] = useState(0);
+  const hoveredShapeId = useAppStore((s) => s.hoveredShapeId);
+  const shapes = useAppStore((s) => s.shapes);
+  const hoveredShape = hoveredShapeId ? shapes.find(s => s.id === hoveredShapeId) : null;
+
+  useEffect(() => {
+    const handler = (e: Event) => setFps((e as CustomEvent).detail);
+    window.addEventListener('gfd-fps', handler);
+    return () => window.removeEventListener('gfd-fps', handler);
+  }, []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -242,6 +272,22 @@ export default function Viewport3D() {
       </Canvas>
 
       {/* Camera view buttons overlay — now handled by MiniToolbar in App.tsx */}
+
+      {/* FPS counter */}
+      <div style={{ position: 'absolute', top: 4, left: 4, fontSize: 10, color: fps > 30 ? '#52c41a' : fps > 15 ? '#faad14' : '#ff4444', fontFamily: 'monospace', pointerEvents: 'none', zIndex: 5 }}>
+        {fps} FPS
+      </div>
+
+      {/* Shape tooltip on hover */}
+      {hoveredShape && (
+        <div style={{ position: 'absolute', bottom: 8, left: 8, background: 'rgba(20,20,40,0.9)', border: '1px solid #303050', borderRadius: 6, padding: '4px 10px', fontSize: 11, color: '#ccd', pointerEvents: 'none', zIndex: 5 }}>
+          <b>{hoveredShape.name}</b> ({hoveredShape.kind})
+          {hoveredShape.dimensions.width != null && <span> | {hoveredShape.dimensions.width}×{hoveredShape.dimensions.height}×{hoveredShape.dimensions.depth}</span>}
+          {hoveredShape.dimensions.radius != null && <span> | R={hoveredShape.dimensions.radius}</span>}
+          {hoveredShape.dimensions.majorRadius != null && <span> | R={hoveredShape.dimensions.majorRadius}, r={hoveredShape.dimensions.minorRadius}</span>}
+          <span style={{ color: '#667' }}> @ ({hoveredShape.position.map(v => v.toFixed(1)).join(', ')})</span>
+        </div>
+      )}
 
       {/* Contour color legend overlay */}
       <ContourLegend />

@@ -45,7 +45,7 @@ Rust 기반 통합 멀티피직스 솔버 + Electron GUI 워크벤치
 | Crate 수 | 19 |
 | Rust 테스트 | **805 passed**, 0 failed |
 | TypeScript 에러 | **0** |
-| GUI 구현 기능 | **65+** (10 iterations) |
+| GUI 구현 기능 | **80+** (15 iterations) |
 | 리본 버튼 | 84 |
 | 키보드 단축키 | 30+ |
 
@@ -170,7 +170,20 @@ Layer 6 (GUI):     gui/ (Electron + React + Three.js)
 | Surface Integrals | **완료** | Wall shear, heat flux 보고서 |
 | STL Ray-Casting | **완료** | Moller-Trumbore 정확한 solid 판별 |
 | Solver Log/Residual Export | **완료** | .txt/.csv 내보내기 |
-| Export STL | **완료** | Binary STL 파일 내보내기 |
+| Export STL (모든 primitive) | **완료** | Three.js geometry → Binary STL |
+| OpenFOAM Case Export | **완료** | controlDict, fvSchemes, fvSolution, BCs |
+| DPM Particle Animation | **완료** | 200 파티클 실시간 유동 추적 |
+| Iso-Surface Rendering | **완료** | 필드 등치면 edge 보간 |
+| Cross-Section Contour | **완료** | 절단면에 필드 DataTexture |
+| Y+ Wall Distance Estimation | **완료** | Schlichting 마찰계수 기반 |
+| Mesh Quality Coloring | **완료** | 품질 메트릭 contour |
+| Convergence Target Line | **완료** | 잔차 플롯에 tolerance 수평선 |
+| Keyboard Shortcuts Help (?) | **완료** | 19개 단축키 모달 |
+| Drag-and-Drop STL Import | **완료** | 뷰포트에 파일 드래그 |
+| 14 Material Presets | **완료** | 유체 9종 + 고체 4종 + Custom |
+| Auto-Save (5분) | **완료** | localStorage 자동 저장 |
+| FPS Counter | **완료** | 뷰포트 좌상단 실시간 FPS |
+| Shape Tooltip on Hover | **완료** | 이름, 치수, 위치 표시 |
 
 ### 미비한 점 (Known Limitations)
 
