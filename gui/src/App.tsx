@@ -334,6 +334,33 @@ const AppMenu: React.FC = () => {
         message.success(`Exported ${shape.name}.stl (${fc} triangles)`);
       }
     }},
+    { key: 'exportgmsh', icon: <ExportOutlined />, label: 'Export Gmsh...', action: () => {
+      const state = useAppStore.getState();
+      const mesh = state.meshDisplayData;
+      if (!mesh || mesh.positions.length === 0) { message.warning('No mesh to export.'); return; }
+      const nTriVerts = mesh.positions.length / 3;
+      const nTris = nTriVerts / 3;
+      const lines: string[] = [];
+      lines.push('$MeshFormat', '2.2 0 8', '$EndMeshFormat');
+      // Nodes
+      lines.push('$Nodes', String(nTriVerts));
+      for (let i = 0; i < nTriVerts; i++) {
+        lines.push(`${i+1} ${mesh.positions[i*3].toFixed(8)} ${mesh.positions[i*3+1].toFixed(8)} ${mesh.positions[i*3+2].toFixed(8)}`);
+      }
+      lines.push('$EndNodes');
+      // Elements (triangles, type 2)
+      lines.push('$Elements', String(nTris));
+      for (let i = 0; i < nTris; i++) {
+        lines.push(`${i+1} 2 2 1 1 ${i*3+1} ${i*3+2} ${i*3+3}`);
+      }
+      lines.push('$EndElements');
+      const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'gfd_mesh.msh'; a.click();
+      URL.revokeObjectURL(url);
+      message.success(`Exported Gmsh: ${nTris} triangles, ${nTriVerts} nodes`);
+    }},
     { key: 'div2', divider: true },
     { key: 'settings', icon: <SettingOutlined />, label: 'Settings', action: () => {
       useAppStore.getState().setActiveRibbonTab('setup');

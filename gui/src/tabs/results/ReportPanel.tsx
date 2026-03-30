@@ -1,6 +1,7 @@
-import React from 'react';
-import { Card, Statistic, Row, Col, Divider, Typography, Empty, Button } from 'antd';
+import React, { useMemo } from 'react';
+import { Card, Statistic, Row, Col, Divider, Typography, Empty, Button, Select } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { useAppStore } from '../../store/useAppStore';
 
 const ReportPanel: React.FC = () => {
@@ -420,6 +421,78 @@ const ReportPanel: React.FC = () => {
           </Card>
         </Col>
       </Row>
+
+      {/* Line Plot: field values along X axis */}
+      {isConverged && fieldData.length > 0 && (
+        <>
+          <Divider style={{ margin: '12px 0' }} />
+          <Typography.Text strong>Line Plot (along X axis, y=0.5, z=0.5)</Typography.Text>
+          <LinePlotSection />
+        </>
+      )}
+    </div>
+  );
+};
+
+/** Line plot sampling field values along X axis */
+const LinePlotSection: React.FC = () => {
+  const fieldData = useAppStore((s) => s.fieldData);
+  const meshDisplayData = useAppStore((s) => s.meshDisplayData);
+  const [plotField, setPlotField] = React.useState('pressure');
+
+  const plotData = useMemo(() => {
+    if (!meshDisplayData || fieldData.length === 0) return [];
+    const field = fieldData.find(f => f.name === plotField);
+    if (!field) return [];
+
+    const positions = meshDisplayData.positions;
+    const nVerts = positions.length / 3;
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity, zMin = Infinity, zMax = -Infinity;
+    for (let i = 0; i < Math.min(nVerts, 1000); i++) {
+      if (positions[i*3] < xMin) xMin = positions[i*3]; if (positions[i*3] > xMax) xMax = positions[i*3];
+      if (positions[i*3+1] < yMin) yMin = positions[i*3+1]; if (positions[i*3+1] > yMax) yMax = positions[i*3+1];
+      if (positions[i*3+2] < zMin) zMin = positions[i*3+2]; if (positions[i*3+2] > zMax) zMax = positions[i*3+2];
+    }
+    const yMid = (yMin + yMax) / 2, zMid = (zMin + zMax) / 2;
+    const yTol = (yMax - yMin) * 0.1, zTol = (zMax - zMin) * 0.1;
+
+    // Collect vertices near the centerline (y≈0.5, z≈0.5)
+    const samples: { x: number; value: number }[] = [];
+    for (let i = 0; i < nVerts && i < field.values.length; i++) {
+      const y = positions[i*3+1], z = positions[i*3+2];
+      if (Math.abs(y - yMid) < yTol && Math.abs(z - zMid) < zTol) {
+        samples.push({ x: Math.round(positions[i*3] * 100) / 100, value: Math.round(field.values[i] * 1000) / 1000 });
+      }
+    }
+    samples.sort((a, b) => a.x - b.x);
+    // Deduplicate by x
+    const unique: typeof samples = [];
+    for (const s of samples) {
+      if (unique.length === 0 || Math.abs(s.x - unique[unique.length-1].x) > 0.01) unique.push(s);
+    }
+    return unique;
+  }, [fieldData, meshDisplayData, plotField]);
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <Select size="small" value={plotField} onChange={setPlotField} style={{ width: 150, marginBottom: 8 }}
+        options={fieldData.map(f => ({ label: f.name, value: f.name }))}
+      />
+      {plotData.length > 2 ? (
+        <div style={{ width: '100%', height: 150 }}>
+          <ResponsiveContainer width="100%" height={150} minWidth={100}>
+            <LineChart data={plotData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+              <XAxis dataKey="x" stroke="#888" tick={{ fontSize: 9 }} label={{ value: 'X (m)', position: 'insideBottom', offset: -3, fontSize: 9 }} />
+              <YAxis stroke="#888" tick={{ fontSize: 9 }} />
+              <Tooltip contentStyle={{ background: '#1f1f1f', border: '1px solid #444', fontSize: 11 }} />
+              <Line type="monotone" dataKey="value" stroke="#1668dc" dot={false} strokeWidth={1.5} isAnimationActive={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      ) : (
+        <div style={{ color: '#556', fontSize: 11, padding: 8 }}>Not enough data points along centerline.</div>
+      )}
     </div>
   );
 };
