@@ -225,7 +225,7 @@ const MeshZoneTree: React.FC = () => {
                 <ColorDot color={surf.color} size={10} />
                 <span style={{ flex: 1 }}>{surf.name}</span>
                 <span style={{ color: '#556', fontSize: 10 }}>
-                  {boundaryTypeLabels[surf.boundaryType]}
+                  {boundaryTypeLabels[surf.boundaryType]} ({surf.faceDirection})
                 </span>
               </div>
             ))}

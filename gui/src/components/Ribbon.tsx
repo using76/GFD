@@ -1052,7 +1052,7 @@ const CalcRibbon: React.FC = () => {
     <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, height: '100%' }}>
       <RibbonButton icon={<CaretRightOutlined />} label={isPaused ? 'Resume' : 'Start'} large onClick={() => { if (!isRunning) startSolver(); }} />
       <RibbonButton icon={<PauseOutlined />} label="Pause" onClick={() => { if (isRunning) pauseSolver(); }} />
-      <RibbonButton icon={<StopOutlined />} label="Stop" onClick={() => { if (!isIdle) stopSolver(); }} />
+      <RibbonButton icon={<StopOutlined />} label="Stop" onClick={() => { if (!isIdle && (solverStatus !== 'running' || confirm('Stop solver? Field data will be generated from current state.'))) stopSolver(); }} />
       <GroupSep label="Run" />
     </div>
   );
