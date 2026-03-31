@@ -87,6 +87,30 @@ const SelectOptions: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* Undo history */}
+      {useAppStore.getState().undoStack.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ color: '#889', fontSize: 11, marginBottom: 4, fontWeight: 500 }}>
+            History ({useAppStore.getState().undoStack.length} undo / {useAppStore.getState().redoStack.length} redo)
+          </div>
+          <div style={{ maxHeight: 80, overflow: 'auto', fontSize: 10, color: '#667' }}>
+            {useAppStore.getState().undoStack.slice(-5).reverse().map((snap, i) => (
+              <div key={i} style={{ padding: '1px 0', borderBottom: '1px solid #1a1a30' }}>
+                {snap.length} shapes {i === 0 ? '(current)' : `(-${i})`}
+              </div>
+            ))}
+          </div>
+          <Space size={4} style={{ marginTop: 4 }}>
+            <Button size="small" onClick={() => { useAppStore.getState().undo(); message.info('Undo'); }} disabled={useAppStore.getState().undoStack.length === 0}>
+              Undo
+            </Button>
+            <Button size="small" onClick={() => { useAppStore.getState().redo(); message.info('Redo'); }} disabled={useAppStore.getState().redoStack.length === 0}>
+              Redo
+            </Button>
+          </Space>
+        </div>
+      )}
     </div>
   );
 };

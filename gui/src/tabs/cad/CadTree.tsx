@@ -1,4 +1,5 @@
 import React, { useCallback, useMemo } from 'react';
+import { EyeOutlined } from '@ant-design/icons';
 import {
   BorderOutlined,
   RadiusSettingOutlined,
@@ -77,11 +78,19 @@ const CadTree: React.FC = () => {
       title: `Bodies (${bodies.length})`,
       children: bodies.map((s) => ({
         key: s.id,
-        title: s.visible === false
-          ? <span style={{ opacity: 0.4 }}><EyeInvisibleOutlined style={{ marginRight: 4, fontSize: 10 }} />{s.name}</span>
-          : s.locked
-          ? <span>{s.name} <LockOutlined style={{ marginLeft: 4, fontSize: 9, color: '#faad14' }} /></span>
-          : s.name,
+        title: (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: s.visible === false ? 0.4 : 1 }}>
+            <span
+              onClick={(e) => { e.stopPropagation(); useAppStore.getState().toggleShapeVisibility(s.id); }}
+              style={{ cursor: 'pointer', fontSize: 10, color: s.visible === false ? '#556' : '#4096ff' }}
+              title={s.visible === false ? 'Show' : 'Hide'}
+            >
+              {s.visible === false ? <EyeInvisibleOutlined /> : <EyeOutlined />}
+            </span>
+            <span>{s.name}</span>
+            {s.locked && <LockOutlined style={{ fontSize: 9, color: '#faad14' }} />}
+          </span>
+        ),
         icon: kindIcon(s.kind),
         isLeaf: true,
       })),
