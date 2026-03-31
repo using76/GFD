@@ -125,6 +125,27 @@ const ContextMenu3D: React.FC = () => {
         }
       },
     });
+    items.push({
+      key: 'copy-props',
+      icon: <CopyOutlined />,
+      label: 'Copy Properties',
+      action: () => {
+        localStorage.setItem('gfd-copied-props', JSON.stringify(shape.dimensions));
+        message.info(`Properties copied from "${shape.name}"`);
+      },
+    });
+    items.push({
+      key: 'paste-props',
+      icon: <CopyOutlined />,
+      label: 'Paste Properties',
+      action: () => {
+        const saved = localStorage.getItem('gfd-copied-props');
+        if (!saved) { message.warning('No properties copied. Use "Copy Properties" first.'); return; }
+        const dims = JSON.parse(saved);
+        useAppStore.getState().updateShape(shape.id, { dimensions: { ...shape.dimensions, ...dims } });
+        message.success(`Properties pasted to "${shape.name}"`);
+      },
+    });
     // Divider
     items.push({ key: 'div1', icon: null, label: '', action: () => {}, divider: true });
 
