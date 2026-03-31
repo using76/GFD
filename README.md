@@ -45,7 +45,7 @@ Rust 기반 통합 멀티피직스 솔버 + Electron GUI 워크벤치
 | Crate 수 | 19 |
 | Rust 테스트 | **805 passed**, 0 failed |
 | TypeScript 에러 | **0** |
-| GUI 구현 기능 | **80+** (15 iterations) |
+| GUI 구현 기능 | **100+** (22 iterations) |
 | 리본 버튼 | 84 |
 | 키보드 단축키 | 30+ |
 
@@ -184,6 +184,23 @@ Layer 6 (GUI):     gui/ (Electron + React + Three.js)
 | Auto-Save (5분) | **완료** | localStorage 자동 저장 |
 | FPS Counter | **완료** | 뷰포트 좌상단 실시간 FPS |
 | Shape Tooltip on Hover | **완료** | 이름, 치수, 위치 표시 |
+| Centerline Line Plot | **완료** | X축 따른 필드 값 Recharts 차트 |
+| Solver Pre-Flight Validation | **완료** | 메시/BC/입구속도 검증 |
+| Mesh Progress Log | **완료** | 단계별 콘솔 진행 표시 |
+| Refinement Zone UI | **완료** | MeshSettings에서 추가/삭제 |
+| 3D Annotations | **완료** | Billboard 텍스트 라벨 + 핀 |
+| Annotation/Probe Management | **완료** | ToolOptions에서 목록/삭제 |
+| Auto-Save Restore | **완료** | File 메뉴에서 복원 |
+| Iso-Surface Settings UI | **완료** | 필드/값 선택 슬라이더 |
+| Residual Auto-Scale | **완료** | Y축 자동 범위 |
+| Clear All Shapes | **완료** | Undo 지원 전체 삭제 |
+| Radiation Field (G) | **완료** | σT⁴ 입사 복사 필드 |
+| Species Mass Fraction (Y) | **완료** | 혼합 패턴 필드 |
+| Shape Lock | **완료** | 잠금/삭제 방지 + 아이콘 |
+| Set Position Dialog | **완료** | X,Y,Z 좌표 입력 |
+| Grid Snap (G키) | **완료** | OFF/0.1/0.25/0.5/1.0m 순환 |
+| Mesh CSV Export | **완료** | 노드 좌표 + 필드 데이터 |
+| Export 포맷 7종 | **완료** | VTK, STL, OpenFOAM, Gmsh, CSV, TXT, JSON |
 
 ### 미비한 점 (Known Limitations)
 

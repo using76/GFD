@@ -109,6 +109,22 @@ const ContextMenu3D: React.FC = () => {
         message.info(`Properties: ${shape.kind} [${shape.position.map(v => v.toFixed(2)).join(', ')}]`);
       },
     });
+    items.push({
+      key: 'set-position',
+      icon: <InfoCircleOutlined />,
+      label: 'Set Position...',
+      action: () => {
+        const input = prompt(`Position (X, Y, Z):`, shape.position.map(v => v.toFixed(3)).join(', '));
+        if (!input) return;
+        const parts = input.split(',').map(s => parseFloat(s.trim()));
+        if (parts.length === 3 && parts.every(v => !isNaN(v))) {
+          useAppStore.getState().updateShape(shape.id, { position: parts as [number, number, number] });
+          message.success(`Position set to (${parts.map(v => v.toFixed(3)).join(', ')})`);
+        } else {
+          message.error('Invalid input. Use format: X, Y, Z');
+        }
+      },
+    });
     // Divider
     items.push({ key: 'div1', icon: null, label: '', action: () => {}, divider: true });
 

@@ -350,6 +350,32 @@ const AppMenu: React.FC = () => {
         message.success(`Exported ${shape.name}.stl (${fc} triangles)`);
       }
     }},
+    { key: 'exportcsv', icon: <ExportOutlined />, label: 'Export Mesh CSV...', action: () => {
+      const state = useAppStore.getState();
+      const mesh = state.meshDisplayData;
+      if (!mesh || mesh.positions.length === 0) { message.warning('No mesh to export.'); return; }
+      const nVerts = mesh.positions.length / 3;
+      const lines: string[] = ['node_id,x,y,z'];
+      for (let i = 0; i < nVerts; i++) {
+        lines.push(`${i},${mesh.positions[i*3].toFixed(8)},${mesh.positions[i*3+1].toFixed(8)},${mesh.positions[i*3+2].toFixed(8)}`);
+      }
+      // Add field data columns if available
+      if (state.fieldData.length > 0) {
+        const header = 'node_id,' + state.fieldData.map(f => f.name).join(',');
+        const fieldLines: string[] = [header];
+        for (let i = 0; i < nVerts; i++) {
+          const vals = state.fieldData.map(f => i < f.values.length ? f.values[i].toFixed(6) : '0');
+          fieldLines.push(`${i},${vals.join(',')}`);
+        }
+        lines.push('', '# Field Data', ...fieldLines);
+      }
+      const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'gfd_mesh.csv'; a.click();
+      URL.revokeObjectURL(url);
+      message.success(`Exported CSV: ${nVerts} nodes`);
+    }},
     { key: 'exportgmsh', icon: <ExportOutlined />, label: 'Export Gmsh...', action: () => {
       const state = useAppStore.getState();
       const mesh = state.meshDisplayData;
@@ -796,6 +822,16 @@ function useKeyboardShortcuts() {
             const name = store.shapes.find(s => s.id === store.selectedShapeId)?.name ?? '';
             store.removeShape(store.selectedShapeId);
             message.info(`Deleted ${name}`);
+          }
+          return;
+        case 'g':
+        case 'G':
+          e.preventDefault();
+          { const snaps = [0, 0.1, 0.25, 0.5, 1.0];
+            const cur = store.gridSnap;
+            const next = snaps[(snaps.indexOf(cur) + 1) % snaps.length];
+            store.setGridSnap(next);
+            message.info(next === 0 ? 'Grid snap: OFF' : `Grid snap: ${next}m`);
           }
           return;
         case 'h':

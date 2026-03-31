@@ -338,6 +338,8 @@ interface AppState {
   setTransformMode: (mode: TransformMode) => void;
   hoveredShapeId: string | null;
   setHoveredShapeId: (id: string | null) => void;
+  gridSnap: number; // 0 = off, else snap increment
+  setGridSnap: (snap: number) => void;
   selectionFilter: SelectionFilterType;
   setSelectionFilter: (filter: SelectionFilterType) => void;
   leftPanelCollapsed: Record<string, boolean>;
@@ -601,6 +603,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setTransformMode: (mode) => set({ transformMode: mode }),
   hoveredShapeId: null,
   setHoveredShapeId: (id) => set({ hoveredShapeId: id }),
+  gridSnap: 0,
+  setGridSnap: (snap) => set({ gridSnap: snap }),
   selectionFilter: 'face',
   setSelectionFilter: (filter) => set({ selectionFilter: filter }),
   leftPanelCollapsed: {},
