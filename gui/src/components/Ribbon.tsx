@@ -398,6 +398,31 @@ const DesignRibbon: React.FC = () => {
                 return;
               }
 
+              // Compute bounding box and auto-center
+              let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+              for (let vi = 0; vi < verts.length; vi += 3) {
+                if (verts[vi] < minX) minX = verts[vi]; if (verts[vi] > maxX) maxX = verts[vi];
+                if (verts[vi+1] < minY) minY = verts[vi+1]; if (verts[vi+1] > maxY) maxY = verts[vi+1];
+                if (verts[vi+2] < minZ) minZ = verts[vi+2]; if (verts[vi+2] > maxZ) maxZ = verts[vi+2];
+              }
+              const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
+              const maxSpan = Math.max(maxX - minX, maxY - minY, maxZ - minZ);
+
+              // Auto-center: shift vertices so center is at origin
+              if (confirm(`Auto-center STL at origin? (current center: ${cx.toFixed(2)}, ${cy.toFixed(2)}, ${cz.toFixed(2)}, span: ${maxSpan.toFixed(2)}m)`)) {
+                for (let vi = 0; vi < verts.length; vi += 3) {
+                  verts[vi] -= cx; verts[vi+1] -= cy; verts[vi+2] -= cz;
+                }
+              }
+
+              // Auto-scale if very large or very small
+              if (maxSpan > 10 || maxSpan < 0.01) {
+                if (confirm(`Scale to fit unit box? (current span: ${maxSpan.toFixed(4)}m)`)) {
+                  const scale = 2.0 / maxSpan;
+                  for (let vi = 0; vi < verts.length; vi++) verts[vi] *= scale;
+                }
+              }
+
               const id = `shape-${nextId++}`;
               addShape({
                 id,
@@ -409,7 +434,7 @@ const DesignRibbon: React.FC = () => {
                 stlData: { vertices: verts, faceCount: fc },
                 group: 'body',
               });
-              message.success(`Imported ${file.name} (${fc} triangles)`);
+              message.success(`Imported ${file.name} (${fc} triangles, span: ${maxSpan.toFixed(2)}m)`);
             } catch (err: any) {
               message.error(`STL import failed: ${err.message || err}`);
             }

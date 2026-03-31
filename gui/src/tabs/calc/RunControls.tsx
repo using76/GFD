@@ -72,6 +72,15 @@ const RunControls: React.FC = () => {
         </div>
       )}
 
+      {/* Iteration speed & ETA */}
+      {solverStatus === 'running' && currentIteration > 2 && (
+        <div style={{ marginBottom: 12, padding: 6, background: '#1a1a30', borderRadius: 4, fontSize: 11, color: '#778' }}>
+          <div>Speed: ~{(currentIteration / ((Date.now() - (performance as any).timeOrigin) * 0.001 || 1) * 50).toFixed(0)} iter/s (50ms/step)</div>
+          <div>Remaining: ~{Math.max(0, solverSettings.maxIterations - currentIteration)} iterations</div>
+          <div>ETA: ~{((solverSettings.maxIterations - currentIteration) * 0.05).toFixed(1)}s</div>
+        </div>
+      )}
+
       <Space style={{ marginBottom: 16 }}>
         <Button
           type="primary"
