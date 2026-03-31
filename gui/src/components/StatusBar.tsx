@@ -91,6 +91,9 @@ export default function StatusBar() {
                 <div style={{ width: `${pct}%`, height: '100%', background: '#1668dc', borderRadius: 3, transition: 'width 0.2s' }} />
               </div>
               <Text style={{ fontSize: 10, color: '#667' }}>{pct.toFixed(0)}%</Text>
+              <Text style={{ fontSize: 10, color: '#556' }}>
+                {(() => { const t = Math.floor((Date.now() - useAppStore.getState().solverStartTime) / 1000); return `${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`; })()}
+              </Text>
             </div>
           );
         })()}

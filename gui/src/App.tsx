@@ -776,6 +776,13 @@ function useKeyboardShortcuts() {
             }
             return;
           }
+          case 'm':
+            e.preventDefault();
+            if (!store.meshGenerating) {
+              store.generateMesh();
+              message.info('Mesh generation started');
+            }
+            return;
           case 'd':
             e.preventDefault();
             if (store.selectedShapeId) {
@@ -970,6 +977,7 @@ function ShortcutsOverlay() {
     ['Ctrl+P', 'Screenshot'],
     ['Ctrl+D', 'Duplicate shape'],
     ['Ctrl+1-6', 'Quick create: Box/Sphere/Cylinder/Cone/Torus/Pipe'],
+    ['Ctrl+M', 'Generate mesh'],
     ['S', 'Select tool'],
     ['P', 'Pull tool'],
     ['M', 'Move tool'],

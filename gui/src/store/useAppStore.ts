@@ -448,6 +448,7 @@ interface AppState {
 
   // Calculation
   solverStatus: SolverStatus;
+  solverStartTime: number;
   residuals: ResidualPoint[];
   consoleLines: string[];
   currentIteration: number;
@@ -1562,6 +1563,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Calculation
   solverStatus: 'idle',
+  solverStartTime: 0,
   residuals: [],
   consoleLines: [],
   currentIteration: 0,
@@ -1637,6 +1639,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         ];
     set({
       solverStatus: 'running',
+      solverStartTime: isResume ? state.solverStartTime : Date.now(),
       residuals: isResume ? state.residuals : [],
       currentIteration: isResume ? state.currentIteration : 0,
       consoleLines: initLines,
