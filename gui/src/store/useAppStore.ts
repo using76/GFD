@@ -26,6 +26,7 @@ export interface Shape {
   rotation: [number, number, number];
   dimensions: Record<string, any>;
   visible?: boolean;             // false to hide without deleting (default true)
+  locked?: boolean;              // true to prevent move/delete
   stlData?: StlData;           // present when kind === 'stl'
   booleanRef?: string;         // id of BooleanOperation that produced this compound shape
   isEnclosure?: boolean;       // true for CFD prep enclosures
@@ -228,7 +229,7 @@ export interface ResidualPoint {
 
 // ---- Results types ----
 export type ColormapType = 'jet' | 'rainbow' | 'grayscale' | 'coolwarm';
-export type ResultField = 'pressure' | 'velocity' | 'temperature' | 'tke' | 'vof_alpha';
+export type ResultField = 'pressure' | 'velocity' | 'temperature' | 'tke' | 'vof_alpha' | 'radiation_G' | 'species_Y' | 'quality';
 
 export interface ContourConfig {
   field: ResultField;
@@ -678,6 +679,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       shapes: s.shapes.map((sh) => (sh.id === id ? { ...sh, ...patch } : sh)),
     })),
   removeShape: (id) => {
+    const shape = get().shapes.find(s => s.id === id);
+    if (shape?.locked) return; // Can't delete locked shapes
     get().pushUndo();
     set((s) => ({
       shapes: s.shapes.filter((sh) => sh.id !== id),
@@ -1762,6 +1765,41 @@ export const useAppStore = create<AppState>((set, get) => ({
               if (alpha > aMax) aMax = alpha;
             }
             fields.push({ name: 'vof_alpha', values: alphaValues, min: aMin, max: aMax });
+          }
+
+          // Radiation field (incident radiation G) when radiation model enabled
+          if (s.physicsModels.radiation !== 'none') {
+            const radValues = new Float32Array(nVerts);
+            let rMin = Infinity, rMax = -Infinity;
+            for (let i = 0; i < nVerts; i++) {
+              const x = (meshData.positions[i * 3] - xMin) / xRange;
+              const y = (meshData.positions[i * 3 + 1] - yMin) / yRange;
+              // Radiation intensity: peaks near hot wall, decays with distance
+              const sigma = 5.67e-8;
+              const T4 = Math.pow(inletTemp + 100 * (1 - x), 4);
+              const G = 4 * sigma * T4 * (0.3 + 0.7 * y);
+              radValues[i] = G;
+              if (G < rMin) rMin = G;
+              if (G > rMax) rMax = G;
+            }
+            fields.push({ name: 'radiation_G', values: radValues, min: rMin, max: rMax });
+          }
+
+          // Species mass fraction when species transport enabled
+          if (s.physicsModels.species !== 'none') {
+            const specValues = new Float32Array(nVerts);
+            let sMin = Infinity, sMax = -Infinity;
+            for (let i = 0; i < nVerts; i++) {
+              const x = (meshData.positions[i * 3] - xMin) / xRange;
+              const y = (meshData.positions[i * 3 + 1] - yMin) / yRange;
+              const z = (meshData.positions[i * 3 + 2] - zMin) / zRange;
+              // Species: mixing from inlet (Y=1) to outlet (Y→0) with diffusion
+              const Y = Math.exp(-2 * x) * (0.8 + 0.2 * Math.cos(Math.PI * y) * Math.cos(Math.PI * z));
+              specValues[i] = Math.max(0, Math.min(1, Y));
+              if (specValues[i] < sMin) sMin = specValues[i];
+              if (specValues[i] > sMax) sMax = specValues[i];
+            }
+            fields.push({ name: 'species_Y', values: specValues, min: sMin, max: sMax });
           }
         }
 

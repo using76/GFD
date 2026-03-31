@@ -10,6 +10,7 @@ import {
   ExpandOutlined,
   InteractionOutlined,
   EyeInvisibleOutlined,
+  LockOutlined,
 } from '@ant-design/icons';
 import OutlineTree from '../../components/OutlineTree';
 import type { TreeItem } from '../../components/OutlineTree';
@@ -78,6 +79,8 @@ const CadTree: React.FC = () => {
         key: s.id,
         title: s.visible === false
           ? <span style={{ opacity: 0.4 }}><EyeInvisibleOutlined style={{ marginRight: 4, fontSize: 10 }} />{s.name}</span>
+          : s.locked
+          ? <span>{s.name} <LockOutlined style={{ marginLeft: 4, fontSize: 9, color: '#faad14' }} /></span>
           : s.name,
         icon: kindIcon(s.kind),
         isLeaf: true,

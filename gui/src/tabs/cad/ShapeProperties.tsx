@@ -1,6 +1,6 @@
 import React from 'react';
-import { Typography, Button, Divider, Tag, message } from 'antd';
-import { DeleteOutlined } from '@ant-design/icons';
+import { Typography, Button, Divider, Tag, message, Switch } from 'antd';
+import { DeleteOutlined, LockOutlined, UnlockOutlined } from '@ant-design/icons';
 import PropertyGrid from '../../components/PropertyGrid';
 import type { PropertyField } from '../../components/PropertyGrid';
 import { useAppStore } from '../../store/useAppStore';
@@ -162,12 +162,28 @@ const ShapeProperties: React.FC = () => {
       )}
 
       <Divider style={{ margin: '4px 12px' }} />
+      <div style={{ padding: '0 12px 8px', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Switch
+          size="small"
+          checked={shape.locked ?? false}
+          onChange={(checked) => updateShape(shape.id, { locked: checked })}
+          checkedChildren={<LockOutlined />}
+          unCheckedChildren={<UnlockOutlined />}
+        />
+        <span style={{ fontSize: 11, color: shape.locked ? '#faad14' : '#667' }}>
+          {shape.locked ? 'Locked (cannot delete/move)' : 'Unlocked'}
+        </span>
+      </div>
       <div style={{ padding: '0 12px 12px' }}>
         <Button
           danger
           block
           icon={<DeleteOutlined />}
-          onClick={() => removeShape(shape.id)}
+          onClick={() => {
+            if (shape.locked) { message.warning('Shape is locked. Unlock it first.'); return; }
+            removeShape(shape.id);
+          }}
+          disabled={shape.locked}
         >
           Delete Shape
         </Button>

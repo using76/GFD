@@ -90,6 +90,8 @@ const ContourSettings: React.FC = () => {
               { label: 'Temperature (K)', value: 'temperature' },
               { label: 'Turbulence Kinetic Energy (m²/s²)', value: 'tke' },
               { label: 'VOF Phase Fraction', value: 'vof_alpha' },
+              { label: 'Incident Radiation (W/m²)', value: 'radiation_G' },
+              { label: 'Species Mass Fraction', value: 'species_Y' },
             ]}
             onChange={(v) => {
               updateContourConfig({ field: v as any });
