@@ -747,7 +747,8 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
   const hasChamfer = (shape.dimensions.chamferSize ?? 0) > 0;
   const isShell = (shape.dimensions.isShell ?? 0) > 0;
 
-  const effectiveOpacity = transparencyMode ? 0.3 : 0.85;
+  const shapeOpacity = typeof shape.dimensions._opacity === 'number' ? shape.dimensions._opacity : 0.85;
+  const effectiveOpacity = transparencyMode ? Math.min(0.3, shapeOpacity) : shapeOpacity;
   const isWireframe = renderMode === 'wireframe' || (shape.dimensions._wireframe ?? false);
 
   // Fillet/chamfer visual: use different colors for each

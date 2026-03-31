@@ -342,6 +342,10 @@ interface AppState {
   setGridSnap: (snap: number) => void;
   showBBox: boolean;
   setShowBBox: (v: boolean) => void;
+  showGrid: boolean;
+  setShowGrid: (v: boolean) => void;
+  showAxes: boolean;
+  setShowAxes: (v: boolean) => void;
   selectionFilter: SelectionFilterType;
   setSelectionFilter: (filter: SelectionFilterType) => void;
   leftPanelCollapsed: Record<string, boolean>;
@@ -617,6 +621,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   setGridSnap: (snap) => set({ gridSnap: snap }),
   showBBox: false,
   setShowBBox: (v) => set({ showBBox: v }),
+  showGrid: true,
+  setShowGrid: (v) => set({ showGrid: v }),
+  showAxes: true,
+  setShowAxes: (v) => set({ showAxes: v }),
   selectionFilter: 'face',
   setSelectionFilter: (filter) => set({ selectionFilter: filter }),
   leftPanelCollapsed: {},

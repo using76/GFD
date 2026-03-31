@@ -1,5 +1,5 @@
 import React from 'react';
-import { Typography, Button, Divider, Tag, message, Switch } from 'antd';
+import { Typography, Button, Divider, Tag, message, Switch, Slider } from 'antd';
 import { DeleteOutlined, LockOutlined, UnlockOutlined } from '@ant-design/icons';
 import PropertyGrid from '../../components/PropertyGrid';
 import type { PropertyField } from '../../components/PropertyGrid';
@@ -183,14 +183,19 @@ const ShapeProperties: React.FC = () => {
         </div>
       )}
 
-      {/* Wireframe toggle */}
-      <div style={{ padding: '0 12px 4px', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Switch
-          size="small"
-          checked={shape.dimensions._wireframe ?? false}
-          onChange={(checked) => updateShape(shape.id, { dimensions: { ...shape.dimensions, _wireframe: checked } })}
-        />
-        <span style={{ fontSize: 11, color: '#889' }}>Wireframe overlay</span>
+      {/* Display controls */}
+      <div style={{ padding: '0 12px 4px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <Switch size="small" checked={shape.dimensions._wireframe ?? false}
+            onChange={(checked) => updateShape(shape.id, { dimensions: { ...shape.dimensions, _wireframe: checked } })} />
+          <span style={{ fontSize: 11, color: '#889' }}>Wireframe</span>
+        </div>
+        <div style={{ fontSize: 11, color: '#889', marginBottom: 2 }}>
+          Opacity: {((shape.dimensions._opacity ?? 0.85) * 100).toFixed(0)}%
+        </div>
+        <Slider min={0.1} max={1} step={0.05}
+          value={shape.dimensions._opacity ?? 0.85}
+          onChange={(v) => updateShape(shape.id, { dimensions: { ...shape.dimensions, _opacity: v } })} />
       </div>
 
       {/* Shape color */}

@@ -77,6 +77,8 @@ function CameraPresetListener() {
 
 function SceneContent() {
   const lightingIntensity = useAppStore((s) => s.lightingIntensity);
+  const showGrid = useAppStore((s) => s.showGrid);
+  const showAxes = useAppStore((s) => s.showAxes);
 
   return (
     <>
@@ -86,7 +88,7 @@ function SceneContent() {
       <directionalLight position={[-5, 5, -5]} intensity={0.3 * lightingIntensity} />
 
       {/* Grid */}
-      <Grid
+      {showGrid && <Grid
         args={[20, 20]}
         cellSize={0.5}
         cellThickness={0.5}
@@ -98,10 +100,10 @@ function SceneContent() {
         fadeStrength={1}
         infiniteGrid
         position={[0, -0.001, 0]}
-      />
+      />}
 
       {/* Axes Helper */}
-      <axesHelper args={[3]} />
+      {showAxes && <axesHelper args={[3]} />}
 
       {/* Camera Controls */}
       <OrbitControls
