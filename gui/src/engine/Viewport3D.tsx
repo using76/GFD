@@ -204,6 +204,7 @@ function parseBinaryStlBuf(buf: ArrayBuffer): { verts: Float32Array; fc: number 
 export default function Viewport3D() {
   const cameraMode = useAppStore((s) => s.cameraMode);
   const backgroundMode = useAppStore((s) => s.backgroundMode);
+  const gradientColors = useAppStore((s) => s.gradientColors);
   const [dragOver, setDragOver] = useState(false);
   const [fps, setFps] = useState(0);
   const hoveredShapeId = useAppStore((s) => s.hoveredShapeId);
@@ -265,7 +266,7 @@ export default function Viewport3D() {
             : { near: 0.01, far: 1000, position: [5, 5, 5] }
         }
         orthographic={cameraMode.type === 'orthographic'}
-        style={{ background: bgColors[backgroundMode] ?? '#0d1117' }}
+        style={{ background: backgroundMode === 'gradient' ? `linear-gradient(180deg, ${gradientColors[0]}, ${gradientColors[1]})` : bgColors[backgroundMode] ?? '#0d1117' }}
         gl={{ antialias: true, localClippingEnabled: true, preserveDrawingBuffer: true }}
       >
         <SceneContent />

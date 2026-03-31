@@ -585,6 +585,8 @@ interface AppState {
   lightingIntensity: number;
   setLightingIntensity: (v: number) => void;
   backgroundMode: 'dark' | 'light' | 'gradient';
+  gradientColors: [string, string];
+  setGradientColors: (c: [string, string]) => void;
   setBackgroundMode: (v: 'dark' | 'light' | 'gradient') => void;
 
   // MPI core count
@@ -2095,6 +2097,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setLightingIntensity: (v) => set({ lightingIntensity: v }),
   backgroundMode: 'dark' as const,
   setBackgroundMode: (v) => set({ backgroundMode: v }),
+  gradientColors: ['#0a1628', '#1a2332'] as [string, string],
+  setGradientColors: (c: [string, string]) => set({ gradientColors: c }),
 
   // MPI core count
   mpiCores: 4,

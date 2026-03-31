@@ -970,7 +970,72 @@ const SelectedShapeWithTransform: React.FC<{ shape: Shape; explodedPosition?: [n
           }}
         />
       )}
+
+      {/* Dimension lines around selected shape */}
+      <DimensionLines shape={shape} />
     </>
+  );
+};
+
+/** Renders dimension arrows (W×H×D) around a selected shape */
+const DimensionLines: React.FC<{ shape: Shape }> = ({ shape }) => {
+  const d = shape.dimensions;
+  const pos = shape.position;
+  const hw = (d.width ?? d.radius ?? d.majorRadius ?? 0.5) / 2;
+  const hh = (d.height ?? d.radius ?? 0.5) / 2;
+  const hd = (d.depth ?? d.radius ?? d.minorRadius ?? 0.5) / 2;
+
+  const lines = useMemo(() => {
+    const result: { start: [number, number, number]; end: [number, number, number]; label: string; color: string }[] = [];
+    // Width (X axis) - red
+    if (d.width != null || d.radius != null) {
+      result.push({
+        start: [pos[0] - hw, pos[1] - hh - 0.15, pos[2] + hd],
+        end: [pos[0] + hw, pos[1] - hh - 0.15, pos[2] + hd],
+        label: `${(hw * 2).toFixed(2)}`,
+        color: '#ff4444',
+      });
+    }
+    // Height (Y axis) - green
+    if (d.height != null || d.radius != null) {
+      result.push({
+        start: [pos[0] + hw + 0.15, pos[1] - hh, pos[2] + hd],
+        end: [pos[0] + hw + 0.15, pos[1] + hh, pos[2] + hd],
+        label: `${(hh * 2).toFixed(2)}`,
+        color: '#44ff44',
+      });
+    }
+    // Depth (Z axis) - blue
+    if (d.depth != null) {
+      result.push({
+        start: [pos[0] - hw, pos[1] - hh - 0.15, pos[2] - hd],
+        end: [pos[0] - hw, pos[1] - hh - 0.15, pos[2] + hd],
+        label: `${(hd * 2).toFixed(2)}`,
+        color: '#4444ff',
+      });
+    }
+    return result;
+  }, [d, pos, hw, hh, hd]);
+
+  return (
+    <group>
+      {lines.map((line, i) => {
+        const dir = new THREE.Vector3(
+          line.end[0] - line.start[0],
+          line.end[1] - line.start[1],
+          line.end[2] - line.start[2]
+        );
+        const len = dir.length();
+        dir.normalize();
+        const origin = new THREE.Vector3(...line.start);
+        return (
+          <arrowHelper
+            key={`dim-${i}`}
+            args={[dir, origin, len, new THREE.Color(line.color).getHex(), len * 0.08, len * 0.04]}
+          />
+        );
+      })}
+    </group>
   );
 };
 
