@@ -859,6 +859,26 @@ function useKeyboardShortcuts() {
         return;
       }
 
+      // Ctrl+N: new project
+      if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+        e.preventDefault();
+        if (confirm('Create a new project? Unsaved changes will be lost.')) {
+          window.location.reload();
+        }
+        return;
+      }
+
+      // Ctrl+F: zoom to selected shape
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault();
+        if (store.selectedShapeId) {
+          window.dispatchEvent(new CustomEvent('gfd-zoom-selection'));
+        } else {
+          window.dispatchEvent(new CustomEvent('gfd-zoom-fit'));
+        }
+        return;
+      }
+
       // Ctrl+Enter: start/resume solver
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
@@ -1011,6 +1031,8 @@ function ShortcutsOverlay() {
     ['Ctrl+S', 'Save project'],
     ['Ctrl+Shift+S', 'Save As (download file)'],
     ['Ctrl+A', 'Select all shapes'],
+    ['Ctrl+N', 'New project'],
+    ['Ctrl+F', 'Zoom to selection (or fit all)'],
     ['Ctrl+Z', 'Undo'],
     ['Ctrl+Shift+Z / Ctrl+Y', 'Redo'],
     ['Ctrl+C', 'Copy shape'],

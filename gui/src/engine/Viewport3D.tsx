@@ -64,11 +64,39 @@ function CameraPresetListener() {
       animate();
     };
 
+    const zoomSelHandler = () => {
+      const selId = useAppStore.getState().selectedShapeId;
+      if (!selId) return;
+      const shape = useAppStore.getState().shapes.find(s => s.id === selId);
+      if (!shape) return;
+      const hw = (shape.dimensions.width ?? shape.dimensions.radius ?? 0.5);
+      const hh = (shape.dimensions.height ?? shape.dimensions.radius ?? 0.5);
+      const hd = (shape.dimensions.depth ?? shape.dimensions.radius ?? 0.5);
+      const size = Math.max(hw, hh, hd);
+      const dist = size * 3;
+      const cx = shape.position[0], cy = shape.position[1], cz = shape.position[2];
+      const target = new THREE.Vector3(cx + dist * 0.5, cy + dist * 0.5, cz + dist * 0.5);
+      const start = camera.position.clone();
+      const duration = 350;
+      const startTime = performance.now();
+      const animate = () => {
+        const elapsed = performance.now() - startTime;
+        const t = Math.min(elapsed / duration, 1);
+        const ease = t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2;
+        camera.position.lerpVectors(start, target, ease);
+        camera.lookAt(cx, cy, cz);
+        if (t < 1) requestAnimationFrame(animate);
+      };
+      animate();
+    };
+
     window.addEventListener('gfd-camera-preset', handler);
     window.addEventListener('gfd-zoom-fit', zoomFitHandler);
+    window.addEventListener('gfd-zoom-selection', zoomSelHandler);
     return () => {
       window.removeEventListener('gfd-camera-preset', handler);
       window.removeEventListener('gfd-zoom-fit', zoomFitHandler);
+      window.removeEventListener('gfd-zoom-selection', zoomSelHandler);
     };
   }, [camera]);
 
