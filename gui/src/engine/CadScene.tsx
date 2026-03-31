@@ -753,7 +753,7 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
   // Fillet/chamfer visual: use different colors for each
   const filletColor = '#7a8aaa';
   const chamferColor = '#8a7a6a';
-  const normalColor = '#6a6a8a';
+  const normalColor = (typeof shape.dimensions._color === 'string' ? shape.dimensions._color : '#6a6a8a');
   const baseColor = hasFillet ? filletColor : hasChamfer ? chamferColor : normalColor;
 
   return (

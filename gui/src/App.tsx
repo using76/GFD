@@ -801,6 +801,23 @@ function useKeyboardShortcuts() {
               message.info('Redo');
             }
             return;
+          case '1': case '2': case '3': case '4': case '5': case '6': {
+            e.preventDefault();
+            const kinds: Record<string, string> = { '1': 'box', '2': 'sphere', '3': 'cylinder', '4': 'cone', '5': 'torus', '6': 'pipe' };
+            const kind = kinds[e.key];
+            if (kind) {
+              const defaults: Record<string, Record<string, number>> = {
+                box: { width: 1, height: 1, depth: 1 }, sphere: { radius: 0.5 },
+                cylinder: { radius: 0.3, height: 1 }, cone: { radius: 0.4, height: 1 },
+                torus: { majorRadius: 0.5, minorRadius: 0.15 }, pipe: { outerRadius: 0.4, innerRadius: 0.3, height: 1.5 },
+              };
+              const id = `shape-quick-${Date.now()}`;
+              store.addShape({ id, name: `${kind}-${id.slice(-4)}`, kind: kind as never, position: [0, 0, 0], rotation: [0, 0, 0], dimensions: { ...defaults[kind] }, group: 'body' });
+              store.selectShape(id);
+              message.success(`Created ${kind}`);
+            }
+            return;
+          }
         }
         return;
       }
@@ -952,6 +969,7 @@ function ShortcutsOverlay() {
     ['Ctrl+V', 'Paste shape'],
     ['Ctrl+P', 'Screenshot'],
     ['Ctrl+D', 'Duplicate shape'],
+    ['Ctrl+1-6', 'Quick create: Box/Sphere/Cylinder/Cone/Torus/Pipe'],
     ['S', 'Select tool'],
     ['P', 'Pull tool'],
     ['M', 'Move tool'],

@@ -183,6 +183,25 @@ const ShapeProperties: React.FC = () => {
         </div>
       )}
 
+      {/* Shape color */}
+      <div style={{ padding: '0 12px 8px' }}>
+        <Divider style={{ margin: '4px 0 8px' }} />
+        <div style={{ fontSize: 11, color: '#889', marginBottom: 4 }}>Color</div>
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {['#6a6a8a', '#ff6b6b', '#51cf66', '#339af0', '#fcc419', '#cc5de8', '#ff922b', '#20c997', '#868e96'].map(c => (
+            <div
+              key={c}
+              onClick={() => updateShape(shape.id, { dimensions: { ...shape.dimensions, _color: c } })}
+              style={{
+                width: 20, height: 20, borderRadius: 4, cursor: 'pointer',
+                background: c,
+                border: shape.dimensions._color === c ? '2px solid #fff' : '2px solid transparent',
+              }}
+            />
+          ))}
+        </div>
+      </div>
+
       {/* STL-specific read-only info */}
       {isStl && shape.stlData && (
         <div style={{ padding: '0 12px 8px' }}>
