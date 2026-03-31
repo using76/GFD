@@ -69,11 +69,22 @@ const SelectOptions: React.FC = () => {
           <div style={{ color: '#889', fontSize: 11, marginBottom: 4, fontWeight: 500 }}>
             Align ({useAppStore.getState().selectedShapeIds.length} shapes)
           </div>
+          <div style={{ fontSize: 10, color: '#667', marginBottom: 2 }}>Align center:</div>
           <Space size={4}>
             <Button size="small" onClick={() => { useAppStore.getState().alignShapes('x'); message.success('Aligned X'); }}>X</Button>
             <Button size="small" onClick={() => { useAppStore.getState().alignShapes('y'); message.success('Aligned Y'); }}>Y</Button>
             <Button size="small" onClick={() => { useAppStore.getState().alignShapes('z'); message.success('Aligned Z'); }}>Z</Button>
           </Space>
+          {useAppStore.getState().selectedShapeIds.length >= 3 && (
+            <>
+              <div style={{ fontSize: 10, color: '#667', marginTop: 6, marginBottom: 2 }}>Distribute evenly:</div>
+              <Space size={4}>
+                <Button size="small" onClick={() => { useAppStore.getState().distributeShapes('x'); message.success('Distributed X'); }}>X</Button>
+                <Button size="small" onClick={() => { useAppStore.getState().distributeShapes('y'); message.success('Distributed Y'); }}>Y</Button>
+                <Button size="small" onClick={() => { useAppStore.getState().distributeShapes('z'); message.success('Distributed Z'); }}>Z</Button>
+              </Space>
+            </>
+          )}
         </div>
       )}
     </div>

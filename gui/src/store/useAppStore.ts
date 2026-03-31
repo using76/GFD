@@ -361,6 +361,7 @@ interface AppState {
   toggleMultiSelect: (id: string) => void;
   clearMultiSelect: () => void;
   alignShapes: (axis: 'x' | 'y' | 'z') => void;
+  distributeShapes: (axis: 'x' | 'y' | 'z') => void;
   booleanOps: BooleanOperation[];
   defeatureIssues: DefeatureIssue[];
   selectedIssueId: string | null;
@@ -731,6 +732,24 @@ export const useAppStore = create<AppState>((set, get) => ({
     shapes.forEach(s => {
       const newPos: [number, number, number] = [...s.position];
       newPos[axisIdx] = avg;
+      state.updateShape(s.id, { position: newPos });
+    });
+  },
+  distributeShapes: (axis) => {
+    const state = get();
+    const ids = state.selectedShapeIds;
+    if (ids.length < 3) return;
+    const shapes = ids.map(id => state.shapes.find(s => s.id === id)).filter(Boolean) as typeof state.shapes;
+    const axisIdx = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+    // Sort by current position
+    shapes.sort((a, b) => a.position[axisIdx] - b.position[axisIdx]);
+    const first = shapes[0].position[axisIdx];
+    const last = shapes[shapes.length - 1].position[axisIdx];
+    const step = (last - first) / (shapes.length - 1);
+    state.pushUndo();
+    shapes.forEach((s, i) => {
+      const newPos: [number, number, number] = [...s.position];
+      newPos[axisIdx] = first + step * i;
       state.updateShape(s.id, { position: newPos });
     });
   },

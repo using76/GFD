@@ -53,6 +53,12 @@ const AppMenu: React.FC = () => {
             if (saved.boundaries) saved.boundaries.forEach((b: any) => state.addBoundary(b));
             if (saved.meshConfig) state.updateMeshConfig(saved.meshConfig);
             message.success(`Project loaded: ${file.name}`);
+            // Track recent file
+            try {
+              const recent = JSON.parse(localStorage.getItem('gfd-recent-files') ?? '[]') as string[];
+              const updated = [file.name, ...recent.filter(f => f !== file.name)].slice(0, 5);
+              localStorage.setItem('gfd-recent-files', JSON.stringify(updated));
+            } catch { /* ignore */ }
           } catch { message.error('Failed to parse project file.'); }
         };
         reader.readAsText(file);
