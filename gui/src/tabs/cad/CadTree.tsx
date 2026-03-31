@@ -169,9 +169,15 @@ const CadTree: React.FC = () => {
           padding: '8px 12px',
           fontWeight: 600,
           borderBottom: '1px solid #303030',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
         }}
       >
-        CAD Tree
+        <span>CAD Tree</span>
+        <span style={{ fontSize: 10, fontWeight: 400, color: '#667' }}>
+          {shapes.length} shapes ({shapes.filter(s => s.visible !== false).length} visible)
+        </span>
       </div>
       <OutlineTree
         items={items}

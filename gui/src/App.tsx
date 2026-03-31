@@ -758,6 +758,15 @@ function useKeyboardShortcuts() {
               } catch { message.error('Save failed'); }
             }
             return;
+          case 'a':
+            e.preventDefault();
+            { const allIds = store.shapes.filter(s => s.visible !== false && s.group !== 'enclosure').map(s => s.id);
+              allIds.forEach(id => {
+                if (!store.selectedShapeIds.includes(id)) store.toggleMultiSelect(id);
+              });
+              message.info(`Selected all ${allIds.length} shapes`);
+            }
+            return;
           case 'x':
             e.preventDefault();
             if (store.selectedShapeId) {
@@ -1001,6 +1010,7 @@ function ShortcutsOverlay() {
   const shortcuts = [
     ['Ctrl+S', 'Save project'],
     ['Ctrl+Shift+S', 'Save As (download file)'],
+    ['Ctrl+A', 'Select all shapes'],
     ['Ctrl+Z', 'Undo'],
     ['Ctrl+Shift+Z / Ctrl+Y', 'Redo'],
     ['Ctrl+C', 'Copy shape'],
