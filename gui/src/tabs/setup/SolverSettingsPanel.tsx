@@ -1,6 +1,13 @@
 import React from 'react';
-import { Form, Select, InputNumber, Slider, Typography, Divider } from 'antd';
+import { Form, Select, InputNumber, Slider, Typography, Divider, Button, Space, message } from 'antd';
+import { SaveOutlined } from '@ant-design/icons';
 import { useAppStore } from '../../store/useAppStore';
+
+const BUILT_IN_PRESETS: Record<string, { method: string; maxIterations: number; tolerance: number; relaxPressure: number; relaxVelocity: number }> = {
+  'Default (SIMPLE)': { method: 'SIMPLE', maxIterations: 500, tolerance: 1e-4, relaxPressure: 0.3, relaxVelocity: 0.7 },
+  'Fast (SIMPLEC)': { method: 'SIMPLEC', maxIterations: 200, tolerance: 1e-3, relaxPressure: 0.5, relaxVelocity: 0.8 },
+  'Accurate (PISO)': { method: 'PISO', maxIterations: 1000, tolerance: 1e-6, relaxPressure: 0.2, relaxVelocity: 0.5 },
+};
 
 const SolverSettingsPanel: React.FC = () => {
   const solverSettings = useAppStore((s) => s.solverSettings);
@@ -8,8 +15,25 @@ const SolverSettingsPanel: React.FC = () => {
 
   return (
     <div style={{ padding: 12 }}>
-      <div style={{ fontWeight: 600, marginBottom: 12, fontSize: 14, borderBottom: '1px solid #303030', paddingBottom: 8 }}>
+      <div style={{ fontWeight: 600, marginBottom: 12, fontSize: 14, borderBottom: '1px solid #303030', paddingBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         Solver Settings
+        <Space size={4}>
+          <Select size="small" placeholder="Presets" style={{ width: 120 }}
+            options={Object.keys(BUILT_IN_PRESETS).map(k => ({ label: k, value: k }))}
+            onChange={(v) => {
+              const p = BUILT_IN_PRESETS[v];
+              if (p) { updateSolverSettings(p as never); message.success(`Preset "${v}" applied`); }
+            }}
+          />
+          <Button size="small" icon={<SaveOutlined />} onClick={() => {
+            const name = prompt('Preset name:', 'My Config');
+            if (!name) return;
+            const presets = JSON.parse(localStorage.getItem('gfd-solver-presets') ?? '{}');
+            presets[name] = { ...solverSettings };
+            localStorage.setItem('gfd-solver-presets', JSON.stringify(presets));
+            message.success(`Saved preset "${name}"`);
+          }} title="Save preset" />
+        </Space>
       </div>
 
       <Form layout="vertical" size="small">
