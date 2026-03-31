@@ -961,6 +961,19 @@ function useKeyboardShortcuts() {
           e.preventDefault();
           window.dispatchEvent(new CustomEvent('gfd-camera-preset', { detail: { position: [5, 5, 5] } }));
           return;
+        case 'F2':
+          e.preventDefault();
+          if (store.selectedShapeId) {
+            const shape = store.shapes.find(s => s.id === store.selectedShapeId);
+            if (shape) {
+              const newName = prompt('Rename shape:', shape.name);
+              if (newName && newName !== shape.name) {
+                store.updateShape(shape.id, { name: newName });
+                message.success(`Renamed to "${newName}"`);
+              }
+            }
+          }
+          return;
         case 'Escape':
           store.selectShape(null);
           store.setMeasureMode(null);
@@ -1050,6 +1063,7 @@ function ShortcutsOverlay() {
     ['R', 'Cycle transform: Translate/Rotate/Scale'],
     ['G', 'Cycle grid snap: OFF/0.1/0.25/0.5/1.0m'],
     ['B', 'Toggle scene bounding box'],
+    ['F2', 'Rename selected shape'],
     ['H', 'Home camera'],
     ['Delete', 'Delete selected'],
     ['Escape', 'Deselect / Cancel'],

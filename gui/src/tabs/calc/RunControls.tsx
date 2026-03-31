@@ -124,6 +124,17 @@ const RunControls: React.FC = () => {
         >
           Stop
         </Button>
+        {solverStatus === 'finished' && (
+          <Button
+            icon={<CaretRightOutlined />}
+            onClick={() => {
+              stopSolver(); // reset state
+              setTimeout(() => startSolver(), 100); // re-run
+            }}
+          >
+            Re-run
+          </Button>
+        )}
       </Space>
 
       {!meshGenerated && (
