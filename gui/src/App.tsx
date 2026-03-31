@@ -59,6 +59,22 @@ const AppMenu: React.FC = () => {
       };
       input.click();
     }},
+    { key: 'restore', icon: <FolderOpenOutlined />, label: 'Restore Auto-Save', action: () => {
+      try {
+        const data = localStorage.getItem('gfd-autosave');
+        const time = localStorage.getItem('gfd-autosave-time');
+        if (!data) { message.info('No auto-save found.'); return; }
+        const saved = JSON.parse(data);
+        const state = useAppStore.getState();
+        state.shapes.forEach(s => state.removeShape(s.id));
+        if (saved.shapes) saved.shapes.forEach((s: any) => state.addShape(s));
+        if (saved.physicsModels) state.updatePhysicsModels(saved.physicsModels);
+        if (saved.material) state.updateMaterial(saved.material);
+        if (saved.solverSettings) state.updateSolverSettings(saved.solverSettings);
+        if (saved.meshConfig) state.updateMeshConfig(saved.meshConfig);
+        message.success(`Auto-save restored${time ? ` (${new Date(time).toLocaleString()})` : ''}`);
+      } catch { message.error('Failed to restore auto-save.'); }
+    }},
     { key: 'save', icon: <SaveOutlined />, label: 'Save', action: () => {
       try {
         const state = useAppStore.getState();

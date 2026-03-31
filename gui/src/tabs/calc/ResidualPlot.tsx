@@ -76,7 +76,7 @@ const ResidualPlot: React.FC = () => {
             />
             <YAxis
               scale="log"
-              domain={[1e-6, 1]}
+              domain={['auto', 'auto']}
               allowDataOverflow
               label={{
                 value: 'Residual',

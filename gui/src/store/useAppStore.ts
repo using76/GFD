@@ -365,6 +365,7 @@ interface AppState {
   removeShape: (id: string) => void;
   toggleShapeVisibility: (id: string) => void;
   showAllShapes: () => void;
+  clearAllShapes: () => void;
   selectShape: (id: string | null) => void;
   addBooleanOp: (op: BooleanOperation) => void;
   removeBooleanOp: (id: string) => void;
@@ -694,6 +695,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({
       shapes: s.shapes.map((sh) => ({ ...sh, visible: true })),
     })),
+  clearAllShapes: () => {
+    get().pushUndo();
+    set({ shapes: [], selectedShapeId: null, booleanOps: [] });
+  },
   selectShape: (id) => set({ selectedShapeId: id }),
   addBooleanOp: (op) => set((s) => ({ booleanOps: [...s.booleanOps, op] })),
   removeBooleanOp: (id) =>

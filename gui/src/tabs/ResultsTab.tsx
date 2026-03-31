@@ -11,13 +11,14 @@ import type { TreeItem } from '../components/OutlineTree';
 import ContourSettings from './results/ContourSettings';
 import VectorSettings from './results/VectorSettings';
 import StreamlineSettings from './results/StreamlineSettings';
+import IsoSurfaceSettings from './results/IsoSurfaceSettings';
 import ReportPanel from './results/ReportPanel';
 
 interface ResultsTabProps {
   viewport: React.ReactNode;
 }
 
-type ResultsSection = 'contours' | 'vectors' | 'streamlines' | 'reports';
+type ResultsSection = 'contours' | 'vectors' | 'streamlines' | 'isosurface' | 'reports';
 
 const treeItems: TreeItem[] = [
   {
@@ -27,6 +28,7 @@ const treeItems: TreeItem[] = [
       { key: 'contours', title: 'Contours', icon: <HeatMapOutlined />, isLeaf: true },
       { key: 'vectors', title: 'Vectors', icon: <ArrowsAltOutlined />, isLeaf: true },
       { key: 'streamlines', title: 'Streamlines', icon: <SwapOutlined />, isLeaf: true },
+      { key: 'isosurface', title: 'Iso-Surface', icon: <SwapOutlined />, isLeaf: true },
     ],
   },
   {
@@ -41,6 +43,7 @@ const panelMap: Record<ResultsSection, React.ReactNode> = {
   contours: <ContourSettings />,
   vectors: <VectorSettings />,
   streamlines: <StreamlineSettings />,
+  isosurface: <IsoSurfaceSettings />,
   reports: <ReportPanel />,
 };
 
@@ -50,7 +53,7 @@ const ResultsTab: React.FC<ResultsTabProps> = ({ viewport }) => {
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail?.section && ['contours', 'vectors', 'streamlines', 'reports'].includes(detail.section)) {
+      if (detail?.section && ['contours', 'vectors', 'streamlines', 'isosurface', 'reports'].includes(detail.section)) {
         setSection(detail.section as ResultsSection);
       }
     };
