@@ -72,10 +72,12 @@ const RibbonButton: React.FC<{
   label: string;
   active?: boolean;
   large?: boolean;
+  shortcut?: string;
   onClick?: () => void;
-}> = ({ icon, label, active, large, onClick }) => (
+}> = ({ icon, label, active, large, shortcut, onClick }) => (
   <div
     onClick={onClick}
+    title={shortcut ? `${label} [${shortcut}]` : label}
     style={{
       display: 'flex',
       flexDirection: 'column',
@@ -229,7 +231,7 @@ const DesignRibbon: React.FC = () => {
       <GroupSep label="Clipboard" />
 
       {/* Orient Group */}
-      <RibbonButton icon={<HomeOutlined />} label="Home" onClick={() => window.dispatchEvent(new CustomEvent('gfd-camera-preset', { detail: { position: [5, 5, 5] } }))} />
+      <RibbonButton icon={<HomeOutlined />} label="Home" shortcut="H" onClick={() => window.dispatchEvent(new CustomEvent('gfd-camera-preset', { detail: { position: [5, 5, 5] } }))} />
       <RibbonButton icon={<DragOutlined />} label="Pan" onClick={() => message.info('Pan: Use middle mouse')} />
       <RibbonButton icon={<SyncOutlined />} label="Spin" onClick={() => message.info('Spin: Use right mouse')} />
       <RibbonButton icon={<ZoomInOutlined />} label="Zoom" onClick={() => message.info('Zoom: Use scroll wheel')} />
@@ -240,10 +242,10 @@ const DesignRibbon: React.FC = () => {
       <GroupSep label="Sketch" />
 
       {/* Select/Pull/Move/Fill Group */}
-      <RibbonButton icon={<SelectOutlined />} label="Select" active={activeTool === 'select'} large onClick={() => setActiveTool('select')} />
-      <RibbonButton icon={<ColumnHeightOutlined />} label="Pull" active={activeTool === 'pull'} large onClick={() => setActiveTool('pull')} />
-      <RibbonButton icon={<SwapOutlined />} label="Move" active={activeTool === 'move'} large onClick={() => setActiveTool('move')} />
-      <RibbonButton icon={<FormatPainterOutlined />} label="Fill" active={activeTool === 'fill'} large onClick={() => setActiveTool('fill')} />
+      <RibbonButton icon={<SelectOutlined />} label="Select" active={activeTool === 'select'} large shortcut="S" onClick={() => setActiveTool('select')} />
+      <RibbonButton icon={<ColumnHeightOutlined />} label="Pull" active={activeTool === 'pull'} large shortcut="P" onClick={() => setActiveTool('pull')} />
+      <RibbonButton icon={<SwapOutlined />} label="Move" active={activeTool === 'move'} large shortcut="M" onClick={() => setActiveTool('move')} />
+      <RibbonButton icon={<FormatPainterOutlined />} label="Fill" active={activeTool === 'fill'} large shortcut="F" onClick={() => setActiveTool('fill')} />
       <GroupSep label="Tools" />
 
       {/* Edit Group */}
