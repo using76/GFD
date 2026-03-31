@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Card, Statistic, Row, Col, Divider, Typography, Empty, Button, Select } from 'antd';
+import { Card, Statistic, Row, Col, Divider, Typography, Empty, Button, Select, message } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { useAppStore } from '../../store/useAppStore';
@@ -161,14 +161,56 @@ const ReportPanel: React.FC = () => {
     <div style={{ padding: 12 }}>
       <div style={{ fontWeight: 600, marginBottom: 12, fontSize: 14, borderBottom: '1px solid #303030', paddingBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         Reports
-        <Button
-          size="small"
-          icon={<DownloadOutlined />}
-          onClick={exportCsv}
-          disabled={!isConverged}
-        >
-          Export CSV
-        </Button>
+        <div style={{ display: 'flex', gap: 4 }}>
+          <Button size="small" icon={<DownloadOutlined />} onClick={exportCsv} disabled={!isConverged}>CSV</Button>
+          <Button size="small" icon={<DownloadOutlined />} disabled={!isConverged} onClick={() => {
+            const s = useAppStore.getState();
+            const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>GFD Report</title>
+<style>body{font-family:sans-serif;max-width:800px;margin:40px auto;color:#333}
+h1{color:#1668dc}table{border-collapse:collapse;width:100%;margin:16px 0}
+td,th{border:1px solid #ddd;padding:6px 10px;text-align:left}th{background:#f5f5f5}
+.good{color:#52c41a}.warn{color:#faad14}.bad{color:#ff4d4f}</style></head><body>
+<h1>GFD Simulation Report</h1>
+<p>Generated: ${new Date().toLocaleString()}</p>
+<h2>Setup</h2>
+<table><tr><th>Parameter</th><th>Value</th></tr>
+<tr><td>Solver</td><td>${s.solverSettings.method}</td></tr>
+<tr><td>Flow</td><td>${s.physicsModels.flow}</td></tr>
+<tr><td>Turbulence</td><td>${s.physicsModels.turbulence}</td></tr>
+<tr><td>Energy</td><td>${s.physicsModels.energy ? 'ON' : 'OFF'}</td></tr>
+<tr><td>Material</td><td>${s.material.name} (ρ=${s.material.density}, μ=${s.material.viscosity.toExponential(3)})</td></tr>
+<tr><td>Mesh</td><td>${s.meshDisplayData?.cellCount ?? 0} cells</td></tr>
+<tr><td>Iterations</td><td>${s.currentIteration}</td></tr>
+</table>
+<h2>Field Statistics</h2>
+<table><tr><th>Field</th><th>Min</th><th>Max</th><th>Average</th></tr>
+${s.fieldData.map(f => {
+  let avg = 0; for(let i=0;i<f.values.length;i++) avg+=f.values[i]; avg/=f.values.length;
+  return `<tr><td>${f.name}</td><td>${f.min.toFixed(4)}</td><td>${f.max.toFixed(4)}</td><td>${avg.toFixed(4)}</td></tr>`;
+}).join('')}
+</table>
+<h2>Boundary Conditions</h2>
+<table><tr><th>Name</th><th>Type</th><th>Details</th></tr>
+${s.boundaries.map(b => `<tr><td>${b.name}</td><td>${b.type}</td><td>${b.type==='inlet'?`v=[${b.velocity.join(',')}]`:b.type==='outlet'?`p=${b.pressure}`:'—'}</td></tr>`).join('')}
+</table>
+<h2>Final Residuals</h2>
+<table><tr><th>Equation</th><th>Value</th></tr>
+${s.residuals.length > 0 ? (() => { const r = s.residuals[s.residuals.length-1]; return `
+<tr><td>Continuity</td><td>${r.continuity.toExponential(4)}</td></tr>
+<tr><td>X-Momentum</td><td>${r.xMomentum.toExponential(4)}</td></tr>
+<tr><td>Y-Momentum</td><td>${r.yMomentum.toExponential(4)}</td></tr>
+<tr><td>Energy</td><td>${r.energy.toExponential(4)}</td></tr>`; })() : ''}
+</table>
+<p style="color:#888;font-size:12px">GFD — Generalized Fluid Dynamics v0.1.0</p>
+</body></html>`;
+            const blob = new Blob([html], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = 'gfd_report.html'; a.click();
+            URL.revokeObjectURL(url);
+            message.success('HTML report exported');
+          }}>HTML</Button>
+        </div>
       </div>
 
       <Typography.Text strong>Force Coefficients</Typography.Text>

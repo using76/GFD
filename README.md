@@ -45,9 +45,13 @@ Rust 기반 통합 멀티피직스 솔버 + Electron GUI 워크벤치
 | Crate 수 | 19 |
 | Rust 테스트 | **805 passed**, 0 failed |
 | TypeScript 에러 | **0** |
-| GUI 구현 기능 | **100+** (22 iterations) |
+| GUI 구현 기능 | **125+** (35 iterations) |
+| GUI 코드 | 11,239줄 |
 | 리본 버튼 | 84 |
-| 키보드 단축키 | 30+ |
+| 키보드 단축키 | 35+ |
+| Export 포맷 | 8종 (VTK, STL, OpenFOAM, Gmsh, CSV, TXT, JSON, HTML) |
+| 물성치 프리셋 | 14종 |
+| Solver 필드 | 9종 (pressure, velocity, temperature, tke, vof_alpha, radiation_G, species_Y, wall_yplus, quality) |
 
 ## 빌드 방법
 
@@ -200,7 +204,27 @@ Layer 6 (GUI):     gui/ (Electron + React + Three.js)
 | Set Position Dialog | **완료** | X,Y,Z 좌표 입력 |
 | Grid Snap (G키) | **완료** | OFF/0.1/0.25/0.5/1.0m 순환 |
 | Mesh CSV Export | **완료** | 노드 좌표 + 필드 데이터 |
-| Export 포맷 7종 | **완료** | VTK, STL, OpenFOAM, Gmsh, CSV, TXT, JSON |
+| Export 포맷 8종 | **완료** | VTK, STL, OpenFOAM, Gmsh, CSV, TXT, JSON, HTML |
+| Quick Shape Create (Ctrl+1-6) | **완료** | Box/Sphere/Cylinder/Cone/Torus/Pipe |
+| Shape Color Picker | **완료** | 9색 프리셋 팔레트 |
+| Solver Progress Bar | **완료** | StatusBar 미니 프로그레스 |
+| Scene Bounding Box (B키) | **완료** | 전체 shape 와이어프레임 |
+| Convergence Rate Display | **완료** | decades/iter + 품질 평가 |
+| Shape Surface Area | **완료** | 모든 primitive 공식 |
+| Wall y+ Visualization | **완료** | Schlichting 기반 필드 |
+| Mass/Energy Balance | **완료** | 보존 법칙 검증 보고서 |
+| Field Normalize | **완료** | [0,1] 범위 정규화 |
+| Mesh Independence Guide | **완료** | 4단계 검증 안내 |
+| Multi-Select (Ctrl+Click) | **완료** | 다중 선택 + 정렬/배분 |
+| Shape Align/Distribute | **완료** | X/Y/Z 정렬 + 등간격 배분 |
+| Array Pattern | **완료** | N개 복사 + 간격/축 설정 |
+| 3D Annotations | **완료** | Billboard 텍스트 라벨 |
+| Refinement Zone UI | **완료** | 로컬 격자 세분화 |
+| Dimension Lines | **완료** | W/H/D 화살표 표시 |
+| CadTree Visibility Toggle | **완료** | 눈 아이콘 직접 클릭 |
+| Undo History Panel | **완료** | 스냅샷 목록 + 버튼 |
+| Shape Lock | **완료** | 잠금/삭제 방지 |
+| HTML Report Export | **완료** | 스타일링된 보고서 파일 |
 
 ### 미비한 점 (Known Limitations)
 
