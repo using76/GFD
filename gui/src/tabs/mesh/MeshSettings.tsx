@@ -1,6 +1,6 @@
 import React from 'react';
-import { Button, Divider, Collapse, Switch, Space } from 'antd';
-import { BuildOutlined, LoadingOutlined, BgColorsOutlined } from '@ant-design/icons';
+import { Button, Divider, Collapse, Switch, Space, message } from 'antd';
+import { BuildOutlined, LoadingOutlined, BgColorsOutlined, PlusOutlined, DeleteOutlined } from '@ant-design/icons';
 import PropertyGrid from '../../components/PropertyGrid';
 import type { PropertyField } from '../../components/PropertyGrid';
 import { useAppStore } from '../../store/useAppStore';
@@ -39,6 +39,49 @@ const qualityLimitFields: PropertyField[] = [
   { key: 'minOrthogonality', label: 'Min Orthogonality', type: 'number', min: 0, max: 1.0, step: 0.05 },
   { key: 'maxAspectRatio', label: 'Max Aspect Ratio', type: 'number', min: 1.0, max: 100, step: 1 },
 ];
+
+/** Refinement zone management */
+const RefinementZoneSection: React.FC = () => {
+  const zones = useAppStore((s) => s.refinementZones);
+  const addZone = useAppStore((s) => s.addRefinementZone);
+  const removeZone = useAppStore((s) => s.removeRefinementZone);
+
+  return (
+    <div style={{ padding: '4px 8px' }}>
+      {zones.map((z) => (
+        <div key={z.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid #252540', fontSize: 11 }}>
+          <span style={{ color: '#aab' }}>{z.name} (L{z.level})</span>
+          <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => removeZone(z.id)} />
+        </div>
+      ))}
+      <Button
+        size="small"
+        icon={<PlusOutlined />}
+        block
+        style={{ marginTop: 4 }}
+        onClick={() => {
+          const name = prompt('Zone name:', `refine-${zones.length + 1}`) ?? `refine-${zones.length + 1}`;
+          const level = parseInt(prompt('Refinement level (2-4):', '2') ?? '2') || 2;
+          addZone({
+            id: `ref-${Date.now()}`,
+            name,
+            center: [0, 0, 0],
+            size: [1, 1, 1],
+            level: Math.min(4, Math.max(2, level)),
+          });
+          message.success(`Refinement zone "${name}" added (L${level})`);
+        }}
+      >
+        Add Zone
+      </Button>
+      {zones.length === 0 && (
+        <div style={{ color: '#556', fontSize: 10, padding: '6px 0', textAlign: 'center' }}>
+          No refinement zones. Click Add to define local mesh refinement.
+        </div>
+      )}
+    </div>
+  );
+};
 
 /** Y+ estimation based on first cell height, inlet velocity, and fluid properties */
 const YPlusEstimate: React.FC = () => {
@@ -150,6 +193,11 @@ const MeshSettings: React.FC = () => {
           onChange={(key, value) => updateMeshConfig({ [key]: value })}
         />
       ),
+    },
+    {
+      key: 'refinement',
+      label: `Refinement Zones (${useAppStore.getState().refinementZones.length})`,
+      children: <RefinementZoneSection />,
     },
   ];
 

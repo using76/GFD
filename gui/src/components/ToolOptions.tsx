@@ -8,6 +8,12 @@ import { useAppStore } from '../store/useAppStore';
 const SelectOptions: React.FC = () => {
   const selectionFilter = useAppStore((s) => s.selectionFilter);
   const setSelectionFilter = useAppStore((s) => s.setSelectionFilter);
+  const annotations = useAppStore((s) => s.annotations);
+  const probePoints = useAppStore((s) => s.probePoints);
+  const removeAnnotation = useAppStore((s) => s.removeAnnotation);
+  const removeProbePoint = useAppStore((s) => s.removeProbePoint);
+  const clearAnnotations = useAppStore((s) => s.clearAnnotations);
+  const clearProbePoints = useAppStore((s) => s.clearProbePoints);
 
   return (
     <div style={{ padding: 10, fontSize: 12 }}>
@@ -24,6 +30,38 @@ const SelectOptions: React.FC = () => {
         <Radio value="body" style={{ fontSize: 12 }}>Body</Radio>
         <Radio value="component" style={{ fontSize: 12 }}>Component</Radio>
       </Radio.Group>
+
+      {/* Annotations list */}
+      {annotations.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ color: '#889', fontSize: 11, marginBottom: 4, fontWeight: 500, display: 'flex', justifyContent: 'space-between' }}>
+            <span>Notes ({annotations.length})</span>
+            <span onClick={clearAnnotations} style={{ color: '#4096ff', cursor: 'pointer' }}>Clear</span>
+          </div>
+          {annotations.map(a => (
+            <div key={a.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '2px 0', borderBottom: '1px solid #252540' }}>
+              <span style={{ fontSize: 11, color: '#aab' }}>{a.text}</span>
+              <span onClick={() => removeAnnotation(a.id)} style={{ color: '#ff4d4f', cursor: 'pointer', fontSize: 10 }}>x</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Probe points list */}
+      {probePoints.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ color: '#889', fontSize: 11, marginBottom: 4, fontWeight: 500, display: 'flex', justifyContent: 'space-between' }}>
+            <span>Probes ({probePoints.length})</span>
+            <span onClick={clearProbePoints} style={{ color: '#4096ff', cursor: 'pointer' }}>Clear</span>
+          </div>
+          {probePoints.map(p => (
+            <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '2px 0', borderBottom: '1px solid #252540' }}>
+              <span style={{ fontSize: 10, color: '#aab' }}>({p.position.map(v => v.toFixed(1)).join(', ')})</span>
+              <span onClick={() => removeProbePoint(p.id)} style={{ color: '#ff4d4f', cursor: 'pointer', fontSize: 10 }}>x</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
