@@ -767,6 +767,24 @@ function useKeyboardShortcuts() {
             }
             return;
           }
+          case 'd':
+            e.preventDefault();
+            if (store.selectedShapeId) {
+              const orig = store.shapes.find(s => s.id === store.selectedShapeId);
+              if (orig && !orig.locked) {
+                const id = `shape-dup-${Date.now()}`;
+                store.addShape({
+                  ...orig,
+                  id,
+                  name: `${orig.name}-dup`,
+                  position: [orig.position[0] + 0.5, orig.position[1], orig.position[2]],
+                  locked: false,
+                });
+                store.selectShape(id);
+                message.success(`Duplicated "${orig.name}"`);
+              }
+            }
+            return;
           case 'y':
             e.preventDefault();
             if (store.redoStack.length > 0) {
@@ -919,11 +937,13 @@ function ShortcutsOverlay() {
     ['Ctrl+X', 'Cut shape'],
     ['Ctrl+V', 'Paste shape'],
     ['Ctrl+P', 'Screenshot'],
+    ['Ctrl+D', 'Duplicate shape'],
     ['S', 'Select tool'],
     ['P', 'Pull tool'],
     ['M', 'Move tool'],
     ['F', 'Fill tool'],
     ['R', 'Cycle transform: Translate/Rotate/Scale'],
+    ['G', 'Cycle grid snap: OFF/0.1/0.25/0.5/1.0m'],
     ['H', 'Home camera'],
     ['Delete', 'Delete selected'],
     ['Escape', 'Deselect / Cancel'],

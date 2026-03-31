@@ -94,7 +94,7 @@ const ContourSettings: React.FC = () => {
               { label: 'Species Mass Fraction', value: 'species_Y' },
             ]}
             onChange={(v) => {
-              updateContourConfig({ field: v as any });
+              updateContourConfig({ field: v as never });
               setActiveField(v);
               setRenderMode('contour');
             }}
@@ -110,7 +110,7 @@ const ContourSettings: React.FC = () => {
               { label: 'Grayscale', value: 'grayscale' },
               { label: 'Cool-Warm', value: 'coolwarm' },
             ]}
-            onChange={(v) => updateContourConfig({ colormap: v as any })}
+            onChange={(v) => updateContourConfig({ colormap: v as never })}
           />
         </Form.Item>
 

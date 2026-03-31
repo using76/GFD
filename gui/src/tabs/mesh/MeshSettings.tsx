@@ -280,7 +280,7 @@ const MeshSettings: React.FC = () => {
                 ]);
                 state.setActiveField('quality');
                 state.setRenderMode('contour');
-                state.updateContourConfig({ field: 'quality' as any });
+                state.updateContourConfig({ field: 'quality' });
               }}
             >
               Color by Quality
