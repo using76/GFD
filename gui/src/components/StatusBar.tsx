@@ -23,6 +23,7 @@ export default function StatusBar() {
   const transformMode = useAppStore((s) => s.transformMode);
   const selectionFilter = useAppStore((s) => s.selectionFilter);
   const gridSnap = useAppStore((s) => s.gridSnap);
+  const multiSelectCount = useAppStore((s) => s.selectedShapeIds.length);
   const exploded = useAppStore((s) => s.exploded);
   const transparencyMode = useAppStore((s) => s.transparencyMode);
   const repairIssues = useAppStore((s) => s.repairIssues);
@@ -96,6 +97,12 @@ export default function StatusBar() {
         <Text style={{ fontSize: 11, color: gridSnap > 0 ? '#52c41a' : '#445' }}>
           Snap: {gridSnap > 0 ? `${gridSnap}m` : 'OFF'}
         </Text>
+
+        {multiSelectCount > 1 && (
+          <Tag color="purple" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+            {multiSelectCount} selected
+          </Tag>
+        )}
 
         {exploded && (
           <Tag color="orange" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>

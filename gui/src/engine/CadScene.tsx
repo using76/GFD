@@ -720,7 +720,13 @@ const ShapeMesh: React.FC<{ shape: Shape; isBooleanTool?: boolean; explodedPosit
         return;
       }
 
-      selectShape(shape.id);
+      // Ctrl+Click for multi-select
+      if (e.ctrlKey || e.metaKey) {
+        useAppStore.getState().toggleMultiSelect(shape.id);
+      } else {
+        useAppStore.getState().clearMultiSelect();
+        selectShape(shape.id);
+      }
     },
     [shape.id, shape.name, cadMode, pendingBooleanOp, pendingBooleanTargetId, selectShape]
   );

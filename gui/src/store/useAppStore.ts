@@ -357,6 +357,10 @@ interface AppState {
   // CAD
   shapes: Shape[];
   selectedShapeId: string | null;
+  selectedShapeIds: string[]; // multi-select
+  toggleMultiSelect: (id: string) => void;
+  clearMultiSelect: () => void;
+  alignShapes: (axis: 'x' | 'y' | 'z') => void;
   booleanOps: BooleanOperation[];
   defeatureIssues: DefeatureIssue[];
   selectedIssueId: string | null;
@@ -707,6 +711,29 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ shapes: [], selectedShapeId: null, booleanOps: [] });
   },
   selectShape: (id) => set({ selectedShapeId: id }),
+  selectedShapeIds: [],
+  toggleMultiSelect: (id) => set((s) => {
+    const ids = s.selectedShapeIds.includes(id)
+      ? s.selectedShapeIds.filter(i => i !== id)
+      : [...s.selectedShapeIds, id];
+    return { selectedShapeIds: ids, selectedShapeId: ids.length > 0 ? ids[ids.length - 1] : null };
+  }),
+  clearMultiSelect: () => set({ selectedShapeIds: [] }),
+  alignShapes: (axis) => {
+    const state = get();
+    const ids = state.selectedShapeIds.length > 1 ? state.selectedShapeIds : [];
+    if (ids.length < 2) return;
+    const shapes = ids.map(id => state.shapes.find(s => s.id === id)).filter(Boolean) as typeof state.shapes;
+    // Compute average position on the axis
+    const axisIdx = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+    const avg = shapes.reduce((sum, s) => sum + s.position[axisIdx], 0) / shapes.length;
+    state.pushUndo();
+    shapes.forEach(s => {
+      const newPos: [number, number, number] = [...s.position];
+      newPos[axisIdx] = avg;
+      state.updateShape(s.id, { position: newPos });
+    });
+  },
   addBooleanOp: (op) => set((s) => ({ booleanOps: [...s.booleanOps, op] })),
   removeBooleanOp: (id) =>
     set((s) => ({

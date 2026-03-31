@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Checkbox, Radio, InputNumber, Form, Slider, Button, message } from 'antd';
+import { Checkbox, Radio, InputNumber, Form, Slider, Button, message, Space } from 'antd';
 import { useAppStore } from '../store/useAppStore';
 
 // ============================================================
@@ -60,6 +60,20 @@ const SelectOptions: React.FC = () => {
               <span onClick={() => removeProbePoint(p.id)} style={{ color: '#ff4d4f', cursor: 'pointer', fontSize: 10 }}>x</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Alignment tools for multi-select */}
+      {useAppStore.getState().selectedShapeIds.length > 1 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ color: '#889', fontSize: 11, marginBottom: 4, fontWeight: 500 }}>
+            Align ({useAppStore.getState().selectedShapeIds.length} shapes)
+          </div>
+          <Space size={4}>
+            <Button size="small" onClick={() => { useAppStore.getState().alignShapes('x'); message.success('Aligned X'); }}>X</Button>
+            <Button size="small" onClick={() => { useAppStore.getState().alignShapes('y'); message.success('Aligned Y'); }}>Y</Button>
+            <Button size="small" onClick={() => { useAppStore.getState().alignShapes('z'); message.success('Aligned Z'); }}>Z</Button>
+          </Space>
         </div>
       )}
     </div>
