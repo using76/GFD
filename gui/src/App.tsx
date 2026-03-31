@@ -415,17 +415,26 @@ const AppMenu: React.FC = () => {
       window.dispatchEvent(new CustomEvent('gfd-setup-section', { detail: { section: 'solver' } }));
     }},
     { key: 'about', icon: <InfoCircleOutlined />, label: 'About GFD', action: () => {
-      const state = useAppStore.getState();
-      const shapeCount = state.shapes.length;
-      const meshCells = state.meshDisplayData?.cellCount ?? 0;
-      message.info({
-        content: `GFD — Generalized Fluid Dynamics v0.1.0\n` +
-          `Rust solver: 262 files, 63K lines, 19 crates, 805 tests\n` +
-          `GUI: 50 files, 14K lines (React + Three.js)\n` +
-          `Current: ${shapeCount} shapes, ${meshCells} mesh cells\n` +
-          `License: Modified MIT`,
-        duration: 8,
-      });
+      const s = useAppStore.getState();
+      const stats = [
+        `GFD — Generalized Fluid Dynamics v0.1.0`,
+        ``,
+        `Rust Solver: 262 files | 63,805 lines | 19 crates | 805 tests`,
+        `GUI: 50+ files | 11,000+ lines | 112+ features | React + Three.js`,
+        ``,
+        `--- Current Project ---`,
+        `Shapes: ${s.shapes.length} (${s.shapes.filter(x => x.visible !== false).length} visible, ${s.shapes.filter(x => x.locked).length} locked)`,
+        `Mesh: ${s.meshGenerated ? `${s.meshDisplayData?.cellCount ?? 0} cells, ${s.meshDisplayData?.nodeCount ?? 0} nodes` : 'Not generated'}`,
+        `Solver: ${s.solverStatus} (${s.currentIteration} iterations, ${s.residuals.length} residual points)`,
+        `Fields: ${s.fieldData.map(f => f.name).join(', ') || 'None'}`,
+        `Boundaries: ${s.boundaries.length} patches`,
+        `Physics: ${s.physicsModels.flow}, Turb=${s.physicsModels.turbulence}, E=${s.physicsModels.energy ? 'ON' : 'OFF'}`,
+        `Material: ${s.material.name} (ρ=${s.material.density})`,
+        `Probes: ${s.probePoints.length} | Notes: ${s.annotations.length} | Undo: ${s.undoStack.length}`,
+        ``,
+        `License: Modified MIT | Export: VTK, STL, OpenFOAM, Gmsh, CSV`,
+      ];
+      message.info({ content: stats.join('\n'), duration: 12, style: { whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: 11 } });
     }},
   ];
 

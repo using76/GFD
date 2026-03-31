@@ -255,7 +255,7 @@ const ContextMenu3D: React.FC = () => {
     });
   }
 
-  // Shape-specific: add note at shape position
+  // Shape-specific: add note at shape position + array pattern
   if (shape) {
     items.push({ key: 'div-note', icon: null, label: '', action: () => {}, divider: true });
     items.push({
@@ -268,6 +268,35 @@ const ContextMenu3D: React.FC = () => {
           useAppStore.getState().addAnnotation(text, [...shape.position] as [number, number, number]);
           message.success(`Note added: "${text}"`);
         }
+      },
+    });
+    items.push({
+      key: 'array-pattern',
+      icon: <CopyOutlined />,
+      label: 'Array Pattern...',
+      action: () => {
+        const countStr = prompt('Number of copies:', '3');
+        if (!countStr) return;
+        const count = parseInt(countStr) || 3;
+        const spacingStr = prompt('Spacing (m):', '1.0');
+        const spacing = parseFloat(spacingStr ?? '1') || 1;
+        const axisStr = prompt('Axis (x/y/z):', 'x');
+        const axis = (axisStr ?? 'x').toLowerCase();
+        const axisIdx = axis === 'y' ? 1 : axis === 'z' ? 2 : 0;
+        for (let i = 1; i <= count; i++) {
+          const id = `shape-arr-${Date.now()}-${i}`;
+          const newPos: [number, number, number] = [...shape.position];
+          newPos[axisIdx] += spacing * i;
+          addShape({
+            ...shape,
+            id,
+            name: `${shape.name}-${i}`,
+            position: newPos,
+            locked: false,
+            stlData: shape.stlData,
+          });
+        }
+        message.success(`Created ${count} copies along ${axis.toUpperCase()} with ${spacing}m spacing`);
       },
     });
   }
