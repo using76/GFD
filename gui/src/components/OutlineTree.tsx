@@ -22,6 +22,7 @@ interface OutlineTreeProps {
   onSelect?: (key: string) => void;
   onDelete?: (key: string) => void;
   onRename?: (key: string) => void;
+  onDoubleClick?: (key: string) => void;
 }
 
 function toAntTreeData(items: TreeItem[]): TreeDataNode[] {
@@ -40,6 +41,7 @@ const OutlineTree: React.FC<OutlineTreeProps> = ({
   onSelect,
   onDelete,
   onRename,
+  onDoubleClick,
 }) => {
   const treeData = useMemo(() => toAntTreeData(items), [items]);
 
@@ -78,16 +80,17 @@ const OutlineTree: React.FC<OutlineTreeProps> = ({
       }}
       titleRender={(node) => {
         const key = node.key as string;
+        const dblHandler = onDoubleClick ? () => onDoubleClick(key) : undefined;
         const hasMenu = onDelete || onRename;
         if (!hasMenu) {
-          return <span>{node.title as string}</span>;
+          return <span onDoubleClick={dblHandler}>{node.title as string}</span>;
         }
         return (
           <Dropdown
             menu={{ items: contextMenuItems(key) }}
             trigger={['contextMenu']}
           >
-            <span>{node.title as string}</span>
+            <span onDoubleClick={dblHandler}>{node.title as string}</span>
           </Dropdown>
         );
       }}

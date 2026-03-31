@@ -185,6 +185,11 @@ const CadTree: React.FC = () => {
         onSelect={handleSelect}
         onDelete={handleDelete}
         onRename={handleRename}
+        onDoubleClick={(key) => {
+          if (key.startsWith('boolop-') || key === 'bodies' || key === 'booleans' || key === 'enclosures') return;
+          selectShape(key);
+          window.dispatchEvent(new CustomEvent('gfd-zoom-selection'));
+        }}
       />
     </div>
   );
