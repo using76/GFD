@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Divider, Typography, Empty, Card, Statistic, Row, Col, Form, Select, Checkbox, InputNumber, Slider } from 'antd';
+import { Divider, Typography, Empty, Card, Statistic, Row, Col, Form, Select, Checkbox, InputNumber, Slider, Button, message } from 'antd';
 import { useAppStore } from '../../store/useAppStore';
 
 const ContourSettings: React.FC = () => {
@@ -163,6 +163,36 @@ const ContourSettings: React.FC = () => {
           </div>
         )}
       </Form>
+
+      {/* Generate difference field */}
+      {fieldData.length >= 2 && (
+        <div style={{ padding: '4px 12px' }}>
+          <Button size="small" block onClick={() => {
+            const f1Name = contourConfig.field;
+            const f1 = fieldData.find(f => f.name === f1Name);
+            if (!f1) return;
+            // Compute normalized field: (value - min) / range → [0,1]
+            const nVerts = f1.values.length;
+            const range = f1.max - f1.min || 1;
+            const normValues = new Float32Array(nVerts);
+            let nMin = Infinity, nMax = -Infinity;
+            for (let i = 0; i < nVerts; i++) {
+              normValues[i] = (f1.values[i] - f1.min) / range;
+              if (normValues[i] < nMin) nMin = normValues[i];
+              if (normValues[i] > nMax) nMax = normValues[i];
+            }
+            const state = useAppStore.getState();
+            state.setFieldData([
+              ...state.fieldData.filter(f => f.name !== `${f1Name}_normalized`),
+              { name: `${f1Name}_normalized`, values: normValues, min: nMin, max: nMax },
+            ]);
+            state.setActiveField(`${f1Name}_normalized`);
+            message.success(`Normalized ${f1Name} field generated (0-1 range)`);
+          }}>
+            Normalize Field
+          </Button>
+        </div>
+      )}
 
       {activeFieldData && (
         <>

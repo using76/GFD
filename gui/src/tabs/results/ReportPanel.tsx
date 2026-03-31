@@ -375,6 +375,29 @@ const ReportPanel: React.FC = () => {
       <Divider style={{ margin: '12px 0' }} />
 
       {/* Mass & Energy Balance */}
+      {/* Mesh Independence Guide */}
+      <Typography.Text strong>Mesh Independence</Typography.Text>
+      <div style={{ marginTop: 8, marginBottom: 12, padding: 8, background: '#1a1a30', borderRadius: 4, fontSize: 11, color: '#889' }}>
+        <div>Current mesh: <b>{meshDisplayData?.cellCount ?? 0}</b> cells (h = {(meshDisplayData ? Math.cbrt((meshDisplayData.nx > 0 ? 4/meshDisplayData.cellCount : 1)) : 0).toFixed(4)}m)</div>
+        <div style={{ marginTop: 4 }}>
+          To verify mesh independence:
+        </div>
+        <div style={{ paddingLeft: 8, fontSize: 10, color: '#778' }}>
+          1. Record key values (drag, max velocity, avg temp)
+          <br />
+          2. Halve cell size (Mesh Settings → Global Size / 2)
+          <br />
+          3. Re-generate mesh and re-solve
+          <br />
+          4. Compare results — {'<'}2% change = mesh independent
+        </div>
+        {pressureField && velField && (
+          <div style={{ marginTop: 4, color: '#aab', borderTop: '1px solid #252540', paddingTop: 4 }}>
+            Reference values: P_avg={avgPressure.toFixed(2)} | V_avg={avgVel.toFixed(4)} {tempField ? `| T_avg=${avgTemp.toFixed(1)}` : ''}
+          </div>
+        )}
+      </div>
+
       <Typography.Text strong>Conservation Balance</Typography.Text>
       <div style={{ marginTop: 8, marginBottom: 12, padding: 8, background: '#1a1a30', borderRadius: 4, fontSize: 11 }}>
         {(() => {
