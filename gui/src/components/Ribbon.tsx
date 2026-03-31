@@ -525,6 +525,18 @@ const DisplayRibbon: React.FC = () => {
         onClick={() => setCameraMode({ type: cameraMode.type === 'perspective' ? 'orthographic' : 'perspective' })}
       />
       <GroupSep label="Camera" />
+
+      <RibbonButton icon={<BorderOutlined />} label="Grid" active={useAppStore.getState().showGrid} onClick={() => {
+        const cur = useAppStore.getState().showGrid;
+        useAppStore.getState().setShowGrid(!cur);
+        message.info(cur ? 'Grid hidden' : 'Grid shown');
+      }} />
+      <RibbonButton icon={<AimOutlined />} label="Axes" active={useAppStore.getState().showAxes} onClick={() => {
+        const cur = useAppStore.getState().showAxes;
+        useAppStore.getState().setShowAxes(!cur);
+        message.info(cur ? 'Axes hidden' : 'Axes shown');
+      }} />
+      <GroupSep label="Helpers" />
     </div>
   );
 };
