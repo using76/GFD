@@ -724,18 +724,39 @@ function useKeyboardShortcuts() {
             return;
           case 's':
             e.preventDefault();
-            try {
-              const data = {
-                shapes: store.shapes.map(s => ({ ...s, stlData: undefined })),
-                physicsModels: store.physicsModels,
-                material: store.material,
-                solverSettings: store.solverSettings,
-                boundaries: store.boundaries,
-                meshConfig: store.meshConfig,
-              };
-              localStorage.setItem('gfd-project', JSON.stringify(data));
-              message.success('Project saved');
-            } catch { message.error('Save failed'); }
+            if (e.shiftKey) {
+              // Ctrl+Shift+S = Save As (download file)
+              try {
+                const data = {
+                  shapes: store.shapes.map(s => ({ ...s, stlData: undefined })),
+                  physicsModels: store.physicsModels,
+                  material: store.material,
+                  solverSettings: store.solverSettings,
+                  boundaries: store.boundaries,
+                  meshConfig: store.meshConfig,
+                };
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = 'gfd_project.json'; a.click();
+                URL.revokeObjectURL(url);
+                message.success('Project saved as file');
+              } catch { message.error('Save As failed'); }
+            } else {
+              // Ctrl+S = Save to localStorage
+              try {
+                const data = {
+                  shapes: store.shapes.map(s => ({ ...s, stlData: undefined })),
+                  physicsModels: store.physicsModels,
+                  material: store.material,
+                  solverSettings: store.solverSettings,
+                  boundaries: store.boundaries,
+                  meshConfig: store.meshConfig,
+                };
+                localStorage.setItem('gfd-project', JSON.stringify(data));
+                message.success('Project saved');
+              } catch { message.error('Save failed'); }
+            }
             return;
           case 'x':
             e.preventDefault();
@@ -979,6 +1000,7 @@ function ShortcutsOverlay() {
 
   const shortcuts = [
     ['Ctrl+S', 'Save project'],
+    ['Ctrl+Shift+S', 'Save As (download file)'],
     ['Ctrl+Z', 'Undo'],
     ['Ctrl+Shift+Z / Ctrl+Y', 'Redo'],
     ['Ctrl+C', 'Copy shape'],

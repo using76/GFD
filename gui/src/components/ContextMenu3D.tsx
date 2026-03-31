@@ -299,6 +299,24 @@ const ContextMenu3D: React.FC = () => {
         message.success(`Created ${count} copies along ${axis.toUpperCase()} with ${spacing}m spacing`);
       },
     });
+    items.push({
+      key: 'mirror-clone',
+      icon: <CopyOutlined />,
+      label: 'Mirror Clone (X)',
+      action: () => {
+        const id = `shape-mir-${Date.now()}`;
+        addShape({
+          ...shape,
+          id,
+          name: `${shape.name}-mirror`,
+          position: [-shape.position[0], shape.position[1], shape.position[2]],
+          locked: false,
+          stlData: shape.stlData,
+        });
+        selectShape(id);
+        message.success(`Mirrored "${shape.name}" across YZ plane`);
+      },
+    });
   }
 
   // Position the menu, keeping it within viewport
