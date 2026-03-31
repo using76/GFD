@@ -340,6 +340,8 @@ interface AppState {
   setHoveredShapeId: (id: string | null) => void;
   gridSnap: number; // 0 = off, else snap increment
   setGridSnap: (snap: number) => void;
+  showBBox: boolean;
+  setShowBBox: (v: boolean) => void;
   selectionFilter: SelectionFilterType;
   setSelectionFilter: (filter: SelectionFilterType) => void;
   leftPanelCollapsed: Record<string, boolean>;
@@ -612,6 +614,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setHoveredShapeId: (id) => set({ hoveredShapeId: id }),
   gridSnap: 0,
   setGridSnap: (snap) => set({ gridSnap: snap }),
+  showBBox: false,
+  setShowBBox: (v) => set({ showBBox: v }),
   selectionFilter: 'face',
   setSelectionFilter: (filter) => set({ selectionFilter: filter }),
   leftPanelCollapsed: {},

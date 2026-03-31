@@ -857,6 +857,11 @@ function useKeyboardShortcuts() {
             message.info(`Deleted ${name}`);
           }
           return;
+        case 'b':
+        case 'B':
+          e.preventDefault();
+          { const cur = store.showBBox; store.setShowBBox(!cur); message.info(cur ? 'Bounding box: OFF' : 'Bounding box: ON'); }
+          return;
         case 'g':
         case 'G':
           e.preventDefault();
@@ -953,6 +958,7 @@ function ShortcutsOverlay() {
     ['F', 'Fill tool'],
     ['R', 'Cycle transform: Translate/Rotate/Scale'],
     ['G', 'Cycle grid snap: OFF/0.1/0.25/0.5/1.0m'],
+    ['B', 'Toggle scene bounding box'],
     ['H', 'Home camera'],
     ['Delete', 'Delete selected'],
     ['Escape', 'Deselect / Cancel'],

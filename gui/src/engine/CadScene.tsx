@@ -1855,6 +1855,9 @@ const CadScene: React.FC = () => {
       {/* Streamline traces */}
       <StreamlineTraces />
 
+      {/* Scene bounding box */}
+      <SceneBBox />
+
       {/* Refinement zone wireframes */}
       <RefinementZoneOverlays />
 
@@ -2041,6 +2044,36 @@ const DpmParticles: React.FC = () => {
 };
 
 // ============================================================
+// Scene Bounding Box
+const SceneBBox: React.FC = () => {
+  const show = useAppStore((s) => s.showBBox);
+  const shapes = useAppStore((s) => s.shapes);
+
+  const bbox = useMemo(() => {
+    if (!show) return null;
+    const visible = shapes.filter(s => s.visible !== false && s.group !== 'enclosure');
+    if (visible.length === 0) return null;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    visible.forEach(s => {
+      const hw = (s.dimensions.width ?? s.dimensions.radius ?? s.dimensions.majorRadius ?? 0.5);
+      const hh = (s.dimensions.height ?? s.dimensions.radius ?? 0.5);
+      const hd = (s.dimensions.depth ?? s.dimensions.radius ?? 0.5);
+      minX = Math.min(minX, s.position[0] - hw/2); maxX = Math.max(maxX, s.position[0] + hw/2);
+      minY = Math.min(minY, s.position[1] - hh/2); maxY = Math.max(maxY, s.position[1] + hh/2);
+      minZ = Math.min(minZ, s.position[2] - hd/2); maxZ = Math.max(maxZ, s.position[2] + hd/2);
+    });
+    return { center: [(minX+maxX)/2, (minY+maxY)/2, (minZ+maxZ)/2] as [number,number,number], size: [maxX-minX, maxY-minY, maxZ-minZ] as [number,number,number] };
+  }, [show, shapes]);
+
+  if (!bbox) return null;
+  return (
+    <mesh position={bbox.center}>
+      <boxGeometry args={bbox.size} />
+      <meshBasicMaterial color="#888888" wireframe transparent opacity={0.3} />
+    </mesh>
+  );
+};
+
 // Refinement Zone Wireframes
 // ============================================================
 const RefinementZoneOverlays: React.FC = () => {

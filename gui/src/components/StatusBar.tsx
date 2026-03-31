@@ -82,6 +82,19 @@ export default function StatusBar() {
           </Text>
         )}
 
+        {solverStatus === 'running' && currentIteration > 0 && (() => {
+          const maxIter = useAppStore.getState().solverSettings.maxIterations;
+          const pct = Math.min(100, (currentIteration / maxIter) * 100);
+          return (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <div style={{ width: 60, height: 6, background: '#252540', borderRadius: 3, overflow: 'hidden' }}>
+                <div style={{ width: `${pct}%`, height: '100%', background: '#1668dc', borderRadius: 3, transition: 'width 0.2s' }} />
+              </div>
+              <Text style={{ fontSize: 10, color: '#667' }}>{pct.toFixed(0)}%</Text>
+            </div>
+          );
+        })()}
+
         <Text style={{ fontSize: 11, color: '#667' }}>
           Tool: {activeTool}
         </Text>
