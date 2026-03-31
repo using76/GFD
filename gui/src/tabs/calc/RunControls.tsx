@@ -78,6 +78,21 @@ const RunControls: React.FC = () => {
           <div>Speed: ~{(currentIteration / ((Date.now() - (performance as any).timeOrigin) * 0.001 || 1) * 50).toFixed(0)} iter/s (50ms/step)</div>
           <div>Remaining: ~{Math.max(0, solverSettings.maxIterations - currentIteration)} iterations</div>
           <div>ETA: ~{((solverSettings.maxIterations - currentIteration) * 0.05).toFixed(1)}s</div>
+          {residuals.length >= 10 && (() => {
+            // Compute convergence rate: slope of log(continuity) over last 20 iterations
+            const recent = residuals.slice(-20);
+            const n = recent.length;
+            let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+            recent.forEach((r, i) => {
+              const y = Math.log10(Math.max(r.continuity, 1e-15));
+              sumX += i; sumY += y; sumXY += i * y; sumXX += i * i;
+            });
+            const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+            const decades = Math.abs(slope).toFixed(3);
+            const quality = slope < -0.05 ? 'Converging well' : slope < -0.01 ? 'Converging slowly' : 'Stalled';
+            const color = slope < -0.05 ? '#52c41a' : slope < -0.01 ? '#faad14' : '#ff4d4f';
+            return <div style={{ color }}>Rate: {decades} decades/iter ({quality})</div>;
+          })()}
         </div>
       )}
 

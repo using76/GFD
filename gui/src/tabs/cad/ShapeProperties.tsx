@@ -139,6 +139,50 @@ const ShapeProperties: React.FC = () => {
         onChange={handleChange}
       />
 
+      {/* Computed properties: volume & surface area */}
+      {!isStl && (
+        <div style={{ padding: '0 12px 8px' }}>
+          <Divider style={{ margin: '4px 0 8px' }} />
+          <div style={{ fontSize: 11, color: '#889' }}>
+            {(() => {
+              const d = shape.dimensions;
+              let vol = 0, area = 0;
+              if (shape.kind === 'box' || shape.kind === 'enclosure') {
+                const w = d.width ?? 1, h = d.height ?? 1, dp = d.depth ?? 1;
+                vol = w * h * dp;
+                area = 2 * (w*h + h*dp + w*dp);
+              } else if (shape.kind === 'sphere') {
+                const r = d.radius ?? 0.5;
+                vol = (4/3) * Math.PI * r**3;
+                area = 4 * Math.PI * r**2;
+              } else if (shape.kind === 'cylinder') {
+                const r = d.radius ?? 0.3, h = d.height ?? 1;
+                vol = Math.PI * r**2 * h;
+                area = 2 * Math.PI * r * (r + h);
+              } else if (shape.kind === 'cone') {
+                const r = d.radius ?? 0.4, h = d.height ?? 1;
+                vol = (1/3) * Math.PI * r**2 * h;
+                area = Math.PI * r * (r + Math.sqrt(r**2 + h**2));
+              } else if (shape.kind === 'torus') {
+                const R = d.majorRadius ?? 0.5, r = d.minorRadius ?? 0.15;
+                vol = 2 * Math.PI**2 * R * r**2;
+                area = 4 * Math.PI**2 * R * r;
+              } else if (shape.kind === 'pipe') {
+                const ro = d.outerRadius ?? 0.4, ri = d.innerRadius ?? 0.3, h = d.height ?? 1.5;
+                vol = Math.PI * (ro**2 - ri**2) * h;
+                area = 2 * Math.PI * (ro + ri) * h + 2 * Math.PI * (ro**2 - ri**2);
+              }
+              return (
+                <>
+                  <div><strong>Volume:</strong> {vol.toFixed(6)} m³</div>
+                  <div><strong>Surface Area:</strong> {area.toFixed(6)} m²</div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
       {/* STL-specific read-only info */}
       {isStl && shape.stlData && (
         <div style={{ padding: '0 12px 8px' }}>
