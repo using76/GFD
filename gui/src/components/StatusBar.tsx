@@ -1,4 +1,4 @@
-import { Space, Tag, Typography } from 'antd';
+import { Space, Tag, Typography, Tooltip } from 'antd';
 import {
   PlayCircleOutlined,
   PauseCircleOutlined,
@@ -154,10 +154,12 @@ export default function StatusBar() {
       {/* Right section: mesh info + selection filter + GPU tag */}
       <Space size="middle" style={{ flexShrink: 0 }}>
         {meshGenerated && meshDisplayData && (
-          <Text style={{ fontSize: 11, color: '#889' }}>
-            Cells: {meshDisplayData.cellCount.toLocaleString()} | Nodes:{' '}
-            {meshDisplayData.nodeCount.toLocaleString()}
-          </Text>
+          <Tooltip title={`Grid: ${meshDisplayData.nx}×${meshDisplayData.ny}×${meshDisplayData.nz} | Fluid: ${meshDisplayData.fluidCellCount} | Solid: ${meshDisplayData.solidCellCount} | Type: ${useAppStore.getState().meshConfig.type}`}>
+            <Text style={{ fontSize: 11, color: '#889', cursor: 'help' }}>
+              Cells: {meshDisplayData.cellCount.toLocaleString()} | Nodes:{' '}
+              {meshDisplayData.nodeCount.toLocaleString()}
+            </Text>
+          </Tooltip>
         )}
 
         {selectedEntity && (
