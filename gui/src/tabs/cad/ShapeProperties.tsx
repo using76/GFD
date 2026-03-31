@@ -183,6 +183,16 @@ const ShapeProperties: React.FC = () => {
         </div>
       )}
 
+      {/* Wireframe toggle */}
+      <div style={{ padding: '0 12px 4px', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Switch
+          size="small"
+          checked={shape.dimensions._wireframe ?? false}
+          onChange={(checked) => updateShape(shape.id, { dimensions: { ...shape.dimensions, _wireframe: checked } })}
+        />
+        <span style={{ fontSize: 11, color: '#889' }}>Wireframe overlay</span>
+      </div>
+
       {/* Shape color */}
       <div style={{ padding: '0 12px 8px' }}>
         <Divider style={{ margin: '4px 0 8px' }} />

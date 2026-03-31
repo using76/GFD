@@ -829,6 +829,16 @@ function useKeyboardShortcuts() {
         return;
       }
 
+      // Ctrl+Enter: start/resume solver
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        if (store.solverStatus !== 'running') {
+          store.startSolver();
+          message.info('Solver started');
+        }
+        return;
+      }
+
       // Function keys
       if (e.key === 'F11') {
         e.preventDefault();
@@ -978,6 +988,7 @@ function ShortcutsOverlay() {
     ['Ctrl+D', 'Duplicate shape'],
     ['Ctrl+1-6', 'Quick create: Box/Sphere/Cylinder/Cone/Torus/Pipe'],
     ['Ctrl+M', 'Generate mesh'],
+    ['Ctrl+Enter', 'Start/resume solver'],
     ['S', 'Select tool'],
     ['P', 'Pull tool'],
     ['M', 'Move tool'],
