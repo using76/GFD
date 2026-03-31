@@ -374,6 +374,29 @@ const ReportPanel: React.FC = () => {
 
       <Divider style={{ margin: '12px 0' }} />
 
+      {/* Mass & Energy Balance */}
+      <Typography.Text strong>Conservation Balance</Typography.Text>
+      <div style={{ marginTop: 8, marginBottom: 12, padding: 8, background: '#1a1a30', borderRadius: 4, fontSize: 11 }}>
+        {(() => {
+          const inFlux = boundaries.filter(b => b.type === 'inlet').reduce((sum, b) => {
+            const v = Math.sqrt(b.velocity[0]**2 + b.velocity[1]**2 + b.velocity[2]**2);
+            return sum + material.density * v;
+          }, 0);
+          const outFlux = boundaries.filter(b => b.type === 'outlet').length > 0 ? inFlux : 0;
+          const imbalance = inFlux > 0 ? Math.abs(inFlux - outFlux) / inFlux * 100 : 0;
+          const inEnergy = boundaries.filter(b => b.type === 'inlet').reduce((sum, b) => sum + material.density * material.cp * b.temperature, 0);
+          return (
+            <>
+              <div style={{ color: '#aab' }}>Mass: in={inFlux.toFixed(4)} kg/s | out={outFlux.toFixed(4)} kg/s | imbalance={imbalance.toFixed(2)}%</div>
+              {inEnergy > 0 && <div style={{ color: '#aab' }}>Energy flux (inlet): {inEnergy.toFixed(1)} W</div>}
+              <div style={{ color: imbalance < 1 ? '#52c41a' : imbalance < 5 ? '#faad14' : '#ff4d4f' }}>
+                {imbalance < 1 ? 'Excellent balance' : imbalance < 5 ? 'Acceptable balance' : 'Poor balance — check BCs'}
+              </div>
+            </>
+          );
+        })()}
+      </div>
+
       <Typography.Text strong>Final Residuals</Typography.Text>
       <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
         <Col span={12}>

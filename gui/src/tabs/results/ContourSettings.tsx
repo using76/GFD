@@ -92,6 +92,7 @@ const ContourSettings: React.FC = () => {
               { label: 'VOF Phase Fraction', value: 'vof_alpha' },
               { label: 'Incident Radiation (W/m²)', value: 'radiation_G' },
               { label: 'Species Mass Fraction', value: 'species_Y' },
+              { label: 'Wall y+', value: 'wall_yplus' },
             ]}
             onChange={(v) => {
               updateContourConfig({ field: v as never });

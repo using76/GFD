@@ -229,7 +229,7 @@ export interface ResidualPoint {
 
 // ---- Results types ----
 export type ColormapType = 'jet' | 'rainbow' | 'grayscale' | 'coolwarm';
-export type ResultField = 'pressure' | 'velocity' | 'temperature' | 'tke' | 'vof_alpha' | 'radiation_G' | 'species_Y' | 'quality';
+export type ResultField = 'pressure' | 'velocity' | 'temperature' | 'tke' | 'vof_alpha' | 'radiation_G' | 'species_Y' | 'wall_yplus' | 'quality';
 
 export interface ContourConfig {
   field: ResultField;
@@ -1852,6 +1852,25 @@ export const useAppStore = create<AppState>((set, get) => ({
               if (specValues[i] > sMax) sMax = specValues[i];
             }
             fields.push({ name: 'species_Y', values: specValues, min: sMin, max: sMax });
+          }
+
+          // Wall y+ field
+          {
+            const ypValues = new Float32Array(nVerts);
+            let ypMin = Infinity, ypMax = -Infinity;
+            const nu = mat.viscosity / mat.density;
+            const Cf = 0.058 * Math.pow(Math.max(1, inletVel / nu), -0.2);
+            const tauW = 0.5 * Cf * mat.density * inletVel * inletVel;
+            const uTau = Math.sqrt(tauW / mat.density);
+            for (let i = 0; i < nVerts; i++) {
+              const y = (meshData.positions[i * 3 + 1] - yMin) / yRange;
+              const wallDist = Math.min(y, 1 - y) * yRange;
+              const yp = wallDist * uTau / nu;
+              ypValues[i] = yp;
+              if (yp < ypMin) ypMin = yp;
+              if (yp > ypMax) ypMax = yp;
+            }
+            fields.push({ name: 'wall_yplus', values: ypValues, min: ypMin, max: ypMax });
           }
         }
 
