@@ -45,13 +45,15 @@ Rust 기반 통합 멀티피직스 솔버 + Electron GUI 워크벤치
 | Crate 수 | 19 |
 | Rust 테스트 | **805 passed**, 0 failed |
 | TypeScript 에러 | **0** |
-| GUI 구현 기능 | **125+** (35 iterations) |
-| GUI 코드 | 11,239줄 |
-| 리본 버튼 | 84 |
-| 키보드 단축키 | 35+ |
+| GUI 구현 기능 | **147+** (50 iterations) |
+| GUI 코드 | ~11,500줄 |
+| 리본 버튼 | 86+ |
+| 키보드 단축키 | 45 |
 | Export 포맷 | 8종 (VTK, STL, OpenFOAM, Gmsh, CSV, TXT, JSON, HTML) |
 | 물성치 프리셋 | 14종 |
 | Solver 필드 | 9종 (pressure, velocity, temperature, tke, vof_alpha, radiation_G, species_Y, wall_yplus, quality) |
+| Solver 프리셋 | 3 built-in (SIMPLE/SIMPLEC/PISO) + custom |
+| GitHub 커밋 | 50 |
 
 ## 빌드 방법
 
@@ -225,6 +227,29 @@ Layer 6 (GUI):     gui/ (Electron + React + Three.js)
 | Undo History Panel | **완료** | 스냅샷 목록 + 버튼 |
 | Shape Lock | **완료** | 잠금/삭제 방지 |
 | HTML Report Export | **완료** | 스타일링된 보고서 파일 |
+| Solver Presets | **완료** | 3 built-in + custom 저장 |
+| Solver ETA Display | **완료** | 진행률 + 경과시간 + 예상완료 |
+| Convergence Rate | **완료** | decades/iter + 품질 평가 |
+| Solver Re-Run Button | **완료** | 완료 후 재실행 |
+| Solver Stop Confirm | **완료** | 실행 중 중단 확인 |
+| Ctrl+Enter Solver | **완료** | 어디서든 solver 시작 |
+| Ctrl+M Mesh Generate | **완료** | 어디서든 mesh 생성 |
+| Ctrl+N New Project | **완료** | 새 프로젝트 |
+| Ctrl+F Zoom Selection | **완료** | 선택 shape 프레이밍 |
+| Ctrl+A Select All | **완료** | 전체 multi-select |
+| Ctrl+Shift+S Save As | **완료** | JSON 파일 다운로드 |
+| Ctrl+D Duplicate | **완료** | 선택 shape 복제 |
+| F2 Rename | **완료** | 선택 shape 이름 변경 |
+| Double-Click Zoom | **완료** | CadTree에서 shape 줌 |
+| Copy/Paste Properties | **완료** | 우클릭 dimensions 복사 |
+| Mirror Clone | **완료** | YZ 평면 대칭 복사 |
+| Array Pattern | **완료** | N개 간격/축 복사 |
+| Per-Shape Wireframe | **완료** | 개별 wireframe 토글 |
+| Per-Shape Opacity | **완료** | 개별 투명도 슬라이더 |
+| Ribbon Shortcut Tooltips | **완료** | [S]/[P]/[M]/[F]/[H] 힌트 |
+| Mesh Stats Tooltip | **완료** | StatusBar 상세 정보 |
+| CadTree Stats | **완료** | N shapes (M visible) |
+| CadTree Visibility Toggle | **완료** | 눈 아이콘 직접 클릭 |
 
 ### 미비한 점 (Known Limitations)
 
