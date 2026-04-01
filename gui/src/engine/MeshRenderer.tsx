@@ -120,6 +120,14 @@ export default function MeshRenderer() {
   const fieldData = useAppStore((s) => s.fieldData);
   const contourConfig = useAppStore((s) => s.contourConfig);
   const activeTab = useAppStore((s) => s.activeTab);
+  const sectionPlane = useAppStore((s) => s.sectionPlane);
+
+  // Compute THREE.js clipping planes from section plane state
+  const clipPlanes = useMemo(() => {
+    if (!sectionPlane.enabled) return undefined;
+    const normal = new THREE.Vector3(...sectionPlane.normal);
+    return [new THREE.Plane(normal, -sectionPlane.offset)];
+  }, [sectionPlane.enabled, sectionPlane.normal, sectionPlane.offset]);
 
   // Track geometry ref for dynamic color updates
   const geomRef = useRef<THREE.BufferGeometry | null>(null);
@@ -234,6 +242,8 @@ export default function MeshRenderer() {
               opacity={isContour ? 0.95 : 0.85}
               roughness={0.5}
               metalness={0}
+              clippingPlanes={clipPlanes ?? []}
+              clipShadows
             />
           ) : (
             <meshStandardMaterial
@@ -241,6 +251,8 @@ export default function MeshRenderer() {
               side={THREE.DoubleSide}
               transparent
               opacity={0.85}
+              clippingPlanes={clipPlanes ?? []}
+              clipShadows
             />
           )}
         </mesh>
@@ -254,6 +266,7 @@ export default function MeshRenderer() {
             transparent
             opacity={renderMode === 'wireframe' ? 0.8 : renderMode === 'contour' ? 0.06 : 0.3}
             linewidth={1}
+            clippingPlanes={clipPlanes ?? []}
           />
         </lineSegments>
       )}
@@ -266,6 +279,7 @@ export default function MeshRenderer() {
             wireframe
             transparent
             opacity={renderMode === 'wireframe' ? 0.8 : renderMode === 'contour' ? 0.08 : 0.2}
+            clippingPlanes={clipPlanes ?? []}
           />
         </mesh>
       )}

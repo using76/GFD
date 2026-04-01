@@ -51,15 +51,28 @@ const CfdPrepPanel: React.FC = () => {
     let minZ = Infinity, maxZ = -Infinity;
 
     selected.forEach((s) => {
-      const hw = (s.dimensions.width ?? s.dimensions.radius ?? 0.5);
-      const hh = (s.dimensions.height ?? s.dimensions.radius ?? 0.5);
-      const hd = (s.dimensions.depth ?? s.dimensions.radius ?? 0.5);
-      minX = Math.min(minX, s.position[0] - hw);
-      maxX = Math.max(maxX, s.position[0] + hw);
-      minY = Math.min(minY, s.position[1] - hh);
-      maxY = Math.max(maxY, s.position[1] + hh);
-      minZ = Math.min(minZ, s.position[2] - hd);
-      maxZ = Math.max(maxZ, s.position[2] + hd);
+      if (s.kind === 'stl' && s.stlData) {
+        // Compute actual AABB from STL vertices
+        const verts = s.stlData.vertices;
+        for (let vi = 0; vi < verts.length; vi += 3) {
+          minX = Math.min(minX, verts[vi]);
+          maxX = Math.max(maxX, verts[vi]);
+          minY = Math.min(minY, verts[vi + 1]);
+          maxY = Math.max(maxY, verts[vi + 1]);
+          minZ = Math.min(minZ, verts[vi + 2]);
+          maxZ = Math.max(maxZ, verts[vi + 2]);
+        }
+      } else {
+        const hw = (s.dimensions.width ?? s.dimensions.radius ?? s.dimensions.majorRadius ?? 0.5);
+        const hh = (s.dimensions.height ?? s.dimensions.radius ?? 0.5);
+        const hd = (s.dimensions.depth ?? s.dimensions.radius ?? s.dimensions.minorRadius ?? 0.5);
+        minX = Math.min(minX, s.position[0] - hw);
+        maxX = Math.max(maxX, s.position[0] + hw);
+        minY = Math.min(minY, s.position[1] - hh);
+        maxY = Math.max(maxY, s.position[1] + hh);
+        minZ = Math.min(minZ, s.position[2] - hd);
+        maxZ = Math.max(maxZ, s.position[2] + hd);
+      }
     });
 
     const cx = (minX + maxX) / 2;
