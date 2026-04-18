@@ -40,6 +40,59 @@ function makeGeometry(shape: Shape): React.ReactNode {
       const { outerRadius = 0.4, height = 1.5 } = shape.dimensions;
       return <cylinderGeometry args={[outerRadius, outerRadius, height, 32]} />;
     }
+    case 'revolve': {
+      // Lathe around Y axis. Default profile: cup (outer ramp up + inner ramp down)
+      const profile: [number, number][] = Array.isArray(shape.dimensions.profile) && shape.dimensions.profile.length >= 2
+        ? shape.dimensions.profile
+        : [[0.2, -0.5], [0.5, -0.5], [0.5, 0.5], [0.3, 0.5], [0.3, -0.3], [0.2, -0.3]];
+      const pts = profile.map(p => new THREE.Vector2(p[0], p[1]));
+      const geo = new THREE.LatheGeometry(pts, 48);
+      return <primitive object={geo} attach="geometry" />;
+    }
+    case 'sweep': {
+      // Extrude a 2D polygon along +Z for a fixed depth.
+      const profile: [number, number][] = Array.isArray(shape.dimensions.profile) && shape.dimensions.profile.length >= 3
+        ? shape.dimensions.profile
+        : [[-0.4, -0.4], [0.4, -0.4], [0.4, 0.4], [-0.4, 0.4]];
+      const shape2d = new THREE.Shape(profile.map(p => new THREE.Vector2(p[0], p[1])));
+      const depth = shape.dimensions.depth ?? 1;
+      const geo = new THREE.ExtrudeGeometry(shape2d, { depth, bevelEnabled: false, steps: 1 });
+      geo.center();
+      return <primitive object={geo} attach="geometry" />;
+    }
+    case 'loft': {
+      // Loft between two rectangular profiles using a TubeGeometry on a linear path.
+      // dimensions: { width, height, depth, endWidth?, endHeight? }
+      const w0 = shape.dimensions.width ?? 0.6;
+      const h0 = shape.dimensions.height ?? 0.6;
+      const w1 = shape.dimensions.endWidth ?? 0.2;
+      const h1 = shape.dimensions.endHeight ?? 0.2;
+      const depth = shape.dimensions.depth ?? 1;
+      // Generate a capped tapered box via two parallel quads lofted with triangles
+      const verts: number[] = [];
+      const push = (a: number[], b: number[], c: number[]) => { verts.push(...a, ...b, ...c); };
+      const A0 = [-w0/2, -h0/2, -depth/2];
+      const A1 = [ w0/2, -h0/2, -depth/2];
+      const A2 = [ w0/2,  h0/2, -depth/2];
+      const A3 = [-w0/2,  h0/2, -depth/2];
+      const B0 = [-w1/2, -h1/2,  depth/2];
+      const B1 = [ w1/2, -h1/2,  depth/2];
+      const B2 = [ w1/2,  h1/2,  depth/2];
+      const B3 = [-w1/2,  h1/2,  depth/2];
+      // Front cap
+      push(A0, A2, A1); push(A0, A3, A2);
+      // Back cap
+      push(B0, B1, B2); push(B0, B2, B3);
+      // Side quads
+      push(A0, A1, B1); push(A0, B1, B0);
+      push(A1, A2, B2); push(A1, B2, B1);
+      push(A2, A3, B3); push(A2, B3, B2);
+      push(A3, A0, B0); push(A3, B0, B3);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+      geo.computeVertexNormals();
+      return <primitive object={geo} attach="geometry" />;
+    }
     default:
       return <boxGeometry args={[0.5, 0.5, 0.5]} />;
   }

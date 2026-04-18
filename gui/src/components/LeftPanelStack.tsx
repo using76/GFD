@@ -43,11 +43,13 @@ import MaterialPanel from '../tabs/setup/MaterialPanel';
 import BoundaryPanel from '../tabs/setup/BoundaryPanel';
 import SolverSettingsPanel from '../tabs/setup/SolverSettingsPanel';
 import InitialConditionsPanel from '../tabs/setup/InitialConditionsPanel';
+import SpeciesPanel from '../tabs/setup/SpeciesPanel';
 import RunControls from '../tabs/calc/RunControls';
 import ContourSettings from '../tabs/results/ContourSettings';
 import VectorSettings from '../tabs/results/VectorSettings';
 import StreamlineSettings from '../tabs/results/StreamlineSettings';
 import ReportPanel from '../tabs/results/ReportPanel';
+import ParametricSweepPanel from '../tabs/results/ParametricSweepPanel';
 
 // ============================================================
 // Collapsible Panel
@@ -160,6 +162,211 @@ const SavedViewsList: React.FC = () => {
           ))}
         </div>
       )}
+    </div>
+  );
+};
+
+// ============================================================
+// Layers sub-tab: named collections with visibility toggle
+// ============================================================
+const LayersList: React.FC = () => {
+  const layers = useAppStore((s) => s.layers);
+  const addLayer = useAppStore((s) => s.addLayer);
+  const removeLayer = useAppStore((s) => s.removeLayer);
+  const toggleLayerVisibility = useAppStore((s) => s.toggleLayerVisibility);
+  const updateLayer = useAppStore((s) => s.updateLayer);
+  const selectedShapeIds = useAppStore((s) => s.selectedShapeIds);
+  const selectedShapeId = useAppStore((s) => s.selectedShapeId);
+  const assignShapeToLayer = useAppStore((s) => s.assignShapeToLayer);
+  const shapes = useAppStore((s) => s.shapes);
+
+  const createLayer = () => {
+    const name = prompt('Layer name:', `Layer ${layers.length + 1}`);
+    if (!name) return;
+    const palette = ['#1668dc', '#52c41a', '#fa8c16', '#eb2f96', '#722ed1', '#13c2c2'];
+    addLayer({
+      id: `layer-${Date.now()}`,
+      name,
+      visible: true,
+      color: palette[layers.length % palette.length],
+    });
+  };
+
+  const assignSelection = (layerId: string) => {
+    const ids = selectedShapeIds.length > 0 ? selectedShapeIds : (selectedShapeId ? [selectedShapeId] : []);
+    if (ids.length === 0) {
+      message.warning('Select one or more shapes first.');
+      return;
+    }
+    ids.forEach(id => assignShapeToLayer(id, layerId));
+    message.success(`Assigned ${ids.length} shape(s) to layer.`);
+  };
+
+  return (
+    <div style={{ padding: 8 }}>
+      <Button size="small" block type="primary" onClick={createLayer} style={{ marginBottom: 6 }}>
+        Add Layer
+      </Button>
+      {layers.length === 0 ? (
+        <div style={{ padding: 8, color: '#667', fontSize: 11 }}>
+          No layers yet. Layers let you toggle visibility of groups of shapes together.
+        </div>
+      ) : (
+        <div style={{ maxHeight: 240, overflow: 'auto' }}>
+          {layers.map((l) => {
+            const memberCount = shapes.filter(sh => sh.layerId === l.id).length;
+            return (
+              <div key={l.id} style={{
+                display: 'flex', alignItems: 'center', gap: 4, padding: '4px 6px',
+                borderBottom: '1px solid #1a1a30', fontSize: 11,
+              }}>
+                <span style={{ width: 10, height: 10, borderRadius: 2, background: l.color, flexShrink: 0 }} />
+                <span
+                  onClick={() => toggleLayerVisibility(l.id)}
+                  style={{ color: l.visible ? '#aab' : '#556', cursor: 'pointer', marginRight: 4 }}
+                  title="Toggle visibility"
+                >
+                  {l.visible ? '👁' : '⊘'}
+                </span>
+                <input
+                  value={l.name}
+                  onChange={(e) => updateLayer(l.id, { name: e.target.value })}
+                  style={{ flex: 1, background: 'transparent', color: '#ccd', border: 'none', fontSize: 11, outline: 'none' }}
+                />
+                <span style={{ color: '#556', fontSize: 9 }}>({memberCount})</span>
+                <span
+                  onClick={() => assignSelection(l.id)}
+                  style={{ color: '#4096ff', cursor: 'pointer', fontSize: 9, padding: '0 4px' }}
+                  title="Assign selected shapes"
+                >
+                  +sel
+                </span>
+                <span
+                  onClick={() => removeLayer(l.id)}
+                  style={{ color: '#ff4d4f', cursor: 'pointer', fontSize: 10, padding: '0 4px' }}
+                >
+                  ×
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================
+// Groups sub-tab: persistent selections
+// ============================================================
+const GroupsList: React.FC = () => {
+  const groups = useAppStore((s) => s.customGroups);
+  const addGroup = useAppStore((s) => s.addCustomGroup);
+  const removeGroup = useAppStore((s) => s.removeCustomGroup);
+  const addShapeToGroup = useAppStore((s) => s.addShapeToGroup);
+  const selectedShapeIds = useAppStore((s) => s.selectedShapeIds);
+  const selectedShapeId = useAppStore((s) => s.selectedShapeId);
+  const toggleMultiSelect = useAppStore((s) => s.toggleMultiSelect);
+  const clearMultiSelect = useAppStore((s) => s.clearMultiSelect);
+
+  const createGroup = () => {
+    const name = prompt('Group name:', `Group ${groups.length + 1}`);
+    if (!name) return;
+    const ids = selectedShapeIds.length > 0 ? selectedShapeIds : (selectedShapeId ? [selectedShapeId] : []);
+    addGroup({ id: `grp-${Date.now()}`, name, shapeIds: [...ids] });
+    message.success(`Group "${name}" created with ${ids.length} shape(s).`);
+  };
+
+  const selectGroup = (shapeIds: string[]) => {
+    clearMultiSelect();
+    shapeIds.forEach(id => toggleMultiSelect(id));
+    message.info(`Selected ${shapeIds.length} shape(s) from group.`);
+  };
+
+  return (
+    <div style={{ padding: 8 }}>
+      <Button size="small" block type="primary" onClick={createGroup} style={{ marginBottom: 6 }}>
+        New Group from Selection
+      </Button>
+      {groups.length === 0 ? (
+        <div style={{ padding: 8, color: '#667', fontSize: 11 }}>
+          No groups yet. Select shapes and click "New Group" to save as a persistent selection.
+        </div>
+      ) : (
+        <div style={{ maxHeight: 240, overflow: 'auto' }}>
+          {groups.map((g) => (
+            <div key={g.id} style={{
+              display: 'flex', alignItems: 'center', gap: 4, padding: '4px 6px',
+              borderBottom: '1px solid #1a1a30', fontSize: 11,
+            }}>
+              <span
+                onClick={() => selectGroup(g.shapeIds)}
+                style={{ flex: 1, color: '#4096ff', cursor: 'pointer' }}
+                title="Click to select all shapes in this group"
+              >
+                {g.name}
+              </span>
+              <span style={{ color: '#556', fontSize: 9 }}>({g.shapeIds.length})</span>
+              <span
+                onClick={() => {
+                  const ids = selectedShapeIds.length > 0 ? selectedShapeIds : (selectedShapeId ? [selectedShapeId] : []);
+                  ids.forEach(id => addShapeToGroup(g.id, id));
+                }}
+                style={{ color: '#52c41a', cursor: 'pointer', fontSize: 9, padding: '0 4px' }}
+                title="Add selected shapes to this group"
+              >
+                +sel
+              </span>
+              <span
+                onClick={() => removeGroup(g.id)}
+                style={{ color: '#ff4d4f', cursor: 'pointer', fontSize: 10, padding: '0 4px' }}
+              >
+                ×
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================
+// Selection sub-tab: current selection details
+// ============================================================
+const SelectionList: React.FC = () => {
+  const selectedShapeIds = useAppStore((s) => s.selectedShapeIds);
+  const selectedShapeId = useAppStore((s) => s.selectedShapeId);
+  const shapes = useAppStore((s) => s.shapes);
+  const clearMultiSelect = useAppStore((s) => s.clearMultiSelect);
+
+  const ids = selectedShapeIds.length > 0 ? selectedShapeIds : (selectedShapeId ? [selectedShapeId] : []);
+  if (ids.length === 0) {
+    return <div style={{ padding: 12, color: '#667', fontSize: 11 }}>No selection. Click a shape in the viewport or Structure tree to select.</div>;
+  }
+
+  return (
+    <div style={{ padding: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+        <span style={{ color: '#aab', fontSize: 11, fontWeight: 600 }}>
+          {ids.length} selected
+        </span>
+        <span onClick={clearMultiSelect} style={{ color: '#4096ff', fontSize: 11, cursor: 'pointer' }}>
+          Clear
+        </span>
+      </div>
+      {ids.map(id => {
+        const sh = shapes.find(s => s.id === id);
+        if (!sh) return null;
+        return (
+          <div key={id} style={{ padding: '2px 6px', fontSize: 11, color: '#aab', borderBottom: '1px solid #1a1a30' }}>
+            <b>{sh.name}</b> <span style={{ color: '#556' }}>({sh.kind})</span>
+            <div style={{ fontSize: 10, color: '#667', paddingLeft: 8 }}>
+              pos: ({sh.position.map(n => n.toFixed(2)).join(', ')})
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 };
@@ -298,9 +505,9 @@ const StructureSubTabs: React.FC = () => {
         ))}
       </div>
       {subTab === 'structure' && <StructureTree />}
-      {subTab === 'layers' && <div style={{ padding: 12, color: '#667', fontSize: 11 }}>No layers defined.</div>}
-      {subTab === 'groups' && <div style={{ padding: 12, color: '#667', fontSize: 11 }}>No groups defined.</div>}
-      {subTab === 'selection' && <div style={{ padding: 12, color: '#667', fontSize: 11 }}>No selections active.</div>}
+      {subTab === 'layers' && <LayersList />}
+      {subTab === 'groups' && <GroupsList />}
+      {subTab === 'selection' && <SelectionList />}
       {subTab === 'views' && <SavedViewsList />}
     </div>
   );
@@ -350,6 +557,7 @@ const SetupTreePanel: React.FC<{ onSelect: (section: string) => void; selected: 
     { key: 'materials', title: 'Materials', icon: <GoldOutlined />, isLeaf: true },
     { key: 'boundaries', title: 'Boundary Conditions', icon: <BlockOutlined />, isLeaf: true },
     { key: 'initial', title: 'Initial Conditions', icon: <LineChartOutlined />, isLeaf: true },
+    { key: 'species', title: 'Species / Reactions', icon: <ExperimentOutlined />, isLeaf: true },
     { key: 'solver', title: 'Solver Settings', icon: <SettingOutlined />, isLeaf: true },
   ];
 
@@ -408,6 +616,7 @@ const ResultsTreePanel: React.FC<{ onSelect: (section: string) => void; selected
       ],
     },
     { key: 'reports', title: 'Reports', icon: <FileTextOutlined />, isLeaf: true },
+    { key: 'sweep', title: 'Parametric Sweep', icon: <LineChartOutlined />, isLeaf: true },
   ];
 
   return (
@@ -812,6 +1021,7 @@ const LeftPanelStack: React.FC = () => {
     materials: <MaterialPanel />,
     boundaries: <BoundaryPanel />,
     initial: <InitialConditionsPanel />,
+    species: <SpeciesPanel />,
     solver: <SolverSettingsPanel />,
   };
 
@@ -821,6 +1031,7 @@ const LeftPanelStack: React.FC = () => {
     vectors: <VectorSettings />,
     streamlines: <StreamlineSettings />,
     reports: <ReportPanel />,
+    sweep: <ParametricSweepPanel />,
   };
 
   return (

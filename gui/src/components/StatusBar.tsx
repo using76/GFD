@@ -221,7 +221,25 @@ export default function StatusBar() {
             {backendState === 'connected' ? 'Backend' : 'Simulation'}
           </Tag>
         </Tooltip>
+
+        <UnitToggle />
       </Space>
     </div>
+  );
+}
+
+function UnitToggle() {
+  const unitSystem = useAppStore((s) => s.unitSystem);
+  const setUnitSystem = useAppStore((s) => s.setUnitSystem);
+  return (
+    <Tooltip title="Click to switch between SI and Imperial units (display only; internal state is always SI)">
+      <Tag
+        color={unitSystem === 'Imperial' ? 'gold' : 'blue'}
+        onClick={() => setUnitSystem(unitSystem === 'SI' ? 'Imperial' : 'SI')}
+        style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0, cursor: 'pointer' }}
+      >
+        {unitSystem}
+      </Tag>
+    </Tooltip>
   );
 }

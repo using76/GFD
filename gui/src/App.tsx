@@ -40,6 +40,74 @@ function encodeShapesForSave(shapes: Shape[]): unknown[] {
   });
 }
 
+// ============================================================
+// Gmsh .msh v2.2 ASCII reader
+// Returns { nodes: [[x,y,z], ...], triangles: [v0,v1,v2, ...], cellCount: N }
+// where triangles indexes into the nodes array (0-based).
+// ============================================================
+function parseGmshMsh(text: string): { nodes: Array<[number, number, number]>; triangles: number[]; cellCount: number } | null {
+  const lines = text.split(/\r?\n/);
+  let i = 0;
+  // Find $MeshFormat
+  while (i < lines.length && !lines[i].startsWith('$MeshFormat')) i++;
+  if (i >= lines.length) return null;
+  i++; // skip $MeshFormat line
+  // format line: version file-type data-size
+  const fmt = lines[i].trim().split(/\s+/);
+  const version = parseFloat(fmt[0] ?? '0');
+  if (!(version >= 2.0 && version < 3.0)) {
+    // Only v2.x supported here
+    return null;
+  }
+  // skip to $Nodes
+  while (i < lines.length && !lines[i].startsWith('$Nodes')) i++;
+  if (i >= lines.length) return null;
+  i++;
+  const nNodes = parseInt(lines[i].trim(), 10);
+  i++;
+  const nodeIdMap: Record<number, number> = {};
+  const nodes: Array<[number, number, number]> = [];
+  for (let n = 0; n < nNodes && i < lines.length; n++, i++) {
+    const parts = lines[i].trim().split(/\s+/);
+    if (parts.length < 4) continue;
+    const id = parseInt(parts[0], 10);
+    const x = parseFloat(parts[1]);
+    const y = parseFloat(parts[2]);
+    const z = parseFloat(parts[3]);
+    nodeIdMap[id] = nodes.length;
+    nodes.push([x, y, z]);
+  }
+  // Skip to $Elements
+  while (i < lines.length && !lines[i].startsWith('$Elements')) i++;
+  if (i >= lines.length) return { nodes, triangles: [], cellCount: 0 };
+  i++;
+  const nElems = parseInt(lines[i].trim(), 10);
+  i++;
+  const triangles: number[] = [];
+  let cellCount = 0;
+  // Gmsh element types: 2=3-node triangle, 4=4-node tet, 5=8-node hex, 15=point, 1=2-node line
+  for (let e = 0; e < nElems && i < lines.length; e++, i++) {
+    const parts = lines[i].trim().split(/\s+/);
+    if (parts.length < 3) continue;
+    const type = parseInt(parts[1], 10);
+    const nTags = parseInt(parts[2], 10);
+    const nodeStart = 3 + nTags;
+    if (type === 2) {
+      // triangle: 3 node ids
+      const v0 = nodeIdMap[parseInt(parts[nodeStart], 10)];
+      const v1 = nodeIdMap[parseInt(parts[nodeStart + 1], 10)];
+      const v2 = nodeIdMap[parseInt(parts[nodeStart + 2], 10)];
+      if (v0 !== undefined && v1 !== undefined && v2 !== undefined) {
+        triangles.push(v0, v1, v2);
+      }
+    } else if (type === 4 || type === 5 || type === 6 || type === 7) {
+      // Volume cell (tet, hex, prism, pyramid)
+      cellCount++;
+    }
+  }
+  return { nodes, triangles, cellCount };
+}
+
 function decodeShapesFromSave(raw: unknown[]): Shape[] {
   return raw.map((rawShape) => {
     const r = rawShape as Shape & { stlData?: { faceCount: number; vertices_b64?: string; vertices?: number[] } };
@@ -163,9 +231,61 @@ const AppMenu: React.FC = () => {
       } catch { message.error('Failed to export project.'); }
     }},
     { key: 'div1', divider: true },
-    { key: 'import', icon: <FolderOpenOutlined />, label: 'Import Mesh...', action: () => {
-      useAppStore.getState().setActiveRibbonTab('mesh');
-      message.info('Switch to Mesh tab and click Generate to create mesh, or use Design > Import for STL files.');
+    { key: 'import', icon: <FolderOpenOutlined />, label: 'Import Mesh (.msh)...', action: () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.msh,.gmsh';
+      input.onchange = (e) => {
+        const file = (e.target as HTMLInputElement).files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const text = ev.target?.result as string;
+            const parsed = parseGmshMsh(text);
+            if (!parsed) {
+              message.error('Failed to parse .msh file. Expected Gmsh v2.2 ASCII format.');
+              return;
+            }
+            const state = useAppStore.getState();
+            // Build a triangle surface display data from the .msh nodes + elements
+            const nTris = parsed.triangles.length / 3;
+            if (nTris === 0) {
+              message.warning('No surface triangles found in mesh.');
+              return;
+            }
+            const positions = new Float32Array(nTris * 9);
+            for (let t = 0; t < nTris; t++) {
+              for (let v = 0; v < 3; v++) {
+                const ni = parsed.triangles[t * 3 + v];
+                const p = parsed.nodes[ni];
+                if (p) {
+                  positions[t * 9 + v * 3] = p[0];
+                  positions[t * 9 + v * 3 + 1] = p[1];
+                  positions[t * 9 + v * 3 + 2] = p[2];
+                }
+              }
+            }
+            state.setMeshDisplayData({
+              positions,
+              indices: null,
+              colors: null,
+              wireframePositions: null,
+              cellCount: parsed.cellCount,
+              nodeCount: parsed.nodes.length,
+              fluidCellCount: parsed.cellCount,
+              solidCellCount: 0,
+              nx: 0, ny: 0, nz: 0,
+            });
+            message.success(`Imported ${file.name}: ${parsed.nodes.length} nodes, ${parsed.cellCount} cells, ${nTris} surface tris`);
+            state.setActiveRibbonTab('mesh');
+          } catch (err) {
+            message.error(`Gmsh parse error: ${String(err)}`);
+          }
+        };
+        reader.readAsText(file);
+      };
+      input.click();
     }},
     { key: 'export', icon: <ExportOutlined />, label: 'Export VTK...', action: () => {
       const state = useAppStore.getState();

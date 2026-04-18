@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { sendRequest } from '../ipc/gfdClient';
 
 // ---- Shape types for CAD ----
-export type ShapeKind = 'box' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'pipe' | 'stl' | 'enclosure';
+export type ShapeKind = 'box' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'pipe' | 'stl' | 'enclosure' | 'revolve' | 'sweep' | 'loft';
 
 export type BooleanOp = 'union' | 'subtract' | 'intersect' | 'split';
 
@@ -32,6 +32,26 @@ export interface Shape {
   booleanRef?: string;         // id of BooleanOperation that produced this compound shape
   isEnclosure?: boolean;       // true for CFD prep enclosures
   group?: 'body' | 'boolean' | 'enclosure' | 'extracted_solid'; // tree grouping
+  /** Optional user-assigned layer id (see Layer[]) */
+  layerId?: string;
+  /** Optional user-assigned custom-group ids (see CustomGroup[]) */
+  customGroupIds?: string[];
+}
+
+/** User-defined visibility layer. All shapes with layerId matching this layer
+ *  inherit the layer's visibility. */
+export interface Layer {
+  id: string;
+  name: string;
+  visible: boolean;
+  color: string;
+}
+
+/** User-defined grouping of shapes (persistent selection). */
+export interface CustomGroup {
+  id: string;
+  name: string;
+  shapeIds: string[];
 }
 
 // ---- Defeaturing types ----
@@ -233,6 +253,47 @@ export interface SavedView {
   target: [number, number, number];
 }
 
+/** A snapshot of all fields at a particular transient simulation time. */
+export interface TransientSnapshot {
+  time: number;
+  iteration: number;
+  fields: FieldData[];
+}
+
+/** A single run inside a parametric sweep. */
+export interface SweepRun {
+  id: string;
+  paramValue: number;
+  /** Final pressure/velocity/temperature summary statistics */
+  results: { pMin: number; pMax: number; vMax: number; tMax: number; cd: number; cl: number };
+}
+
+export type SweepParameter = 'inletVelocity' | 'density' | 'viscosity' | 'youngsModulus';
+
+/** A chemical species in the species-transport / combustion model. */
+export interface SpeciesDefinition {
+  id: string;
+  name: string;          // e.g. "O2", "CH4", "CO2"
+  molecularWeight: number;   // kg/kmol
+  diffusivity: number;       // m²/s
+  inletMassFraction: number; // 0..1
+  initialMassFraction: number; // 0..1
+}
+
+/** A simple Arrhenius reaction A + B → C + D. */
+export interface ReactionDefinition {
+  id: string;
+  name: string;
+  reactants: Array<{ speciesId: string; stoich: number }>;
+  products: Array<{ speciesId: string; stoich: number }>;
+  /** Pre-exponential factor A (units depend on order) */
+  arrheniusA: number;
+  /** Activation energy Ea (J/kmol) */
+  activationEnergy: number;
+  /** Temperature exponent β */
+  beta: number;
+}
+
 /** Field initial values applied before the first iteration / time step */
 export interface InitialConditions {
   pressure: number;
@@ -324,7 +385,9 @@ export interface Annotation3D {
 export interface ProbePoint {
   id: string;
   position: [number, number, number];
-  values: Record<string, number>; // field name → value
+  values: Record<string, number>; // current (latest) field values
+  /** Time-history of values: each entry is { iter, time, values } */
+  history: Array<{ iter: number; time: number; values: Record<string, number> }>;
 }
 
 // ---- Section Plane ----
@@ -652,6 +715,47 @@ interface AppState {
   savedViews: SavedView[];
   addSavedView: (view: SavedView) => void;
   removeSavedView: (id: string) => void;
+
+  // Transient field snapshots (for playback scrubber)
+  transientSnapshots: TransientSnapshot[];
+  activeSnapshotIndex: number;
+  pushTransientSnapshot: (snap: TransientSnapshot) => void;
+  clearTransientSnapshots: () => void;
+  setActiveSnapshot: (index: number) => void;
+
+  // Parametric sweep results
+  sweepParam: SweepParameter;
+  sweepRuns: SweepRun[];
+  setSweepParam: (p: SweepParameter) => void;
+  addSweepRun: (run: SweepRun) => void;
+  clearSweepRuns: () => void;
+
+  // Unit system (SI / Imperial) — display only; internal values stay SI
+  unitSystem: 'SI' | 'Imperial';
+  setUnitSystem: (u: 'SI' | 'Imperial') => void;
+
+  // Species transport / reactions
+  species: SpeciesDefinition[];
+  reactions: ReactionDefinition[];
+  addSpecies: (s: SpeciesDefinition) => void;
+  updateSpecies: (id: string, patch: Partial<SpeciesDefinition>) => void;
+  removeSpecies: (id: string) => void;
+  addReaction: (r: ReactionDefinition) => void;
+  updateReaction: (id: string, patch: Partial<ReactionDefinition>) => void;
+  removeReaction: (id: string) => void;
+
+  // Layers and custom groups (Structure panel sub-tabs)
+  layers: Layer[];
+  customGroups: CustomGroup[];
+  addLayer: (l: Layer) => void;
+  updateLayer: (id: string, patch: Partial<Layer>) => void;
+  removeLayer: (id: string) => void;
+  toggleLayerVisibility: (id: string) => void;
+  assignShapeToLayer: (shapeId: string, layerId: string | null) => void;
+  addCustomGroup: (g: CustomGroup) => void;
+  removeCustomGroup: (id: string) => void;
+  addShapeToGroup: (groupId: string, shapeId: string) => void;
+  removeShapeFromGroup: (groupId: string, shapeId: string) => void;
 }
 
 let solverInterval: ReturnType<typeof setInterval> | null = null;
@@ -674,428 +778,14 @@ function runSimulatedSolverLoop(
   }, 10);
 }
 
-/** Shape of a solver response residual record (best-effort, tolerant to absent fields). */
-interface BackendResidual {
-  continuity?: number;
-  xMomentum?: number;
-  yMomentum?: number;
-  energy?: number;
-  residual?: number;
-}
-
-interface BackendStatus {
-  running?: boolean;
-  iteration?: number;
-  residual?: number;
-  residuals?: BackendResidual;
-  status?: string;
-  log?: string;
-}
-
-/** Build the JSON-RPC payload for solve.start from the current store state. */
-function buildBackendSolveParams(state: AppState): Record<string, unknown> {
-  // Decide physics flavor: structural takes priority → then thermal-only (when fluid disabled) → else fluid
-  const physics = state.physicsModels.structural
-    ? 'structural'
-    : (state.physicsModels.energy && !state.boundaries.some(b => b.type === 'inlet'))
-      ? 'thermal'
-      : 'fluid';
-
-  const rpcBcs = state.boundaries.map(b => {
-    const base = {
-      patch: b.name,
-      type: b.type === 'inlet' ? 'velocity_inlet'
-        : b.type === 'outlet' ? 'pressure_outlet'
-        : b.type === 'wall' ? 'wall'
-        : b.type === 'fixed' ? 'fixed'
-        : b.type === 'force' ? 'force'
-        : 'symmetry',
-      vx: b.velocity[0], vy: b.velocity[1], vz: b.velocity[2],
-      pressure: b.pressure,
-      temperature: b.temperature,
-      fx: b.force?.[0] ?? 0, fy: b.force?.[1] ?? 0, fz: b.force?.[2] ?? 0,
-    };
-    return base;
-  });
-
-  return {
-    physics,
-    flow: state.physicsModels.flow,
-    max_iterations: state.solverSettings.maxIterations,
-    tolerance: state.solverSettings.tolerance,
-    density: state.material.density,
-    viscosity: state.material.viscosity,
-    conductivity: state.material.conductivity,
-    youngs_modulus: state.material.youngsModulus,
-    poisson_ratio: state.material.poissonRatio,
-    alpha_u: state.solverSettings.relaxVelocity,
-    alpha_p: state.solverSettings.relaxPressure,
-    turbulence: state.physicsModels.turbulence,
-    radiation: state.physicsModels.radiation,
-    multiphase: state.physicsModels.multiphase,
-    species: state.physicsModels.species,
-    energy: state.physicsModels.energy,
-    // Parallel / accelerator flags
-    use_gpu: state.useGpu,
-    use_mpi: state.useMpi,
-    mpi_cores: state.mpiCores,
-    // Time stepping
-    time_mode: state.solverSettings.timeMode,
-    time_step_size: state.solverSettings.timeStepSize,
-    total_time: state.solverSettings.totalTime,
-    // Initial field values (solver start state)
-    initial_conditions: {
-      pressure: state.initialConditions.pressure,
-      vx: state.initialConditions.velocity[0],
-      vy: state.initialConditions.velocity[1],
-      vz: state.initialConditions.velocity[2],
-      temperature: state.initialConditions.temperature,
-      tke: state.initialConditions.tke,
-      init_from_inlet: state.initialConditions.initFromInlet,
-    },
-    boundary_conditions: rpcBcs,
-  };
-}
-
-/** Fields the backend should return for a given physics flavor. */
-function backendFieldListFor(state: AppState): string[] {
-  if (state.physicsModels.structural) {
-    return ['displacement_x', 'displacement_y', 'displacement_z', 'displacement_mag', 'von_mises_stress'];
-  }
-  const list = ['pressure', 'velocity_magnitude', 'vx', 'vy', 'vz'];
-  if (state.physicsModels.energy) list.push('temperature');
-  return list;
-}
-
-export const useAppStore = create<AppState>((set, get) => ({
-  // Active tab
-  activeTab: 'cad',
-  setActiveTab: (tab) => set({ activeTab: tab }),
-
-  // Ribbon / Tool state
-  activeRibbonTab: 'design',
-  setActiveRibbonTab: (tab) => set({ activeRibbonTab: tab }),
-  activeTool: 'select',
-  setActiveTool: (tool) => set({ activeTool: tool }),
-  transformMode: 'translate',
-  setTransformMode: (mode) => set({ transformMode: mode }),
-  hoveredShapeId: null,
-  setHoveredShapeId: (id) => set({ hoveredShapeId: id }),
-  gridSnap: 0,
-  setGridSnap: (snap) => set({ gridSnap: snap }),
-  showBBox: false,
-  setShowBBox: (v) => set({ showBBox: v }),
-  showGrid: true,
-  setShowGrid: (v) => set({ showGrid: v }),
-  showAxes: true,
-  setShowAxes: (v) => set({ showAxes: v }),
-  selectionFilter: 'face',
-  setSelectionFilter: (filter) => set({ selectionFilter: filter }),
-  leftPanelCollapsed: {},
-  toggleLeftPanel: (key) =>
-    set((s) => ({
-      leftPanelCollapsed: {
-        ...s.leftPanelCollapsed,
-        [key]: !s.leftPanelCollapsed[key],
-      },
-    })),
-  messages: [],
-  addMessage: (msg) =>
-    set((s) => ({ messages: [...s.messages.slice(-99), msg] })),
-
-  // Undo/Redo
-  undoStack: [],
-  redoStack: [],
-  pushUndo: () => {
-    const state = get();
-    // Save snapshot of shapes (without stlData to save memory)
-    const snapshot = state.shapes.map(s => ({ ...s, stlData: undefined }));
-    set((s) => ({
-      undoStack: [...s.undoStack.slice(-29), snapshot],
-      redoStack: [],
-    }));
-  },
-  undo: () => {
-    const state = get();
-    if (state.undoStack.length === 0) return;
-    const prev = state.undoStack[state.undoStack.length - 1];
-    const currentSnapshot = state.shapes.map(s => ({ ...s, stlData: undefined }));
-    // Restore shapes but keep stlData from current state
-    const restored = prev.map(s => {
-      const current = state.shapes.find(c => c.id === s.id);
-      return current?.stlData ? { ...s, stlData: current.stlData } : s;
-    });
-    set({
-      shapes: restored,
-      undoStack: state.undoStack.slice(0, -1),
-      redoStack: [...state.redoStack, currentSnapshot],
-      selectedShapeId: null,
-    });
-  },
-  redo: () => {
-    const state = get();
-    if (state.redoStack.length === 0) return;
-    const next = state.redoStack[state.redoStack.length - 1];
-    const currentSnapshot = state.shapes.map(s => ({ ...s, stlData: undefined }));
-    const restored = next.map(s => {
-      const current = state.shapes.find(c => c.id === s.id);
-      return current?.stlData ? { ...s, stlData: current.stlData } : s;
-    });
-    set({
-      shapes: restored,
-      undoStack: [...state.undoStack, currentSnapshot],
-      redoStack: state.redoStack.slice(0, -1),
-      selectedShapeId: null,
-    });
-  },
-
-  // CAD
-  shapes: [],
-  selectedShapeId: null,
-  booleanOps: [],
-  defeatureIssues: [],
-  selectedIssueId: null,
-  cadMode: 'select',
-  pendingBooleanOp: null,
-  pendingBooleanTargetId: null,
-  addShape: (shape) => {
-    get().pushUndo();
-    set((s) => ({ shapes: [...s.shapes, shape] }));
-  },
-  updateShape: (id, patch) =>
-    set((s) => ({
-      shapes: s.shapes.map((sh) => (sh.id === id ? { ...sh, ...patch } : sh)),
-    })),
-  removeShape: (id) => {
-    const shape = get().shapes.find(s => s.id === id);
-    if (shape?.locked) return; // Can't delete locked shapes
-    get().pushUndo();
-    set((s) => ({
-      shapes: s.shapes.filter((sh) => sh.id !== id),
-      selectedShapeId: s.selectedShapeId === id ? null : s.selectedShapeId,
-      booleanOps: s.booleanOps.filter((op) => op.targetId !== id && op.toolId !== id),
-    }));
-  },
-  toggleShapeVisibility: (id) =>
-    set((s) => ({
-      shapes: s.shapes.map((sh) =>
-        sh.id === id ? { ...sh, visible: sh.visible === false ? true : false } : sh
-      ),
-    })),
-  showAllShapes: () =>
-    set((s) => ({
-      shapes: s.shapes.map((sh) => ({ ...sh, visible: true })),
-    })),
-  clearAllShapes: () => {
-    get().pushUndo();
-    set({ shapes: [], selectedShapeId: null, booleanOps: [] });
-  },
-  selectShape: (id) => set({ selectedShapeId: id }),
-  selectedShapeIds: [],
-  toggleMultiSelect: (id) => set((s) => {
-    const ids = s.selectedShapeIds.includes(id)
-      ? s.selectedShapeIds.filter(i => i !== id)
-      : [...s.selectedShapeIds, id];
-    return { selectedShapeIds: ids, selectedShapeId: ids.length > 0 ? ids[ids.length - 1] : null };
-  }),
-  clearMultiSelect: () => set({ selectedShapeIds: [] }),
-  alignShapes: (axis) => {
-    const state = get();
-    const ids = state.selectedShapeIds.length > 1 ? state.selectedShapeIds : [];
-    if (ids.length < 2) return;
-    const shapes = ids.map(id => state.shapes.find(s => s.id === id)).filter(Boolean) as typeof state.shapes;
-    // Compute average position on the axis
-    const axisIdx = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
-    const avg = shapes.reduce((sum, s) => sum + s.position[axisIdx], 0) / shapes.length;
-    state.pushUndo();
-    shapes.forEach(s => {
-      const newPos: [number, number, number] = [...s.position];
-      newPos[axisIdx] = avg;
-      state.updateShape(s.id, { position: newPos });
-    });
-  },
-  distributeShapes: (axis) => {
-    const state = get();
-    const ids = state.selectedShapeIds;
-    if (ids.length < 3) return;
-    const shapes = ids.map(id => state.shapes.find(s => s.id === id)).filter(Boolean) as typeof state.shapes;
-    const axisIdx = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
-    // Sort by current position
-    shapes.sort((a, b) => a.position[axisIdx] - b.position[axisIdx]);
-    const first = shapes[0].position[axisIdx];
-    const last = shapes[shapes.length - 1].position[axisIdx];
-    const step = (last - first) / (shapes.length - 1);
-    state.pushUndo();
-    shapes.forEach((s, i) => {
-      const newPos: [number, number, number] = [...s.position];
-      newPos[axisIdx] = first + step * i;
-      state.updateShape(s.id, { position: newPos });
-    });
-  },
-  addBooleanOp: (op) => set((s) => ({ booleanOps: [...s.booleanOps, op] })),
-  removeBooleanOp: (id) =>
-    set((s) => ({
-      booleanOps: s.booleanOps.filter((op) => op.id !== id),
-    })),
-  setCadMode: (mode) => set({ cadMode: mode }),
-  setPendingBooleanOp: (op) => set({ pendingBooleanOp: op }),
-  setPendingBooleanTargetId: (id) => set({ pendingBooleanTargetId: id }),
-  performBoolean: (targetId, toolId) => {
-    const state = get();
-    const op = state.pendingBooleanOp;
-    if (!op) return;
-    const target = state.shapes.find(s => s.id === targetId);
-    const tool = state.shapes.find(s => s.id === toolId);
-    if (!target || !tool) return;
-
-    const boolOp: BooleanOperation = {
-      id: `bool-${Date.now()}`,
-      name: `${op}(${target.name}, ${tool.name})`,
-      op,
-      targetId,
-      toolId,
-    };
-
-    if (op === 'subtract') {
-      // Hide the tool shape and record the operation
-      set((s) => ({
-        booleanOps: [...s.booleanOps, boolOp],
-        shapes: s.shapes.map(sh =>
-          sh.id === toolId ? { ...sh, visible: false, group: 'boolean' as const } : sh
-        ),
-        cadMode: 'select' as const,
-        pendingBooleanOp: null,
-        pendingBooleanTargetId: null,
-      }));
-    } else if (op === 'union') {
-      // Merge: keep target, hide tool, record op
-      set((s) => ({
-        booleanOps: [...s.booleanOps, boolOp],
-        shapes: s.shapes.map(sh =>
-          sh.id === toolId ? { ...sh, visible: false, group: 'boolean' as const } : sh
-        ),
-        cadMode: 'select' as const,
-        pendingBooleanOp: null,
-        pendingBooleanTargetId: null,
-      }));
-    } else if (op === 'intersect') {
-      // Keep only the overlap region — for now, hide both and create intersection note
-      set((s) => ({
-        booleanOps: [...s.booleanOps, boolOp],
-        shapes: s.shapes.map(sh => {
-          if (sh.id === toolId) return { ...sh, visible: false, group: 'boolean' as const };
-          if (sh.id === targetId) return { ...sh, booleanRef: boolOp.id };
-          return sh;
-        }),
-        cadMode: 'select' as const,
-        pendingBooleanOp: null,
-        pendingBooleanTargetId: null,
-      }));
-    } else if (op === 'split') {
-      // Split: create a copy of the tool at the intersection
-      const splitId = `shape-split-${Date.now()}`;
-      const splitShape: Shape = {
-        id: splitId,
-        name: `${target.name}-split`,
-        kind: tool.kind,
-        position: [...tool.position],
-        rotation: [...tool.rotation],
-        dimensions: { ...tool.dimensions },
-        group: 'body',
-      };
-      set((s) => ({
-        booleanOps: [...s.booleanOps, boolOp],
-        shapes: [...s.shapes, splitShape],
-        cadMode: 'select' as const,
-        pendingBooleanOp: null,
-        pendingBooleanTargetId: null,
-      }));
-    }
-  },
-  setDefeatureIssues: (issues) => set({ defeatureIssues: issues, selectedIssueId: null }),
-  fixDefeatureIssue: (id) =>
-    set((s) => ({
-      defeatureIssues: s.defeatureIssues.map((issue) =>
-        issue.id === id ? { ...issue, fixed: true } : issue
-      ),
-    })),
-  fixAllDefeatureIssues: () =>
-    set((s) => ({
-      defeatureIssues: s.defeatureIssues.map((issue) => ({ ...issue, fixed: true })),
-    })),
-  selectIssue: (id) => set({ selectedIssueId: id }),
-  undoLastFix: () =>
-    set((s) => {
-      // Find the last fixed issue and undo it
-      const fixedIndices: number[] = [];
-      s.defeatureIssues.forEach((issue, idx) => {
-        if (issue.fixed) fixedIndices.push(idx);
-      });
-      if (fixedIndices.length === 0) return s;
-      const lastFixedIdx = fixedIndices[fixedIndices.length - 1];
-      return {
-        defeatureIssues: s.defeatureIssues.map((issue, idx) =>
-          idx === lastFixedIdx ? { ...issue, fixed: false } : issue
-        ),
-      };
-    }),
-
-  // CFD Prep
-  namedSelections: [],
-  cfdPrepStep: 0,
-  enclosureCreated: false,
-  fluidExtracted: false,
-  topologyShared: false,
-  hoveredSelectionName: null,
-  setNamedSelections: (selections) => set({ namedSelections: selections }),
-  addNamedSelection: (selection) =>
-    set((s) => ({ namedSelections: [...s.namedSelections, selection] })),
-  removeNamedSelection: (name) =>
-    set((s) => ({
-      namedSelections: s.namedSelections.filter((ns) => ns.name !== name),
-    })),
-  updateNamedSelection: (name, patch) =>
-    set((s) => ({
-      namedSelections: s.namedSelections.map((ns) =>
-        ns.name === name ? { ...ns, ...patch } : ns
-      ),
-    })),
-  setCfdPrepStep: (step) => set({ cfdPrepStep: step }),
-  setEnclosureCreated: (v) => set({ enclosureCreated: v }),
-  setFluidExtracted: (v) => set({ fluidExtracted: v }),
-  setTopologyShared: (v) => set({ topologyShared: v }),
-  setHoveredSelectionName: (name) => set({ hoveredSelectionName: name }),
-
-  // Mesh
-  meshZones: [],
-  meshConfig: {
-    type: 'hex',
-    globalSize: 0.2,
-    minCellSize: 0.05,
-    growthRate: 1.2,
-    cellsPerFeature: 3,
-    curvatureRefine: true,
-    prismLayers: 3,
-    firstHeight: 0.001,
-    layerRatio: 1.2,
-    layerTotalThickness: 0.01,
-    maxSkewness: 0.85,
-    minOrthogonality: 0.1,
-    maxAspectRatio: 20,
-  },
-  meshQuality: null,
-  meshGenerated: false,
-  meshGenerating: false,
-  meshDisplayData: null,
-  updateMeshConfig: (patch) =>
-    set((s) => ({ meshConfig: { ...s.meshConfig, ...patch } })),
-  generateMesh: () => {
-    set((s) => ({
-      meshGenerating: true,
-      consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [Mesh] Starting mesh generation...`],
-    }));
-    // Generate real 3D hex mesh respecting geometry
-    setTimeout(() => {
+/** Runs the in-browser mesh generator (3D Cartesian/hex/tet/poly) as a fallback
+ *  when no Rust backend is available, or as the display-data source even when
+ *  the backend is present. Sets meshGenerated=true and populates meshDisplayData. */
+function runJsMeshGeneration(
+  get: () => AppState,
+  set: (u: Partial<AppState> | ((s: AppState) => Partial<AppState>)) => void,
+) {
+  setTimeout(() => {
       const state = get();
 
       // --- Determine domain from enclosure (or fall back to defaults) ---
@@ -1676,6 +1366,477 @@ export const useAppStore = create<AppState>((set, get) => ({
         },
       }));
     }, 800);
+}
+
+
+/** Shape of a solver response residual record (best-effort, tolerant to absent fields). */
+interface BackendResidual {
+  continuity?: number;
+  xMomentum?: number;
+  yMomentum?: number;
+  energy?: number;
+  residual?: number;
+}
+
+interface BackendStatus {
+  running?: boolean;
+  iteration?: number;
+  residual?: number;
+  residuals?: BackendResidual;
+  status?: string;
+  log?: string;
+}
+
+/** Build the JSON-RPC payload for solve.start from the current store state. */
+function buildBackendSolveParams(state: AppState): Record<string, unknown> {
+  // Decide physics flavor: structural takes priority → then thermal-only (when fluid disabled) → else fluid
+  const physics = state.physicsModels.structural
+    ? 'structural'
+    : (state.physicsModels.energy && !state.boundaries.some(b => b.type === 'inlet'))
+      ? 'thermal'
+      : 'fluid';
+
+  const rpcBcs = state.boundaries.map(b => {
+    const base = {
+      patch: b.name,
+      type: b.type === 'inlet' ? 'velocity_inlet'
+        : b.type === 'outlet' ? 'pressure_outlet'
+        : b.type === 'wall' ? 'wall'
+        : b.type === 'fixed' ? 'fixed'
+        : b.type === 'force' ? 'force'
+        : 'symmetry',
+      vx: b.velocity[0], vy: b.velocity[1], vz: b.velocity[2],
+      pressure: b.pressure,
+      temperature: b.temperature,
+      fx: b.force?.[0] ?? 0, fy: b.force?.[1] ?? 0, fz: b.force?.[2] ?? 0,
+    };
+    return base;
+  });
+
+  return {
+    physics,
+    flow: state.physicsModels.flow,
+    max_iterations: state.solverSettings.maxIterations,
+    tolerance: state.solverSettings.tolerance,
+    density: state.material.density,
+    viscosity: state.material.viscosity,
+    conductivity: state.material.conductivity,
+    youngs_modulus: state.material.youngsModulus,
+    poisson_ratio: state.material.poissonRatio,
+    alpha_u: state.solverSettings.relaxVelocity,
+    alpha_p: state.solverSettings.relaxPressure,
+    turbulence: state.physicsModels.turbulence,
+    radiation: state.physicsModels.radiation,
+    multiphase: state.physicsModels.multiphase,
+    species: state.physicsModels.species,
+    energy: state.physicsModels.energy,
+    // Parallel / accelerator flags
+    use_gpu: state.useGpu,
+    use_mpi: state.useMpi,
+    mpi_cores: state.mpiCores,
+    // Time stepping
+    time_mode: state.solverSettings.timeMode,
+    time_step_size: state.solverSettings.timeStepSize,
+    total_time: state.solverSettings.totalTime,
+    // Initial field values (solver start state)
+    initial_conditions: {
+      pressure: state.initialConditions.pressure,
+      vx: state.initialConditions.velocity[0],
+      vy: state.initialConditions.velocity[1],
+      vz: state.initialConditions.velocity[2],
+      temperature: state.initialConditions.temperature,
+      tke: state.initialConditions.tke,
+      init_from_inlet: state.initialConditions.initFromInlet,
+    },
+    boundary_conditions: rpcBcs,
+  };
+}
+
+/** Fields the backend should return for a given physics flavor. */
+function backendFieldListFor(state: AppState): string[] {
+  if (state.physicsModels.structural) {
+    return ['displacement_x', 'displacement_y', 'displacement_z', 'displacement_mag', 'von_mises_stress'];
+  }
+  const list = ['pressure', 'velocity_magnitude', 'vx', 'vy', 'vz'];
+  if (state.physicsModels.energy) list.push('temperature');
+  return list;
+}
+
+export const useAppStore = create<AppState>((set, get) => ({
+  // Active tab
+  activeTab: 'cad',
+  setActiveTab: (tab) => set({ activeTab: tab }),
+
+  // Ribbon / Tool state
+  activeRibbonTab: 'design',
+  setActiveRibbonTab: (tab) => set({ activeRibbonTab: tab }),
+  activeTool: 'select',
+  setActiveTool: (tool) => set({ activeTool: tool }),
+  transformMode: 'translate',
+  setTransformMode: (mode) => set({ transformMode: mode }),
+  hoveredShapeId: null,
+  setHoveredShapeId: (id) => set({ hoveredShapeId: id }),
+  gridSnap: 0,
+  setGridSnap: (snap) => set({ gridSnap: snap }),
+  showBBox: false,
+  setShowBBox: (v) => set({ showBBox: v }),
+  showGrid: true,
+  setShowGrid: (v) => set({ showGrid: v }),
+  showAxes: true,
+  setShowAxes: (v) => set({ showAxes: v }),
+  selectionFilter: 'face',
+  setSelectionFilter: (filter) => set({ selectionFilter: filter }),
+  leftPanelCollapsed: {},
+  toggleLeftPanel: (key) =>
+    set((s) => ({
+      leftPanelCollapsed: {
+        ...s.leftPanelCollapsed,
+        [key]: !s.leftPanelCollapsed[key],
+      },
+    })),
+  messages: [],
+  addMessage: (msg) =>
+    set((s) => ({ messages: [...s.messages.slice(-99), msg] })),
+
+  // Undo/Redo
+  undoStack: [],
+  redoStack: [],
+  pushUndo: () => {
+    const state = get();
+    // Save snapshot of shapes (without stlData to save memory)
+    const snapshot = state.shapes.map(s => ({ ...s, stlData: undefined }));
+    set((s) => ({
+      undoStack: [...s.undoStack.slice(-29), snapshot],
+      redoStack: [],
+    }));
+  },
+  undo: () => {
+    const state = get();
+    if (state.undoStack.length === 0) return;
+    const prev = state.undoStack[state.undoStack.length - 1];
+    const currentSnapshot = state.shapes.map(s => ({ ...s, stlData: undefined }));
+    // Restore shapes but keep stlData from current state
+    const restored = prev.map(s => {
+      const current = state.shapes.find(c => c.id === s.id);
+      return current?.stlData ? { ...s, stlData: current.stlData } : s;
+    });
+    set({
+      shapes: restored,
+      undoStack: state.undoStack.slice(0, -1),
+      redoStack: [...state.redoStack, currentSnapshot],
+      selectedShapeId: null,
+    });
+  },
+  redo: () => {
+    const state = get();
+    if (state.redoStack.length === 0) return;
+    const next = state.redoStack[state.redoStack.length - 1];
+    const currentSnapshot = state.shapes.map(s => ({ ...s, stlData: undefined }));
+    const restored = next.map(s => {
+      const current = state.shapes.find(c => c.id === s.id);
+      return current?.stlData ? { ...s, stlData: current.stlData } : s;
+    });
+    set({
+      shapes: restored,
+      undoStack: [...state.undoStack, currentSnapshot],
+      redoStack: state.redoStack.slice(0, -1),
+      selectedShapeId: null,
+    });
+  },
+
+  // CAD
+  shapes: [],
+  selectedShapeId: null,
+  booleanOps: [],
+  defeatureIssues: [],
+  selectedIssueId: null,
+  cadMode: 'select',
+  pendingBooleanOp: null,
+  pendingBooleanTargetId: null,
+  addShape: (shape) => {
+    get().pushUndo();
+    set((s) => ({ shapes: [...s.shapes, shape] }));
+  },
+  updateShape: (id, patch) =>
+    set((s) => ({
+      shapes: s.shapes.map((sh) => (sh.id === id ? { ...sh, ...patch } : sh)),
+    })),
+  removeShape: (id) => {
+    const shape = get().shapes.find(s => s.id === id);
+    if (shape?.locked) return; // Can't delete locked shapes
+    get().pushUndo();
+    set((s) => ({
+      shapes: s.shapes.filter((sh) => sh.id !== id),
+      selectedShapeId: s.selectedShapeId === id ? null : s.selectedShapeId,
+      booleanOps: s.booleanOps.filter((op) => op.targetId !== id && op.toolId !== id),
+    }));
+  },
+  toggleShapeVisibility: (id) =>
+    set((s) => ({
+      shapes: s.shapes.map((sh) =>
+        sh.id === id ? { ...sh, visible: sh.visible === false ? true : false } : sh
+      ),
+    })),
+  showAllShapes: () =>
+    set((s) => ({
+      shapes: s.shapes.map((sh) => ({ ...sh, visible: true })),
+    })),
+  clearAllShapes: () => {
+    get().pushUndo();
+    set({ shapes: [], selectedShapeId: null, booleanOps: [] });
+  },
+  selectShape: (id) => set({ selectedShapeId: id }),
+  selectedShapeIds: [],
+  toggleMultiSelect: (id) => set((s) => {
+    const ids = s.selectedShapeIds.includes(id)
+      ? s.selectedShapeIds.filter(i => i !== id)
+      : [...s.selectedShapeIds, id];
+    return { selectedShapeIds: ids, selectedShapeId: ids.length > 0 ? ids[ids.length - 1] : null };
+  }),
+  clearMultiSelect: () => set({ selectedShapeIds: [] }),
+  alignShapes: (axis) => {
+    const state = get();
+    const ids = state.selectedShapeIds.length > 1 ? state.selectedShapeIds : [];
+    if (ids.length < 2) return;
+    const shapes = ids.map(id => state.shapes.find(s => s.id === id)).filter(Boolean) as typeof state.shapes;
+    // Compute average position on the axis
+    const axisIdx = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+    const avg = shapes.reduce((sum, s) => sum + s.position[axisIdx], 0) / shapes.length;
+    state.pushUndo();
+    shapes.forEach(s => {
+      const newPos: [number, number, number] = [...s.position];
+      newPos[axisIdx] = avg;
+      state.updateShape(s.id, { position: newPos });
+    });
+  },
+  distributeShapes: (axis) => {
+    const state = get();
+    const ids = state.selectedShapeIds;
+    if (ids.length < 3) return;
+    const shapes = ids.map(id => state.shapes.find(s => s.id === id)).filter(Boolean) as typeof state.shapes;
+    const axisIdx = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+    // Sort by current position
+    shapes.sort((a, b) => a.position[axisIdx] - b.position[axisIdx]);
+    const first = shapes[0].position[axisIdx];
+    const last = shapes[shapes.length - 1].position[axisIdx];
+    const step = (last - first) / (shapes.length - 1);
+    state.pushUndo();
+    shapes.forEach((s, i) => {
+      const newPos: [number, number, number] = [...s.position];
+      newPos[axisIdx] = first + step * i;
+      state.updateShape(s.id, { position: newPos });
+    });
+  },
+  addBooleanOp: (op) => set((s) => ({ booleanOps: [...s.booleanOps, op] })),
+  removeBooleanOp: (id) =>
+    set((s) => ({
+      booleanOps: s.booleanOps.filter((op) => op.id !== id),
+    })),
+  setCadMode: (mode) => set({ cadMode: mode }),
+  setPendingBooleanOp: (op) => set({ pendingBooleanOp: op }),
+  setPendingBooleanTargetId: (id) => set({ pendingBooleanTargetId: id }),
+  performBoolean: (targetId, toolId) => {
+    const state = get();
+    const op = state.pendingBooleanOp;
+    if (!op) return;
+    const target = state.shapes.find(s => s.id === targetId);
+    const tool = state.shapes.find(s => s.id === toolId);
+    if (!target || !tool) return;
+
+    const boolOp: BooleanOperation = {
+      id: `bool-${Date.now()}`,
+      name: `${op}(${target.name}, ${tool.name})`,
+      op,
+      targetId,
+      toolId,
+    };
+
+    if (op === 'split') {
+      // Split: create a copy of the tool at the intersection (kept as fallback — not a boolean)
+      const splitId = `shape-split-${Date.now()}`;
+      const splitShape: Shape = {
+        id: splitId,
+        name: `${target.name}-split`,
+        kind: tool.kind,
+        position: [...tool.position],
+        rotation: [...tool.rotation],
+        dimensions: { ...tool.dimensions },
+        group: 'body',
+      };
+      set((s) => ({
+        booleanOps: [...s.booleanOps, boolOp],
+        shapes: [...s.shapes, splitShape],
+        cadMode: 'select' as const,
+        pendingBooleanOp: null,
+        pendingBooleanTargetId: null,
+      }));
+      return;
+    }
+
+    // Real CSG boolean (union/subtract/intersect): do it asynchronously so store stays simple.
+    // Mark target+tool as consumed, then splice in the resulting STL shape when ready.
+    const newId = `shape-csg-${Date.now()}`;
+    // Dynamic import avoids pulling three-bvh-csg into the store's cold path.
+    void (async () => {
+      try {
+        const { performCsgBoolean } = await import('../engine/csg');
+        const result = performCsgBoolean(op, target, tool, newId);
+        if (!result) {
+          set((s) => ({
+            consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [CAD] CSG ${op} produced no geometry (shapes may not overlap)`],
+            cadMode: 'select' as const,
+            pendingBooleanOp: null,
+            pendingBooleanTargetId: null,
+          }));
+          return;
+        }
+        set((s) => ({
+          booleanOps: [...s.booleanOps, boolOp],
+          shapes: [
+            // Hide the originals so only the CSG result is visible; keep them in store for undo
+            ...s.shapes.map(sh => {
+              if (sh.id === targetId || sh.id === toolId) return { ...sh, visible: false, group: 'boolean' as const };
+              return sh;
+            }),
+            result,
+          ],
+          selectedShapeId: newId,
+          cadMode: 'select' as const,
+          pendingBooleanOp: null,
+          pendingBooleanTargetId: null,
+          consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [CAD] CSG ${op}: ${result.stlData?.faceCount ?? 0} triangles`],
+        }));
+      } catch (e) {
+        set((s) => ({
+          consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [CAD] CSG error: ${String(e)}`],
+          cadMode: 'select' as const,
+          pendingBooleanOp: null,
+          pendingBooleanTargetId: null,
+        }));
+      }
+    })();
+  },
+  setDefeatureIssues: (issues) => set({ defeatureIssues: issues, selectedIssueId: null }),
+  fixDefeatureIssue: (id) =>
+    set((s) => ({
+      defeatureIssues: s.defeatureIssues.map((issue) =>
+        issue.id === id ? { ...issue, fixed: true } : issue
+      ),
+    })),
+  fixAllDefeatureIssues: () =>
+    set((s) => ({
+      defeatureIssues: s.defeatureIssues.map((issue) => ({ ...issue, fixed: true })),
+    })),
+  selectIssue: (id) => set({ selectedIssueId: id }),
+  undoLastFix: () =>
+    set((s) => {
+      // Find the last fixed issue and undo it
+      const fixedIndices: number[] = [];
+      s.defeatureIssues.forEach((issue, idx) => {
+        if (issue.fixed) fixedIndices.push(idx);
+      });
+      if (fixedIndices.length === 0) return s;
+      const lastFixedIdx = fixedIndices[fixedIndices.length - 1];
+      return {
+        defeatureIssues: s.defeatureIssues.map((issue, idx) =>
+          idx === lastFixedIdx ? { ...issue, fixed: false } : issue
+        ),
+      };
+    }),
+
+  // CFD Prep
+  namedSelections: [],
+  cfdPrepStep: 0,
+  enclosureCreated: false,
+  fluidExtracted: false,
+  topologyShared: false,
+  hoveredSelectionName: null,
+  setNamedSelections: (selections) => set({ namedSelections: selections }),
+  addNamedSelection: (selection) =>
+    set((s) => ({ namedSelections: [...s.namedSelections, selection] })),
+  removeNamedSelection: (name) =>
+    set((s) => ({
+      namedSelections: s.namedSelections.filter((ns) => ns.name !== name),
+    })),
+  updateNamedSelection: (name, patch) =>
+    set((s) => ({
+      namedSelections: s.namedSelections.map((ns) =>
+        ns.name === name ? { ...ns, ...patch } : ns
+      ),
+    })),
+  setCfdPrepStep: (step) => set({ cfdPrepStep: step }),
+  setEnclosureCreated: (v) => set({ enclosureCreated: v }),
+  setFluidExtracted: (v) => set({ fluidExtracted: v }),
+  setTopologyShared: (v) => set({ topologyShared: v }),
+  setHoveredSelectionName: (name) => set({ hoveredSelectionName: name }),
+
+  // Mesh
+  meshZones: [],
+  meshConfig: {
+    type: 'hex',
+    globalSize: 0.2,
+    minCellSize: 0.05,
+    growthRate: 1.2,
+    cellsPerFeature: 3,
+    curvatureRefine: true,
+    prismLayers: 3,
+    firstHeight: 0.001,
+    layerRatio: 1.2,
+    layerTotalThickness: 0.01,
+    maxSkewness: 0.85,
+    minOrthogonality: 0.1,
+    maxAspectRatio: 20,
+  },
+  meshQuality: null,
+  meshGenerated: false,
+  meshGenerating: false,
+  meshDisplayData: null,
+  updateMeshConfig: (patch) =>
+    set((s) => ({ meshConfig: { ...s.meshConfig, ...patch } })),
+  generateMesh: () => {
+    set((s) => ({
+      meshGenerating: true,
+      consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [Mesh] Starting mesh generation...`],
+    }));
+
+    // Backend bridge: when the Rust server is available, call mesh.generate + mesh.get_display_data
+    // Falls back to the JS mesh generator below if the backend returns no data.
+    const hasBackend = typeof window !== 'undefined' && !!window.gfdAPI;
+    if (hasBackend) {
+      const st = get();
+      const enc = st.shapes.find(s => s.kind === 'enclosure' || s.isEnclosure);
+      const w = enc?.dimensions.width ?? 4;
+      const h = enc?.dimensions.height ?? 4;
+      const d = enc?.dimensions.depth ?? 4;
+      const gs = st.meshConfig.globalSize;
+      const nx = Math.max(3, Math.round(w / gs));
+      const ny = Math.max(3, Math.round(h / gs));
+      const nz = Math.max(3, Math.round(d / gs));
+      const params = { nx, ny, nz, lx: w, ly: h, lz: d, type: st.meshConfig.type };
+
+      sendRequest('mesh.generate', params).then((resp) => {
+        const r = resp as { cells?: number; nodes?: number; quality?: { min_ortho?: number; max_skew?: number; max_aspect?: number } };
+        if (!r || typeof r.cells !== 'number') {
+          throw new Error('Backend mesh.generate returned no cells');
+        }
+        set((s) => ({
+          consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [Mesh] Backend mesh.generate: ${r.cells} cells, ${r.nodes} nodes`],
+        }));
+        // Backend only reports counts+quality; we still need to render something, so fall through
+        // to the JS mesh generator which produces display data.
+        // The backend mesh is available for solve.start to use on the server side.
+        runJsMeshGeneration(get, set);
+      }).catch((err) => {
+        set((s) => ({
+          consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [Mesh] Backend mesh.generate failed: ${String(err)}. Falling back to in-browser mesh.`],
+        }));
+        runJsMeshGeneration(get, set);
+      });
+      return;
+    }
+
+    // Generate real 3D hex mesh respecting geometry
+    runJsMeshGeneration(get, set);
   },
   setMeshDisplayData: (data) => set({ meshDisplayData: data }),
 
@@ -1891,6 +2052,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       residuals: isResume ? state.residuals : [],
       currentIteration: isResume ? state.currentIteration : 0,
       consoleLines: initLines,
+      transientSnapshots: isResume ? state.transientSnapshots : [],
+      activeSnapshotIndex: isResume ? state.activeSnapshotIndex : 0,
     });
 
     // ---------------- Backend bridge ----------------
@@ -2053,6 +2216,81 @@ export const useAppStore = create<AppState>((set, get) => ({
       const currentTime = isTransient ? iter * s.solverSettings.timeStepSize : 0;
       const timeStr = isTransient ? `  t=${currentTime.toFixed(4)}s` : '';
       const line = `[${ts}] [Iter ${String(iter).padStart(4)}]${timeStr} continuity=${point.continuity.toExponential(3)}  x-mom=${point.xMomentum.toExponential(3)}  y-mom=${point.yMomentum.toExponential(3)}  energy=${point.energy.toExponential(3)}`;
+
+      // Monitor-point time-history capture: every PROBE_LOG_INTERVAL iterations, append
+      // interpolated field values to each probe's history.
+      const PROBE_LOG_INTERVAL = 5;
+      if (s.probePoints.length > 0 && s.meshDisplayData && iter % PROBE_LOG_INTERVAL === 0) {
+        const mdp = s.meshDisplayData;
+        const nVP = mdp.positions.length / 3;
+        // Scalar approximation based on decay and position — useful for UI demo
+        const updatedProbes = s.probePoints.map(p => {
+          // Find nearest vertex
+          let best = Infinity, nearest = 0;
+          for (let i = 0; i < nVP; i += Math.max(1, Math.floor(nVP / 400))) {
+            const dx = mdp.positions[i*3] - p.position[0];
+            const dy = mdp.positions[i*3+1] - p.position[1];
+            const dz = mdp.positions[i*3+2] - p.position[2];
+            const d = dx*dx + dy*dy + dz*dz;
+            if (d < best) { best = d; nearest = i; }
+          }
+          const newValues: Record<string, number> = { ...p.values };
+          // Evolve values using the decay envelope — proxy for convergence
+          const envelope = 1 - decay;
+          for (const f of s.fieldData) {
+            if (nearest < f.values.length) {
+              newValues[f.name] = f.values[nearest] * envelope;
+            }
+          }
+          const entry = {
+            iter,
+            time: isTransient ? iter * s.solverSettings.timeStepSize : iter,
+            values: newValues,
+          };
+          return { ...p, values: newValues, history: [...p.history.slice(-199), entry] };
+        });
+        set({ probePoints: updatedProbes });
+      }
+
+      // Transient snapshot capture: every SNAPSHOT_INTERVAL iterations, store an evolving
+      // pressure + velocity magnitude sample so the Results tab scrubber can play back time.
+      const SNAPSHOT_INTERVAL = 10;
+      if (isTransient && s.meshDisplayData && iter % SNAPSHOT_INTERVAL === 0) {
+        const md = s.meshDisplayData;
+        const nV = md.positions.length / 3;
+        const tFrac = currentTime / Math.max(s.solverSettings.totalTime, 1e-9);
+        const inletBC = s.boundaries.find(b => b.type === 'inlet');
+        const inletVel = inletBC ? Math.sqrt(inletBC.velocity[0]**2 + inletBC.velocity[1]**2 + inletBC.velocity[2]**2) : 1.0;
+        let xL = Infinity, xH = -Infinity, yL = Infinity, yH = -Infinity;
+        for (let i = 0; i < nV; i++) {
+          const x = md.positions[i*3], y = md.positions[i*3+1];
+          if (x < xL) xL = x; if (x > xH) xH = x;
+          if (y < yL) yL = y; if (y > yH) yH = y;
+        }
+        const xRng = xH - xL || 1, yRng = yH - yL || 1;
+        const pArr = new Float32Array(nV);
+        const vArr = new Float32Array(nV);
+        let pMin = Infinity, pMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+        // Oscillating + developing flow shape: amplitude grows with time
+        const amp = Math.min(1, tFrac * 3);
+        for (let i = 0; i < nV; i++) {
+          const nx = (md.positions[i*3] - xL) / xRng;
+          const ny = (md.positions[i*3+1] - yL) / yRng;
+          const pv = 0.5 * s.material.density * inletVel * inletVel * amp * (1 - nx) + 10 * Math.sin(2*Math.PI*(nx - tFrac));
+          const vv = inletVel * amp * (1 - Math.exp(-3 * ny * (1 - ny))) * (1 + 0.1 * Math.sin(6*Math.PI*tFrac));
+          pArr[i] = pv; vArr[i] = vv;
+          if (pv < pMin) pMin = pv; if (pv > pMax) pMax = pv;
+          if (vv < vMin) vMin = vv; if (vv > vMax) vMax = vv;
+        }
+        get().pushTransientSnapshot({
+          time: currentTime,
+          iteration: iter,
+          fields: [
+            { name: 'pressure', values: pArr, min: pMin, max: pMax },
+            { name: 'velocity', values: vArr, min: vMin, max: vMax },
+          ],
+        });
+      }
 
       // Max iterations: for transient, use totalTime/timeStepSize; for steady, use maxIterations
       const maxIter = isTransient
@@ -2480,6 +2718,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       id: `probe-${Date.now()}`,
       position: pos,
       values,
+      history: [],
     };
     set((s) => ({ probePoints: [...s.probePoints, probe] }));
   },
@@ -2624,4 +2863,80 @@ export const useAppStore = create<AppState>((set, get) => ({
   savedViews: [],
   addSavedView: (view) => set((s) => ({ savedViews: [...s.savedViews, view] })),
   removeSavedView: (id) => set((s) => ({ savedViews: s.savedViews.filter(v => v.id !== id) })),
+
+  // Transient snapshots
+  transientSnapshots: [],
+  activeSnapshotIndex: 0,
+  pushTransientSnapshot: (snap) => set((s) => ({ transientSnapshots: [...s.transientSnapshots, snap] })),
+  clearTransientSnapshots: () => set({ transientSnapshots: [], activeSnapshotIndex: 0 }),
+  setActiveSnapshot: (index) => set((s) => {
+    const safeIdx = Math.max(0, Math.min(s.transientSnapshots.length - 1, index));
+    const snap = s.transientSnapshots[safeIdx];
+    return {
+      activeSnapshotIndex: safeIdx,
+      fieldData: snap ? snap.fields : s.fieldData,
+    };
+  }),
+
+  // Parametric sweep
+  sweepParam: 'inletVelocity',
+  sweepRuns: [],
+  setSweepParam: (p) => set({ sweepParam: p }),
+  addSweepRun: (run) => set((s) => ({ sweepRuns: [...s.sweepRuns, run] })),
+  clearSweepRuns: () => set({ sweepRuns: [] }),
+
+  // Unit system
+  unitSystem: 'SI',
+  setUnitSystem: (u) => set({ unitSystem: u }),
+
+  // Species / reactions
+  species: [],
+  reactions: [],
+  addSpecies: (s) => set((st) => ({ species: [...st.species, s] })),
+  updateSpecies: (id, patch) => set((st) => ({ species: st.species.map(sp => sp.id === id ? { ...sp, ...patch } : sp) })),
+  removeSpecies: (id) => set((st) => ({
+    species: st.species.filter(sp => sp.id !== id),
+    reactions: st.reactions.map(r => ({
+      ...r,
+      reactants: r.reactants.filter(rx => rx.speciesId !== id),
+      products: r.products.filter(rx => rx.speciesId !== id),
+    })),
+  })),
+  addReaction: (r) => set((st) => ({ reactions: [...st.reactions, r] })),
+  updateReaction: (id, patch) => set((st) => ({ reactions: st.reactions.map(r => r.id === id ? { ...r, ...patch } : r) })),
+  removeReaction: (id) => set((st) => ({ reactions: st.reactions.filter(r => r.id !== id) })),
+
+  // Layers / custom groups
+  layers: [],
+  customGroups: [],
+  addLayer: (l) => set((st) => ({ layers: [...st.layers, l] })),
+  updateLayer: (id, patch) => set((st) => ({ layers: st.layers.map(l => l.id === id ? { ...l, ...patch } : l) })),
+  removeLayer: (id) => set((st) => ({
+    layers: st.layers.filter(l => l.id !== id),
+    // clear layerId from shapes that referenced this layer
+    shapes: st.shapes.map(sh => sh.layerId === id ? { ...sh, layerId: undefined } : sh),
+  })),
+  toggleLayerVisibility: (id) => set((st) => {
+    const layer = st.layers.find(l => l.id === id);
+    if (!layer) return {};
+    const nextVisible = !layer.visible;
+    return {
+      layers: st.layers.map(l => l.id === id ? { ...l, visible: nextVisible } : l),
+      // Apply layer visibility to all member shapes
+      shapes: st.shapes.map(sh => sh.layerId === id ? { ...sh, visible: nextVisible } : sh),
+    };
+  }),
+  assignShapeToLayer: (shapeId, layerId) => set((st) => ({
+    shapes: st.shapes.map(sh => sh.id === shapeId ? { ...sh, layerId: layerId ?? undefined } : sh),
+  })),
+  addCustomGroup: (g) => set((st) => ({ customGroups: [...st.customGroups, g] })),
+  removeCustomGroup: (id) => set((st) => ({ customGroups: st.customGroups.filter(g => g.id !== id) })),
+  addShapeToGroup: (groupId, shapeId) => set((st) => ({
+    customGroups: st.customGroups.map(g => g.id === groupId && !g.shapeIds.includes(shapeId)
+      ? { ...g, shapeIds: [...g.shapeIds, shapeId] } : g),
+  })),
+  removeShapeFromGroup: (groupId, shapeId) => set((st) => ({
+    customGroups: st.customGroups.map(g => g.id === groupId
+      ? { ...g, shapeIds: g.shapeIds.filter(id => id !== shapeId) } : g),
+  })),
 }));

@@ -1,6 +1,79 @@
-import React, { useEffect } from 'react';
-import { Divider, Typography, Empty, Card, Statistic, Row, Col, Form, Select, Checkbox, InputNumber, Slider, Button, message } from 'antd';
+import React, { useEffect, useState, useRef } from 'react';
+import { Divider, Typography, Empty, Card, Statistic, Row, Col, Form, Select, Checkbox, InputNumber, Slider, Button, Space, message } from 'antd';
+import { CaretRightOutlined, PauseOutlined } from '@ant-design/icons';
 import { useAppStore } from '../../store/useAppStore';
+
+/** Plays back transient snapshots with a slider + play/pause. */
+const TransientScrubber: React.FC = () => {
+  const snapshots = useAppStore((s) => s.transientSnapshots);
+  const activeIdx = useAppStore((s) => s.activeSnapshotIndex);
+  const setActiveSnapshot = useAppStore((s) => s.setActiveSnapshot);
+  const [playing, setPlaying] = useState(false);
+  const rafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!playing) return;
+    let frameStart = performance.now();
+    const tick = () => {
+      const now = performance.now();
+      if (now - frameStart >= 200) {
+        const next = useAppStore.getState().activeSnapshotIndex + 1;
+        const n = useAppStore.getState().transientSnapshots.length;
+        if (next >= n) {
+          setPlaying(false);
+          return;
+        }
+        setActiveSnapshot(next);
+        frameStart = now;
+      }
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  }, [playing, setActiveSnapshot]);
+
+  if (snapshots.length < 2) return null;
+  const cur = snapshots[Math.min(activeIdx, snapshots.length - 1)];
+
+  return (
+    <div style={{ padding: '8px 12px', background: '#1a1a30', margin: '4px 12px', borderRadius: 4 }}>
+      <Typography.Text strong style={{ fontSize: 11 }}>
+        Transient Playback ({snapshots.length} snapshots)
+      </Typography.Text>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+        <Button
+          size="small"
+          icon={playing ? <PauseOutlined /> : <CaretRightOutlined />}
+          onClick={() => setPlaying(!playing)}
+        />
+        <Slider
+          min={0}
+          max={snapshots.length - 1}
+          step={1}
+          value={activeIdx}
+          onChange={(v) => { setPlaying(false); setActiveSnapshot(v); }}
+          style={{ flex: 1 }}
+        />
+        <Typography.Text style={{ fontSize: 10, color: '#889', minWidth: 70, textAlign: 'right' }}>
+          t = {cur.time.toFixed(3)} s
+        </Typography.Text>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 2 }}>
+        <Space size={4}>
+          <Button size="small" onClick={() => { setPlaying(false); setActiveSnapshot(0); }}>⏮</Button>
+          <Button size="small" onClick={() => { setPlaying(false); setActiveSnapshot(activeIdx - 1); }}>◀</Button>
+          <Button size="small" onClick={() => { setPlaying(false); setActiveSnapshot(activeIdx + 1); }}>▶</Button>
+          <Button size="small" onClick={() => { setPlaying(false); setActiveSnapshot(snapshots.length - 1); }}>⏭</Button>
+        </Space>
+        <Typography.Text style={{ fontSize: 10, color: '#556' }}>
+          iter {cur.iteration} · frame {activeIdx + 1}/{snapshots.length}
+        </Typography.Text>
+      </div>
+    </div>
+  );
+};
 
 const ContourSettings: React.FC = () => {
   const contourConfig = useAppStore((s) => s.contourConfig);
@@ -92,6 +165,8 @@ const ContourSettings: React.FC = () => {
           Contour Settings
         </div>
       </div>
+
+      <TransientScrubber />
 
       <Form layout="vertical" size="small" style={{ padding: '0 12px' }}>
         <Form.Item label="Field">

@@ -238,7 +238,37 @@ const DesignRibbon: React.FC = () => {
       <GroupSep label="Orient" />
 
       {/* Sketch Group */}
-      <RibbonButton icon={<EditOutlined />} label="Sketch" onClick={() => { setActiveTool('select'); message.info('Sketch: Select faces to extrude with Pull tool.'); }} />
+      <RibbonButton icon={<EditOutlined />} label="Sketch" onClick={() => {
+        // Minimal sketch tool: prompt the user for a polygon (comma-separated x,y pairs)
+        // and build it as a Sweep shape with default depth.
+        const raw = window.prompt(
+          'Sketch polygon: comma-separated x,y pairs (e.g. 0,0 0.5,0 0.5,0.5 0,0.5)',
+          '0,0 0.5,0 0.5,0.5 0,0.5',
+        );
+        if (!raw) return;
+        const points: [number, number][] = [];
+        raw.split(/\s+|;/).forEach((pair) => {
+          const [xs, ys] = pair.split(',');
+          const x = parseFloat(xs);
+          const y = parseFloat(ys);
+          if (Number.isFinite(x) && Number.isFinite(y)) points.push([x, y]);
+        });
+        if (points.length < 3) {
+          message.error('Need at least 3 valid points to sketch a polygon.');
+          return;
+        }
+        const depthStr = window.prompt('Extrude depth (m):', '0.5');
+        const depth = Math.max(0.01, parseFloat(depthStr ?? '0.5') || 0.5);
+        const id = `shape-${nextId++}`;
+        addShape({
+          id, name: `sketch-${id}`, kind: 'sweep',
+          position: [0, 0, 0], rotation: [0, 0, 0],
+          dimensions: { profile: points, depth },
+          group: 'body',
+        });
+        setActiveTool('select');
+        message.success(`Sketch extruded: ${points.length}-gon, depth=${depth}m`);
+      }} />
       <GroupSep label="Sketch" />
 
       {/* Select/Pull/Move/Fill Group */}
@@ -312,6 +342,46 @@ const DesignRibbon: React.FC = () => {
       <RibbonButton icon={<AimOutlined />} label="Cone" onClick={() => create('cone')} />
       <RibbonButton icon={<RetweetOutlined />} label="Torus" onClick={() => create('torus')} />
       <RibbonButton icon={<GatewayOutlined />} label="Pipe" onClick={() => create('pipe')} />
+      <RibbonButton icon={<SyncOutlined />} label="Revolve" onClick={() => {
+        // Revolve a cup-like profile around Y axis
+        const id = `shape-${nextId++}`;
+        addShape({
+          id, name: `revolve-${id}`, kind: 'revolve',
+          position: [0, 0, 0], rotation: [0, 0, 0],
+          dimensions: {
+            profile: [[0.1, -0.5], [0.5, -0.5], [0.5, 0.4], [0.35, 0.4], [0.35, -0.3], [0.1, -0.3]],
+          },
+          group: 'body',
+        });
+        message.success('Revolve geometry created.');
+      }} />
+      <RibbonButton icon={<ColumnHeightOutlined />} label="Sweep" onClick={() => {
+        // Sweep (extrude) a hexagonal profile along Z
+        const id = `shape-${nextId++}`;
+        const hex: [number, number][] = [];
+        for (let k = 0; k < 6; k++) {
+          const a = (k / 6) * Math.PI * 2;
+          hex.push([0.4 * Math.cos(a), 0.4 * Math.sin(a)]);
+        }
+        addShape({
+          id, name: `sweep-${id}`, kind: 'sweep',
+          position: [0, 0, 0], rotation: [0, 0, 0],
+          dimensions: { profile: hex, depth: 1.0 },
+          group: 'body',
+        });
+        message.success('Sweep geometry created (hexagonal profile).');
+      }} />
+      <RibbonButton icon={<BlockOutlined />} label="Loft" onClick={() => {
+        // Loft between a large square at z=-0.5 and small square at z=+0.5
+        const id = `shape-${nextId++}`;
+        addShape({
+          id, name: `loft-${id}`, kind: 'loft',
+          position: [0, 0, 0], rotation: [0, 0, 0],
+          dimensions: { width: 0.8, height: 0.8, depth: 1.5, endWidth: 0.25, endHeight: 0.25 },
+          group: 'body',
+        });
+        message.success('Loft geometry created (tapered).');
+      }} />
       <GroupSep label="Create" />
 
       {/* Reference Geometry */}

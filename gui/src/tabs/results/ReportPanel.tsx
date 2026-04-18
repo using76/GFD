@@ -471,17 +471,40 @@ ${s.residuals.length > 0 ? (() => { const r = s.residuals[s.residuals.length-1];
         <>
           <Divider style={{ margin: '12px 0' }} />
           <Typography.Text strong>Probe Points ({probePoints.length})</Typography.Text>
-          <div style={{ marginTop: 8, fontSize: 11, maxHeight: 120, overflow: 'auto' }}>
-            {probePoints.map((p) => (
-              <div key={p.id} style={{ padding: '3px 0', color: '#aab', borderBottom: '1px solid #252540' }}>
-                <div style={{ color: '#ff6666', fontSize: 10 }}>
-                  ({p.position[0].toFixed(2)}, {p.position[1].toFixed(2)}, {p.position[2].toFixed(2)})
+          <div style={{ marginTop: 8, fontSize: 11, maxHeight: 320, overflow: 'auto' }}>
+            {probePoints.map((p) => {
+              const histData = p.history.map(h => ({
+                t: h.time,
+                pressure: h.values.pressure,
+                velocity: h.values.velocity,
+                temperature: h.values.temperature,
+              }));
+              return (
+                <div key={p.id} style={{ padding: '4px 0', color: '#aab', borderBottom: '1px solid #252540' }}>
+                  <div style={{ color: '#ff6666', fontSize: 10 }}>
+                    ({p.position[0].toFixed(2)}, {p.position[1].toFixed(2)}, {p.position[2].toFixed(2)})
+                  </div>
+                  {Object.entries(p.values).map(([name, val]) => (
+                    <span key={name} style={{ marginRight: 8 }}>{name}={val.toFixed(4)}</span>
+                  ))}
+                  {histData.length > 2 && (
+                    <div style={{ width: '100%', height: 80, marginTop: 4 }}>
+                      <ResponsiveContainer width="100%" height={80} minWidth={100}>
+                        <LineChart data={histData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#222" />
+                          <XAxis dataKey="t" tick={{ fontSize: 8 }} stroke="#556" />
+                          <YAxis tick={{ fontSize: 8 }} stroke="#556" />
+                          <Tooltip contentStyle={{ background: '#1f1f1f', border: '1px solid #444', fontSize: 10 }} />
+                          {histData[0]?.pressure !== undefined && <Line type="monotone" dataKey="pressure" stroke="#1668dc" dot={false} strokeWidth={1} isAnimationActive={false} />}
+                          {histData[0]?.velocity !== undefined && <Line type="monotone" dataKey="velocity" stroke="#52c41a" dot={false} strokeWidth={1} isAnimationActive={false} />}
+                          {histData[0]?.temperature !== undefined && <Line type="monotone" dataKey="temperature" stroke="#fa8c16" dot={false} strokeWidth={1} isAnimationActive={false} />}
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  )}
                 </div>
-                {Object.entries(p.values).map(([name, val]) => (
-                  <span key={name} style={{ marginRight: 8 }}>{name}={val.toFixed(4)}</span>
-                ))}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </>
       )}
