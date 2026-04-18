@@ -23,17 +23,24 @@ const COLORS = {
 const ResidualPlot: React.FC = () => {
   const residuals = useAppStore((s) => s.residuals);
   const tolerance = useAppStore((s) => s.solverSettings.tolerance);
+  const structural = useAppStore((s) => s.physicsModels.structural);
+
+  // In structural mode, the ResidualPoint slots hold different physical quantities.
+  const labels = structural
+    ? { continuity: 'Δu / u', xMomentum: 'Δu_x', yMomentum: 'Δu_y', energy: 'Stress res.' }
+    : { continuity: 'continuity', xMomentum: 'x-Momentum', yMomentum: 'y-Momentum', energy: 'energy' };
 
   const data = useMemo(
     () =>
       residuals.map((r) => ({
         iteration: r.iteration,
-        continuity: r.continuity,
-        xMomentum: r.xMomentum,
-        yMomentum: r.yMomentum,
-        energy: r.energy,
+        [labels.continuity]: r.continuity,
+        [labels.xMomentum]: r.xMomentum,
+        [labels.yMomentum]: r.yMomentum,
+        [labels.energy]: r.energy,
       })),
-    [residuals]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [residuals, structural]
   );
 
   if (data.length === 0) {
@@ -63,7 +70,7 @@ const ResidualPlot: React.FC = () => {
       }}
     >
       <Typography.Text strong style={{ marginBottom: 8 }}>
-        Residual Convergence
+        {structural ? 'Structural Convergence (displacement & stress norms)' : 'Residual Convergence'}
       </Typography.Text>
       <div style={{ flex: 1, minHeight: 200 }}>
         <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={200}>
@@ -100,7 +107,7 @@ const ResidualPlot: React.FC = () => {
             />
             <Line
               type="monotone"
-              dataKey="continuity"
+              dataKey={labels.continuity}
               stroke={COLORS.continuity}
               dot={false}
               strokeWidth={1.5}
@@ -108,7 +115,7 @@ const ResidualPlot: React.FC = () => {
             />
             <Line
               type="monotone"
-              dataKey="xMomentum"
+              dataKey={labels.xMomentum}
               stroke={COLORS.xMomentum}
               dot={false}
               strokeWidth={1.5}
@@ -116,7 +123,7 @@ const ResidualPlot: React.FC = () => {
             />
             <Line
               type="monotone"
-              dataKey="yMomentum"
+              dataKey={labels.yMomentum}
               stroke={COLORS.yMomentum}
               dot={false}
               strokeWidth={1.5}
@@ -124,7 +131,7 @@ const ResidualPlot: React.FC = () => {
             />
             <Line
               type="monotone"
-              dataKey="energy"
+              dataKey={labels.energy}
               stroke={COLORS.energy}
               dot={false}
               strokeWidth={1.5}

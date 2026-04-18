@@ -720,6 +720,16 @@ fn handle_solve_start(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
         .get("poisson_ratio")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.3);
+    // Parallel / accelerator flags (logged only; actual GPU/MPI routing is feature-gated)
+    let use_gpu = params.get("use_gpu").and_then(|v| v.as_bool()).unwrap_or(false);
+    let use_mpi = params.get("use_mpi").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mpi_cores = params.get("mpi_cores").and_then(|v| v.as_u64()).unwrap_or(1);
+    if use_gpu {
+        eprintln!("[gfd-server] GPU acceleration requested — routing CPU path (build with --features gpu for CUDA).");
+    }
+    if use_mpi {
+        eprintln!("[gfd-server] MPI requested with {} cores — running single-process (MPI not yet wired).", mpi_cores);
+    }
 
     let physics = params
         .get("physics")

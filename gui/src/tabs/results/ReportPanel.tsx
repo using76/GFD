@@ -42,11 +42,78 @@ const ReportPanel: React.FC = () => {
     return sum + material.density * vMag * approxArea;
   }, 0);
 
-  // Estimate force coefficients from pressure field
+  // ---- REAL force integration on wall boundaries ----
+  // Build per-triangle contribution F_tri = p · n_tri · A_tri + τ_wall · t_tri · A_tri
+  // τ_wall estimated via Schlichting flat-plate Cf on inlet Re.
   const refVelocity = inletBCs.length > 0 ? Math.sqrt(inletBCs[0].velocity[0] ** 2 + inletBCs[0].velocity[1] ** 2 + inletBCs[0].velocity[2] ** 2) : 1;
   const refDynPressure = 0.5 * material.density * refVelocity ** 2;
-  const cd = isConverged && pressureField ? (pressureField.max - pressureField.min) / (refDynPressure || 1) * 0.01 : NaN;
-  const cl = isConverged ? cd * 0.15 : NaN;
+
+  const wallForce: { fx: number; fy: number; fz: number; area: number } = { fx: 0, fy: 0, fz: 0, area: 0 };
+  if (pressureField && meshDisplayData && meshDisplayData.positions.length > 0) {
+    const pos = meshDisplayData.positions;
+    const vals = pressureField.values;
+    const nTris = pos.length / 9;
+    // Estimate inlet-based wall shear once
+    const nu = material.viscosity / Math.max(material.density, 1e-12);
+    const Re = refVelocity * 1.0 / Math.max(nu, 1e-18);
+    const Cf = Re > 0 ? 0.058 * Math.pow(Math.max(Re, 1), -0.2) : 0.005;
+    const tauW = 0.5 * Cf * material.density * refVelocity * refVelocity;
+
+    // Bounds for detecting external-domain faces vs. body-wall faces
+    let xMinB = Infinity, xMaxB = -Infinity, yMinB = Infinity, yMaxB = -Infinity, zMinB = Infinity, zMaxB = -Infinity;
+    const np = pos.length / 3;
+    for (let i = 0; i < np; i++) {
+      if (pos[i*3] < xMinB) xMinB = pos[i*3]; if (pos[i*3] > xMaxB) xMaxB = pos[i*3];
+      if (pos[i*3+1] < yMinB) yMinB = pos[i*3+1]; if (pos[i*3+1] > yMaxB) yMaxB = pos[i*3+1];
+      if (pos[i*3+2] < zMinB) zMinB = pos[i*3+2]; if (pos[i*3+2] > zMaxB) zMaxB = pos[i*3+2];
+    }
+    const tolX = Math.max((xMaxB - xMinB) * 0.01, 1e-4);
+
+    for (let t = 0; t < nTris; t++) {
+      const ax = pos[t*9], ay = pos[t*9+1], az = pos[t*9+2];
+      const bx = pos[t*9+3], by = pos[t*9+4], bz = pos[t*9+5];
+      const cx = pos[t*9+6], cy = pos[t*9+7], cz = pos[t*9+8];
+      // Centroid x-coord (only x needed to detect inlet/outlet face)
+      const mx = (ax + bx + cx) / 3;
+      // Skip inlet/outlet patches — only walls contribute to Cd/Cl
+      const onInlet = Math.abs(mx - xMinB) < tolX;
+      const onOutlet = Math.abs(mx - xMaxB) < tolX;
+      if (onInlet || onOutlet) continue;
+      // Triangle normal (CCW outward for our mesh generator)
+      const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+      const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+      const ncx = e1y * e2z - e1z * e2y;
+      const ncy = e1z * e2x - e1x * e2z;
+      const ncz = e1x * e2y - e1y * e2x;
+      const areaN = Math.sqrt(ncx * ncx + ncy * ncy + ncz * ncz);
+      if (areaN < 1e-18) continue;
+      const area = areaN * 0.5;
+      const nx = ncx / areaN, ny = ncy / areaN, nz = ncz / areaN;
+      // Vertex pressure average
+      const pAvg = ((vals[t*3] ?? 0) + (vals[t*3+1] ?? 0) + (vals[t*3+2] ?? 0)) / 3;
+      // Skip trivially zero surfaces
+      // Force from pressure: F_p = −p·n·A (pressure pushes into fluid, so force on body = −p n A)
+      wallForce.fx += -pAvg * nx * area;
+      wallForce.fy += -pAvg * ny * area;
+      wallForce.fz += -pAvg * nz * area;
+      // Add viscous shear in the x-flow direction tangent
+      // Tangent ~ flow direction projected onto face (simple: x-axis component perpendicular to n)
+      const tflow = [1, 0, 0];
+      const dot = tflow[0] * nx + tflow[1] * ny + tflow[2] * nz;
+      const tx = tflow[0] - dot * nx;
+      const ty = tflow[1] - dot * ny;
+      const tz = tflow[2] - dot * nz;
+      const tLen = Math.sqrt(tx * tx + ty * ty + tz * tz) || 1;
+      wallForce.fx += tauW * (tx / tLen) * area;
+      wallForce.fy += tauW * (ty / tLen) * area;
+      wallForce.fz += tauW * (tz / tLen) * area;
+      wallForce.area += area;
+    }
+  }
+  // Coefficients — project drag on flow direction (x), lift on perpendicular (y)
+  const refArea = Math.max(wallForce.area * 0.5, 1e-6);
+  const cd = isConverged ? wallForce.fx / Math.max(refDynPressure * refArea, 1e-9) : NaN;
+  const cl = isConverged ? wallForce.fy / Math.max(refDynPressure * refArea, 1e-9) : NaN;
 
   // Pressure stats
   let avgPressure = 0, minPressure = 0, maxPressure = 0;
@@ -238,6 +305,11 @@ ${s.residuals.length > 0 ? (() => { const r = s.residuals[s.residuals.length-1];
           </Card>
         </Col>
       </Row>
+      {isConverged && wallForce.area > 0 && (
+        <div style={{ marginTop: 6, padding: 6, background: '#1a1a30', borderRadius: 4, fontSize: 10, color: '#778' }}>
+          Wall force vector (N): Fx={wallForce.fx.toExponential(2)}, Fy={wallForce.fy.toExponential(2)}, Fz={wallForce.fz.toExponential(2)} — integrated over {wallForce.area.toFixed(3)} m² of wall triangles
+        </div>
+      )}
 
       <Divider style={{ margin: '12px 0' }} />
 

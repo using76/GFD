@@ -225,6 +225,24 @@ export interface SolverSettings {
   totalTime: number;
 }
 
+/** User-saved camera bookmark (position + look-at target) */
+export interface SavedView {
+  id: string;
+  name: string;
+  position: [number, number, number];
+  target: [number, number, number];
+}
+
+/** Field initial values applied before the first iteration / time step */
+export interface InitialConditions {
+  pressure: number;
+  velocity: [number, number, number];
+  temperature: number;
+  tke: number;
+  /** true means initialise to inlet BC values instead of constants above */
+  initFromInlet: boolean;
+}
+
 // ---- Calculation types ----
 export type SolverStatus = 'idle' | 'running' | 'paused' | 'finished';
 
@@ -255,7 +273,9 @@ export type ResultField =
   | 'displacement_mag'
   | 'displacement_x'
   | 'displacement_y'
-  | 'displacement_z';
+  | 'displacement_z'
+  | 'mach'
+  | 'density';
 
 export interface ContourConfig {
   field: ResultField;
@@ -468,6 +488,7 @@ interface AppState {
   boundaries: BoundaryCondition[];
   solverSettings: SolverSettings;
   selectedBoundaryId: string | null;
+  initialConditions: InitialConditions;
   updatePhysicsModels: (patch: Partial<PhysicsModels>) => void;
   updateMaterial: (patch: Partial<Material>) => void;
   addBoundary: (bc: BoundaryCondition) => void;
@@ -475,6 +496,7 @@ interface AppState {
   removeBoundary: (id: string) => void;
   selectBoundary: (id: string | null) => void;
   updateSolverSettings: (patch: Partial<SolverSettings>) => void;
+  updateInitialConditions: (patch: Partial<InitialConditions>) => void;
 
   // Calculation
   solverStatus: SolverStatus;
@@ -625,6 +647,11 @@ interface AppState {
   // MPI core count
   mpiCores: number;
   setMpiCores: (v: number) => void;
+
+  // Saved camera views (bookmarks)
+  savedViews: SavedView[];
+  addSavedView: (view: SavedView) => void;
+  removeSavedView: (id: string) => void;
 }
 
 let solverInterval: ReturnType<typeof setInterval> | null = null;
@@ -693,6 +720,7 @@ function buildBackendSolveParams(state: AppState): Record<string, unknown> {
 
   return {
     physics,
+    flow: state.physicsModels.flow,
     max_iterations: state.solverSettings.maxIterations,
     tolerance: state.solverSettings.tolerance,
     density: state.material.density,
@@ -707,6 +735,24 @@ function buildBackendSolveParams(state: AppState): Record<string, unknown> {
     multiphase: state.physicsModels.multiphase,
     species: state.physicsModels.species,
     energy: state.physicsModels.energy,
+    // Parallel / accelerator flags
+    use_gpu: state.useGpu,
+    use_mpi: state.useMpi,
+    mpi_cores: state.mpiCores,
+    // Time stepping
+    time_mode: state.solverSettings.timeMode,
+    time_step_size: state.solverSettings.timeStepSize,
+    total_time: state.solverSettings.totalTime,
+    // Initial field values (solver start state)
+    initial_conditions: {
+      pressure: state.initialConditions.pressure,
+      vx: state.initialConditions.velocity[0],
+      vy: state.initialConditions.velocity[1],
+      vz: state.initialConditions.velocity[2],
+      temperature: state.initialConditions.temperature,
+      tke: state.initialConditions.tke,
+      init_from_inlet: state.initialConditions.initFromInlet,
+    },
     boundary_conditions: rpcBcs,
   };
 }
@@ -1087,14 +1133,30 @@ export const useAppStore = create<AppState>((set, get) => ({
         ['sphere', 'cylinder', 'cone', 'torus', 'pipe', 'stl'].includes(s.kind)
       );
       const curveFactor = state.meshConfig.curvatureRefine && hasCurvedBodies ? 1.5 : 1.0;
-      // Refinement zones: increase resolution if any zones are defined
+      // Refinement zones: only LOCALLY refine inside the zone AABB (level N → subdivide that cell N-1 times)
       const refZones = state.refinementZones;
-      const maxRefLevel = refZones.length > 0 ? Math.max(...refZones.map(z => z.level)) : 1;
-      const refineFactor = maxRefLevel > 1 ? Math.min(maxRefLevel, 4) : 1;
-      const effectiveGs = gs / (curveFactor * refineFactor);
+      const refZoneAABBs = refZones.map(z => ({
+        min: [z.center[0] - z.size[0] / 2, z.center[1] - z.size[1] / 2, z.center[2] - z.size[2] / 2] as [number, number, number],
+        max: [z.center[0] + z.size[0] / 2, z.center[1] + z.size[1] / 2, z.center[2] + z.size[2] / 2] as [number, number, number],
+        level: Math.max(1, Math.min(4, z.level | 0)),
+      }));
+      const effectiveGs = gs / curveFactor;
       const nx = Math.max(3, effectiveGs > 0 ? Math.round(domainLx / effectiveGs) : 20);
       const ny = Math.max(3, effectiveGs > 0 ? Math.round(domainLy / effectiveGs) : 20);
       const nz = Math.max(3, effectiveGs > 0 ? Math.round(domainLz / effectiveGs) : 20);
+
+      /** Return the maximum refinement level that applies at (x,y,z); 1 = no extra refinement. */
+      const refinementAt = (x: number, y: number, z: number): number => {
+        let lvl = 1;
+        for (const zone of refZoneAABBs) {
+          if (x >= zone.min[0] && x <= zone.max[0] &&
+              y >= zone.min[1] && y <= zone.max[1] &&
+              z >= zone.min[2] && z <= zone.max[2]) {
+            if (zone.level > lvl) lvl = zone.level;
+          }
+        }
+        return lvl;
+      };
 
       const dx = domainLx / nx;
       const dz = domainLz / nz;
@@ -1332,8 +1394,42 @@ export const useAppStore = create<AppState>((set, get) => ({
         x1: number, y1: number, z1: number,
         x2: number, y2: number, z2: number,
         x3: number, y3: number, z3: number,
-        color: [number, number, number]
+        color: [number, number, number],
+        refineLevel: number = 1,
       ) {
+        // Localized refinement: subdivide the face into refineLevel² sub-quads via bilinear interp
+        if (refineLevel > 1) {
+          const n = Math.min(4, refineLevel);
+          const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+          const pAt = (u: number, v: number): [number, number, number] => {
+            // Bilinear on the quad with corners (0,1,2,3) => (u=0,v=0), (u=1,v=0), (u=0,v=1), (u=1,v=1)
+            const xA = lerp(x0, x1, u), yA = lerp(y0, y1, u), zA = lerp(z0, z1, u);
+            const xB = lerp(x2, x3, u), yB = lerp(y2, y3, u), zB = lerp(z2, z3, u);
+            return [lerp(xA, xB, v), lerp(yA, yB, v), lerp(zA, zB, v)];
+          };
+          for (let iv = 0; iv < n; iv++) {
+            for (let iu = 0; iu < n; iu++) {
+              const u0 = iu / n, u1 = (iu + 1) / n;
+              const v0 = iv / n, v1 = (iv + 1) / n;
+              const [ax, ay, az] = pAt(u0, v0);
+              const [bx, by, bz] = pAt(u1, v0);
+              const [cx, cy, cz] = pAt(u0, v1);
+              const [dx2, dy2, dz2] = pAt(u1, v1);
+              // two triangles
+              triPositions.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+              triPositions.push(bx, by, bz, dx2, dy2, dz2, cx, cy, cz);
+              for (let v = 0; v < 6; v++) triColors.push(color[0], color[1], color[2]);
+              wirePositions.push(
+                ax, ay, az, bx, by, bz,
+                bx, by, bz, dx2, dy2, dz2,
+                dx2, dy2, dz2, cx, cy, cz,
+                cx, cy, cz, ax, ay, az,
+              );
+            }
+          }
+          return;
+        }
+
         if (isTet) {
           // Tet mesh: subdivide quad into 4 triangles via center point
           const cx = (x0 + x1 + x2 + x3) / 4;
@@ -1394,42 +1490,44 @@ export const useAppStore = create<AppState>((set, get) => ({
             const y1 = yCoords[j + 1];
             const z0 = domainMin[2] + k * dz;
             const z1 = z0 + dz;
+            const cxCell = (x0 + x1) * 0.5, cyCell = (y0 + y1) * 0.5, czCell = (z0 + z1) * 0.5;
+            const refLvl = refinementAt(cxCell, cyCell, czCell);
 
             // -X face: visible if i==0 or neighbor is solid
             if (i === 0 || cellTypes[k * nyActual * nx + j * nx + (i - 1)] === 1) {
               const faceType = i === 0 ? 'xmin' : 'solid_interface';
               const color = getBoundaryFaceColor(faceType);
-              addQuadWithColor(x0, y0, z0, x0, y1, z0, x0, y0, z1, x0, y1, z1, color);
+              addQuadWithColor(x0, y0, z0, x0, y1, z0, x0, y0, z1, x0, y1, z1, color, refLvl);
             }
             // +X face
             if (i === nx - 1 || cellTypes[k * nyActual * nx + j * nx + (i + 1)] === 1) {
               const faceType = i === nx - 1 ? 'xmax' : 'solid_interface';
               const color = getBoundaryFaceColor(faceType);
-              addQuadWithColor(x1, y0, z0, x1, y0, z1, x1, y1, z0, x1, y1, z1, color);
+              addQuadWithColor(x1, y0, z0, x1, y0, z1, x1, y1, z0, x1, y1, z1, color, refLvl);
             }
             // -Y face
             if (j === 0 || cellTypes[k * nyActual * nx + (j - 1) * nx + i] === 1) {
               const faceType = j === 0 ? 'ymin' : 'solid_interface';
               const color = getBoundaryFaceColor(faceType);
-              addQuadWithColor(x0, y0, z0, x0, y0, z1, x1, y0, z0, x1, y0, z1, color);
+              addQuadWithColor(x0, y0, z0, x0, y0, z1, x1, y0, z0, x1, y0, z1, color, refLvl);
             }
             // +Y face
             if (j === nyActual - 1 || cellTypes[k * nyActual * nx + (j + 1) * nx + i] === 1) {
               const faceType = j === nyActual - 1 ? 'ymax' : 'solid_interface';
               const color = getBoundaryFaceColor(faceType);
-              addQuadWithColor(x0, y1, z0, x1, y1, z0, x0, y1, z1, x1, y1, z1, color);
+              addQuadWithColor(x0, y1, z0, x1, y1, z0, x0, y1, z1, x1, y1, z1, color, refLvl);
             }
             // -Z face
             if (k === 0 || cellTypes[(k - 1) * nyActual * nx + j * nx + i] === 1) {
               const faceType = k === 0 ? 'zmin' : 'solid_interface';
               const color = getBoundaryFaceColor(faceType);
-              addQuadWithColor(x0, y0, z0, x1, y0, z0, x0, y1, z0, x1, y1, z0, color);
+              addQuadWithColor(x0, y0, z0, x1, y0, z0, x0, y1, z0, x1, y1, z0, color, refLvl);
             }
             // +Z face
             if (k === nz - 1 || cellTypes[(k + 1) * nyActual * nx + j * nx + i] === 1) {
               const faceType = k === nz - 1 ? 'zmax' : 'solid_interface';
               const color = getBoundaryFaceColor(faceType);
-              addQuadWithColor(x0, y0, z1, x0, y1, z1, x1, y0, z1, x1, y1, z1, color);
+              addQuadWithColor(x0, y0, z1, x0, y1, z1, x1, y0, z1, x1, y1, z1, color, refLvl);
             }
           }
         }
@@ -1543,7 +1641,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         `[${now}] [Mesh] Global size: ${gs}, Growth rate: ${state.meshConfig.growthRate}`,
         `[${now}] [Mesh] Grid: ${nx} x ${nyActual} x ${nz} = ${totalCells} cells (${nodeCount} nodes)`,
         ...(nPrismLayers > 0 ? [`[${now}] [Mesh] Boundary layers: ${nPrismLayers} layers, first height=${firstH}m, ratio=${layerR}`] : []),
-        ...(refZones.length > 0 ? [`[${now}] [Mesh] Refinement zones: ${refZones.length} (max level ${maxRefLevel}x)`] : []),
+        ...(refZones.length > 0 ? [`[${now}] [Mesh] Refinement zones: ${refZones.length} (localized, levels: ${refZones.map(z => z.level).join(', ')})`] : []),
       ];
       if (solidCellCount > 0) {
         logLines.push(`[${now}] [Mesh] Solid cells excluded: ${solidCellCount} (${bodyShapes.length} solid bodies detected)`);
@@ -1669,6 +1767,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     totalTime: 1.0,
   },
   selectedBoundaryId: null,
+  initialConditions: {
+    pressure: 0,
+    velocity: [0, 0, 0],
+    temperature: 300,
+    tke: 0.01,
+    initFromInlet: true,
+  },
+  updateInitialConditions: (patch) =>
+    set((s) => ({ initialConditions: { ...s.initialConditions, ...patch } })),
   updatePhysicsModels: (patch) =>
     set((s) => ({ physicsModels: { ...s.physicsModels, ...patch } })),
   updateMaterial: (patch) =>
@@ -1772,6 +1879,9 @@ export const useAppStore = create<AppState>((set, get) => ({
             `[${now}] [GFD] Transient: dt=${state.solverSettings.timeStepSize}s, T_end=${state.solverSettings.totalTime}s, steps=${Math.ceil(state.solverSettings.totalTime / state.solverSettings.timeStepSize)}`,
           ] : []),
           `[${now}] [GFD] Initializing fields...`,
+          (state.initialConditions.initFromInlet
+            ? `[${now}] [GFD] IC: using inlet BC (v=[${state.boundaries.find(b=>b.type==='inlet')?.velocity.join(',') ?? '0,0,0'}], T=${state.boundaries.find(b=>b.type==='inlet')?.temperature ?? 300})`
+            : `[${now}] [GFD] IC: p0=${state.initialConditions.pressure}, U0=[${state.initialConditions.velocity.join(',')}], T0=${state.initialConditions.temperature}`),
           `[${now}] [GFD] Solver started.`,
           `[${now}] [GFD] ---`,
         ];
@@ -1920,13 +2030,24 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Seeded pseudo-random noise (deterministic per iteration)
       const noise = (seed: number) => Math.sin(seed * 12.9898 + iter * 78.233) * 0.5 + 0.5;
       const energyEnabled = s.physicsModels.energy;
-      const point: ResidualPoint = {
-        iteration: iter,
-        continuity: 1e-1 * decay * (0.85 + 0.3 * noise(1)),
-        xMomentum: 5e-2 * decay * (0.85 + 0.3 * noise(2)),
-        yMomentum: 5e-2 * decay * (0.85 + 0.3 * noise(3)),
-        energy: energyEnabled ? 1e-2 * decay * (0.85 + 0.3 * noise(4)) : 0,
-      };
+      // Structural re-uses the ResidualPoint slots with physical meaning:
+      //   continuity → displacement_rel (||Δu||/||u||), xMomentum → disp_x residual,
+      //   yMomentum  → disp_y residual,              energy     → stress residual
+      const point: ResidualPoint = s.physicsModels.structural
+        ? {
+            iteration: iter,
+            continuity: 5e-2 * decay * (0.85 + 0.3 * noise(11)),
+            xMomentum: 3e-2 * decay * (0.85 + 0.3 * noise(12)),
+            yMomentum: 3e-2 * decay * (0.85 + 0.3 * noise(13)),
+            energy: 2e-2 * decay * (0.85 + 0.3 * noise(14)),
+          }
+        : {
+            iteration: iter,
+            continuity: 1e-1 * decay * (0.85 + 0.3 * noise(1)),
+            xMomentum: 5e-2 * decay * (0.85 + 0.3 * noise(2)),
+            yMomentum: 5e-2 * decay * (0.85 + 0.3 * noise(3)),
+            energy: energyEnabled ? 1e-2 * decay * (0.85 + 0.3 * noise(4)) : 0,
+          };
       const ts = new Date().toLocaleTimeString();
       const isTransient = s.solverSettings.timeMode === 'transient';
       const currentTime = isTransient ? iter * s.solverSettings.timeStepSize : 0;
@@ -2131,6 +2252,37 @@ export const useAppStore = create<AppState>((set, get) => ({
               if (specValues[i] > sMax) sMax = specValues[i];
             }
             fields.push({ name: 'species_Y', values: specValues, min: sMin, max: sMax });
+          }
+
+          // Compressible flow extras: density variation, Mach number, total temperature
+          if (s.physicsModels.flow === 'compressible') {
+            const gamma = 1.4;
+            const R_gas = 287.0;
+            const T0 = inletTemp;
+            const a0 = Math.sqrt(gamma * R_gas * Math.max(T0, 1));
+            const Ma_inlet = inletVel / Math.max(a0, 1);
+            const rho_inlet = mat.density;
+
+            const rhoVals = new Float32Array(nVerts);
+            const machVals = new Float32Array(nVerts);
+            let rhoMin = Infinity, rhoMax = -Infinity;
+            let maMin = Infinity, maMax = -Infinity;
+            for (let i = 0; i < nVerts; i++) {
+              const x = (meshData.positions[i * 3] - xMin) / xRange;
+              const y = (meshData.positions[i * 3 + 1] - yMin) / yRange;
+              // Mach number accelerates through contraction — peak near mid-duct, decays downstream
+              const accel = 1 + 0.6 * Math.sin(Math.PI * x) * (1 - 0.3 * Math.abs(y - 0.5));
+              const Ma = Ma_inlet * accel;
+              machVals[i] = Ma;
+              // Isentropic density: ρ/ρ₀ = (1 + (γ−1)/2 · M²)^(−1/(γ−1))
+              const ratio = Math.pow(1 + 0.5 * (gamma - 1) * Ma * Ma, -1 / (gamma - 1));
+              const rho = rho_inlet * ratio;
+              rhoVals[i] = rho;
+              if (Ma < maMin) maMin = Ma; if (Ma > maMax) maMax = Ma;
+              if (rho < rhoMin) rhoMin = rho; if (rho > rhoMax) rhoMax = rho;
+            }
+            fields.push({ name: 'mach', values: machVals, min: maMin, max: maMax });
+            fields.push({ name: 'density', values: rhoVals, min: rhoMin, max: rhoMax });
           }
 
           // Wall y+ field
@@ -2467,4 +2619,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   // MPI core count
   mpiCores: 4,
   setMpiCores: (v) => set({ mpiCores: v }),
+
+  // Saved camera views
+  savedViews: [],
+  addSavedView: (view) => set((s) => ({ savedViews: [...s.savedViews, view] })),
+  removeSavedView: (id) => set((s) => ({ savedViews: s.savedViews.filter(v => v.id !== id) })),
 }));

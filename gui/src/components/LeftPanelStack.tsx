@@ -27,7 +27,7 @@ import {
   CheckCircleOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
-import { Tree } from 'antd';
+import { Tree, Button, message } from 'antd';
 import type { TreeDataNode } from 'antd';
 import { useAppStore } from '../store/useAppStore';
 import type { RepairIssueKind } from '../store/useAppStore';
@@ -42,6 +42,7 @@ import ModelsPanel from '../tabs/setup/ModelsPanel';
 import MaterialPanel from '../tabs/setup/MaterialPanel';
 import BoundaryPanel from '../tabs/setup/BoundaryPanel';
 import SolverSettingsPanel from '../tabs/setup/SolverSettingsPanel';
+import InitialConditionsPanel from '../tabs/setup/InitialConditionsPanel';
 import RunControls from '../tabs/calc/RunControls';
 import ContourSettings from '../tabs/results/ContourSettings';
 import VectorSettings from '../tabs/results/VectorSettings';
@@ -86,6 +87,77 @@ const CollapsiblePanel: React.FC<{
       {isOpen && (
         <div style={{ maxHeight: 400, overflow: 'auto' }}>
           {children}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================
+// Saved Views (camera bookmarks)
+// ============================================================
+const SavedViewsList: React.FC = () => {
+  const savedViews = useAppStore((s) => s.savedViews);
+  const addSavedView = useAppStore((s) => s.addSavedView);
+  const removeSavedView = useAppStore((s) => s.removeSavedView);
+
+  const saveCurrent = () => {
+    // Ask the Viewport to capture and respond via gfd-camera-captured
+    const onCaptured = (e: Event) => {
+      const d = (e as CustomEvent).detail as { position: [number, number, number]; target: [number, number, number] };
+      window.removeEventListener('gfd-camera-captured', onCaptured);
+      const defaultName = `View ${savedViews.length + 1}`;
+      const name = prompt('Name for this view:', defaultName) ?? defaultName;
+      if (!name) return;
+      addSavedView({ id: `view-${Date.now()}`, name, position: d.position, target: d.target });
+      message.success(`Saved view: ${name}`);
+    };
+    window.addEventListener('gfd-camera-captured', onCaptured);
+    window.dispatchEvent(new CustomEvent('gfd-camera-capture'));
+  };
+
+  const restoreView = (v: { position: [number, number, number]; target: [number, number, number] }) => {
+    window.dispatchEvent(new CustomEvent('gfd-camera-restore', { detail: v }));
+  };
+
+  return (
+    <div style={{ padding: 8 }}>
+      <Button size="small" block type="primary" onClick={saveCurrent} style={{ marginBottom: 6 }}>
+        Save Current View
+      </Button>
+      {savedViews.length === 0 ? (
+        <div style={{ padding: 8, color: '#667', fontSize: 11 }}>
+          No saved views yet. Click "Save Current View" to bookmark the current camera.
+        </div>
+      ) : (
+        <div style={{ maxHeight: 220, overflow: 'auto' }}>
+          {savedViews.map((v) => (
+            <div
+              key={v.id}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '4px 6px', borderBottom: '1px solid #1a1a30', fontSize: 11,
+              }}
+            >
+              <span
+                onClick={() => restoreView(v)}
+                style={{ color: '#4096ff', cursor: 'pointer', flex: 1 }}
+                title="Click to restore"
+              >
+                {v.name}
+              </span>
+              <span style={{ color: '#556', fontSize: 10, marginRight: 6 }}>
+                ({v.position.map(n => n.toFixed(1)).join(', ')})
+              </span>
+              <span
+                onClick={() => removeSavedView(v.id)}
+                style={{ color: '#ff4d4f', cursor: 'pointer', fontSize: 10, padding: '0 4px' }}
+                title="Delete"
+              >
+                x
+              </span>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -229,7 +301,7 @@ const StructureSubTabs: React.FC = () => {
       {subTab === 'layers' && <div style={{ padding: 12, color: '#667', fontSize: 11 }}>No layers defined.</div>}
       {subTab === 'groups' && <div style={{ padding: 12, color: '#667', fontSize: 11 }}>No groups defined.</div>}
       {subTab === 'selection' && <div style={{ padding: 12, color: '#667', fontSize: 11 }}>No selections active.</div>}
-      {subTab === 'views' && <div style={{ padding: 12, color: '#667', fontSize: 11 }}>Saved views will appear here.</div>}
+      {subTab === 'views' && <SavedViewsList />}
     </div>
   );
 };
@@ -277,6 +349,7 @@ const SetupTreePanel: React.FC<{ onSelect: (section: string) => void; selected: 
     { key: 'models', title: 'Models', icon: <ExperimentOutlined />, isLeaf: true },
     { key: 'materials', title: 'Materials', icon: <GoldOutlined />, isLeaf: true },
     { key: 'boundaries', title: 'Boundary Conditions', icon: <BlockOutlined />, isLeaf: true },
+    { key: 'initial', title: 'Initial Conditions', icon: <LineChartOutlined />, isLeaf: true },
     { key: 'solver', title: 'Solver Settings', icon: <SettingOutlined />, isLeaf: true },
   ];
 
@@ -738,6 +811,7 @@ const LeftPanelStack: React.FC = () => {
     models: <ModelsPanel />,
     materials: <MaterialPanel />,
     boundaries: <BoundaryPanel />,
+    initial: <InitialConditionsPanel />,
     solver: <SolverSettingsPanel />,
   };
 

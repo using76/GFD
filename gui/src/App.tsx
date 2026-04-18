@@ -13,6 +13,7 @@ import {
   QuestionCircleOutlined,
 } from '@ant-design/icons';
 import { useAppStore } from './store/useAppStore';
+import type { Shape } from './store/useAppStore';
 import Ribbon from './components/Ribbon';
 import LeftPanelStack from './components/LeftPanelStack';
 import MiniToolbar from './components/MiniToolbar';
@@ -22,6 +23,43 @@ import StatusBar from './components/StatusBar';
 import Viewport3D from './engine/Viewport3D';
 import ResidualPlot from './tabs/calc/ResidualPlot';
 import ConsoleOutput from './tabs/calc/ConsoleOutput';
+
+// ============================================================
+// STL persistence helpers (base64 round-trip of Float32Array vertex data)
+// ============================================================
+function encodeShapesForSave(shapes: Shape[]): unknown[] {
+  return shapes.map(s => {
+    if (!s.stlData) return { ...s, stlData: undefined };
+    // Float32Array -> Uint8Array view -> base64
+    const f32 = s.stlData.vertices;
+    const bytes = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const b64 = btoa(binary);
+    return { ...s, stlData: { faceCount: s.stlData.faceCount, vertices_b64: b64 } };
+  });
+}
+
+function decodeShapesFromSave(raw: unknown[]): Shape[] {
+  return raw.map((rawShape) => {
+    const r = rawShape as Shape & { stlData?: { faceCount: number; vertices_b64?: string; vertices?: number[] } };
+    if (!r.stlData) return r as Shape;
+    const sd = r.stlData;
+    // New format: base64 -> Float32Array
+    if (sd.vertices_b64) {
+      const binary = atob(sd.vertices_b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const f32 = new Float32Array(bytes.buffer);
+      return { ...r, stlData: { vertices: f32, faceCount: sd.faceCount } } as Shape;
+    }
+    // Legacy array format
+    if (sd.vertices) {
+      return { ...r, stlData: { vertices: new Float32Array(sd.vertices), faceCount: sd.faceCount } } as Shape;
+    }
+    return { ...r, stlData: undefined } as Shape;
+  });
+}
 
 // ============================================================
 // Application Menu (Blue circle button)
@@ -46,12 +84,14 @@ const AppMenu: React.FC = () => {
             const state = useAppStore.getState();
             // Clear existing shapes
             state.shapes.forEach(s => state.removeShape(s.id));
-            if (saved.shapes) saved.shapes.forEach((s: any) => state.addShape(s));
+            if (saved.shapes) decodeShapesFromSave(saved.shapes).forEach((s) => state.addShape(s));
             if (saved.physicsModels) state.updatePhysicsModels(saved.physicsModels);
             if (saved.material) state.updateMaterial(saved.material);
             if (saved.solverSettings) state.updateSolverSettings(saved.solverSettings);
-            if (saved.boundaries) saved.boundaries.forEach((b: any) => state.addBoundary(b));
+            if (saved.boundaries) (saved.boundaries as unknown[]).forEach((b) => state.addBoundary(b as Parameters<typeof state.addBoundary>[0]));
             if (saved.meshConfig) state.updateMeshConfig(saved.meshConfig);
+            if (saved.initialConditions) state.updateInitialConditions(saved.initialConditions);
+            if (saved.savedViews) (saved.savedViews as unknown[]).forEach((v) => state.addSavedView(v as Parameters<typeof state.addSavedView>[0]));
             message.success(`Project loaded: ${file.name}`);
             // Track recent file
             try {
@@ -73,11 +113,12 @@ const AppMenu: React.FC = () => {
         const saved = JSON.parse(data);
         const state = useAppStore.getState();
         state.shapes.forEach(s => state.removeShape(s.id));
-        if (saved.shapes) saved.shapes.forEach((s: any) => state.addShape(s));
+        if (saved.shapes) decodeShapesFromSave(saved.shapes).forEach((s) => state.addShape(s));
         if (saved.physicsModels) state.updatePhysicsModels(saved.physicsModels);
         if (saved.material) state.updateMaterial(saved.material);
         if (saved.solverSettings) state.updateSolverSettings(saved.solverSettings);
         if (saved.meshConfig) state.updateMeshConfig(saved.meshConfig);
+        if (saved.initialConditions) state.updateInitialConditions(saved.initialConditions);
         message.success(`Auto-save restored${time ? ` (${new Date(time).toLocaleString()})` : ''}`);
       } catch { message.error('Failed to restore auto-save.'); }
     }},
@@ -85,12 +126,14 @@ const AppMenu: React.FC = () => {
       try {
         const state = useAppStore.getState();
         const data = {
-          shapes: state.shapes.map(s => ({ ...s, stlData: undefined })),
+          shapes: encodeShapesForSave(state.shapes),
           physicsModels: state.physicsModels,
           material: state.material,
           solverSettings: state.solverSettings,
           boundaries: state.boundaries,
           meshConfig: state.meshConfig,
+          initialConditions: state.initialConditions,
+          savedViews: state.savedViews,
         };
         localStorage.setItem('gfd-project', JSON.stringify(data));
         message.success('Project saved to local storage.');
@@ -100,12 +143,14 @@ const AppMenu: React.FC = () => {
       try {
         const state = useAppStore.getState();
         const data = {
-          shapes: state.shapes.map(s => ({ ...s, stlData: undefined })),
+          shapes: encodeShapesForSave(state.shapes),
           physicsModels: state.physicsModels,
           material: state.material,
           solverSettings: state.solverSettings,
           boundaries: state.boundaries,
           meshConfig: state.meshConfig,
+          initialConditions: state.initialConditions,
+          savedViews: state.savedViews,
         };
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
@@ -624,7 +669,7 @@ const QuickAccess: React.FC = () => (
         try {
           const state = useAppStore.getState();
           const data = {
-            shapes: state.shapes.map(s => ({ ...s, stlData: undefined })),
+            shapes: encodeShapesForSave(state.shapes),
             physicsModels: state.physicsModels,
             material: state.material,
             solverSettings: state.solverSettings,
@@ -807,12 +852,14 @@ function useKeyboardShortcuts() {
               // Ctrl+Shift+S = Save As (download file)
               try {
                 const data = {
-                  shapes: store.shapes.map(s => ({ ...s, stlData: undefined })),
+                  shapes: encodeShapesForSave(store.shapes),
                   physicsModels: store.physicsModels,
                   material: store.material,
                   solverSettings: store.solverSettings,
                   boundaries: store.boundaries,
                   meshConfig: store.meshConfig,
+                  initialConditions: store.initialConditions,
+                  savedViews: store.savedViews,
                 };
                 const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
@@ -825,12 +872,14 @@ function useKeyboardShortcuts() {
               // Ctrl+S = Save to localStorage
               try {
                 const data = {
-                  shapes: store.shapes.map(s => ({ ...s, stlData: undefined })),
+                  shapes: encodeShapesForSave(store.shapes),
                   physicsModels: store.physicsModels,
                   material: store.material,
                   solverSettings: store.solverSettings,
                   boundaries: store.boundaries,
                   meshConfig: store.meshConfig,
+                  initialConditions: store.initialConditions,
+                  savedViews: store.savedViews,
                 };
                 localStorage.setItem('gfd-project', JSON.stringify(data));
                 message.success('Project saved');
@@ -1090,12 +1139,14 @@ function useAutoSave() {
         const state = useAppStore.getState();
         if (state.shapes.length === 0) return; // Nothing to save
         const data = {
-          shapes: state.shapes.map(s => ({ ...s, stlData: undefined })),
+          shapes: encodeShapesForSave(state.shapes),
           physicsModels: state.physicsModels,
           material: state.material,
           solverSettings: state.solverSettings,
           boundaries: state.boundaries,
           meshConfig: state.meshConfig,
+          initialConditions: state.initialConditions,
+          savedViews: state.savedViews,
         };
         localStorage.setItem('gfd-autosave', JSON.stringify(data));
         localStorage.setItem('gfd-autosave-time', new Date().toISOString());

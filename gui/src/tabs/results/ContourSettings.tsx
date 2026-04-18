@@ -66,6 +66,8 @@ const ContourSettings: React.FC = () => {
     displacement_x: 'm',
     displacement_y: 'm',
     displacement_z: 'm',
+    mach: '',
+    density: 'kg/m³',
   };
   const unit = unitMap[contourConfig.field] || '';
 
@@ -104,6 +106,8 @@ const ContourSettings: React.FC = () => {
               { label: 'Incident Radiation (W/m²)', value: 'radiation_G' },
               { label: 'Species Mass Fraction', value: 'species_Y' },
               { label: 'Wall y+', value: 'wall_yplus' },
+              { label: 'Mach Number', value: 'mach' },
+              { label: 'Density (kg/m³)', value: 'density' },
               { label: 'Von Mises Stress (Pa)', value: 'von_mises_stress' },
               { label: 'Displacement Magnitude (m)', value: 'displacement_mag' },
             ]}

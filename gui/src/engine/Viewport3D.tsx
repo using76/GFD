@@ -7,9 +7,47 @@ import SelectionManager from './SelectionManager';
 import CadScene from './CadScene';
 import * as THREE from 'three';
 
-/** Listens for gfd-camera-preset events and animates camera to target position */
+/** Listens for gfd-camera-preset events and animates camera to target position.
+ *  Also handles saved-view capture / restore via custom events. */
 function CameraPresetListener() {
   const { camera } = useThree();
+
+  useEffect(() => {
+    const captureHandler = () => {
+      const controls = (window as unknown as { __gfd_orbitTarget?: [number, number, number] });
+      const target = controls.__gfd_orbitTarget ?? [0, 0, 0];
+      window.dispatchEvent(new CustomEvent('gfd-camera-captured', {
+        detail: {
+          position: [camera.position.x, camera.position.y, camera.position.z],
+          target,
+        },
+      }));
+    };
+    const restoreHandler = (e: Event) => {
+      const d = (e as CustomEvent).detail as { position: [number, number, number]; target: [number, number, number] };
+      if (!d) return;
+      const targetVec = new THREE.Vector3(d.position[0], d.position[1], d.position[2]);
+      const look = new THREE.Vector3(d.target[0], d.target[1], d.target[2]);
+      const start = camera.position.clone();
+      const duration = 350;
+      const startTime = performance.now();
+      const anim = () => {
+        const t = Math.min((performance.now() - startTime) / duration, 1);
+        const ease = t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2;
+        camera.position.lerpVectors(start, targetVec, ease);
+        camera.lookAt(look);
+        if (t < 1) requestAnimationFrame(anim);
+      };
+      anim();
+    };
+    window.addEventListener('gfd-camera-capture', captureHandler);
+    window.addEventListener('gfd-camera-restore', restoreHandler);
+    return () => {
+      window.removeEventListener('gfd-camera-capture', captureHandler);
+      window.removeEventListener('gfd-camera-restore', restoreHandler);
+    };
+  }, [camera]);
+
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -140,6 +178,12 @@ function SceneContent() {
         dampingFactor={0.1}
         minDistance={0.5}
         maxDistance={100}
+        onChange={(e) => {
+          const ctrls = e?.target as { target?: { x: number; y: number; z: number } } | undefined;
+          if (ctrls?.target) {
+            (window as unknown as { __gfd_orbitTarget?: [number, number, number] }).__gfd_orbitTarget = [ctrls.target.x, ctrls.target.y, ctrls.target.z];
+          }
+        }}
       />
 
       {/* Gizmo in corner */}
