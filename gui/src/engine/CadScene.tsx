@@ -1479,6 +1479,47 @@ const VectorArrows: React.FC = () => {
     const nz = Math.max(2, Math.round(4 * density));
     const arrowData: { pos: [number, number, number]; dir: [number, number, number]; mag: number }[] = [];
 
+    // Look up real per-component velocity fields if available (from solved/simulated results)
+    const vxField = fieldData.find(f => f.name === 'velocity_x');
+    const vyField = fieldData.find(f => f.name === 'velocity_y');
+    const vzField = fieldData.find(f => f.name === 'velocity_z');
+    const hasRealVector = !!vxField && !!vyField && !!vzField;
+
+    // Build a spatial hash from positions for nearest-vertex lookup (only when using real field)
+    const vertIndex: { x: number; y: number; z: number; idx: number }[] = [];
+    if (hasRealVector) {
+      const stride = Math.max(1, Math.floor(nVerts / 2000));
+      for (let i = 0; i < nVerts; i += stride) {
+        vertIndex.push({ x: positions[i * 3], y: positions[i * 3 + 1], z: positions[i * 3 + 2], idx: i });
+      }
+    }
+
+    const sampleVel = (x: number, y: number, z: number): [number, number, number] => {
+      if (hasRealVector && vxField && vyField && vzField && vertIndex.length > 0) {
+        // Nearest-vertex lookup for actual velocity components
+        let nearestIdx = vertIndex[0].idx;
+        let best = Infinity;
+        for (const v of vertIndex) {
+          const dd = (v.x - x) * (v.x - x) + (v.y - y) * (v.y - y) + (v.z - z) * (v.z - z);
+          if (dd < best) { best = dd; nearestIdx = v.idx; }
+        }
+        return [
+          vxField.values[nearestIdx] ?? 0,
+          vyField.values[nearestIdx] ?? 0,
+          vzField.values[nearestIdx] ?? 0,
+        ];
+      }
+      // Fallback analytical pattern
+      const t = (x - xMin) / xRange;
+      const u = (y - yMin) / yRange;
+      const w = (z - zMin) / zRange;
+      return [
+        Math.sin(Math.PI * t) * Math.cos(Math.PI * u),
+        -Math.cos(Math.PI * t) * Math.sin(Math.PI * u),
+        0.3 * Math.sin(Math.PI * w),
+      ];
+    };
+
     for (let ix = 0; ix < nx; ix++) {
       for (let iy = 0; iy < ny; iy++) {
         for (let iz = 0; iz < nz; iz++) {
@@ -1488,12 +1529,9 @@ const VectorArrows: React.FC = () => {
           const x = xMin + t * xRange;
           const y = yMin + u * yRange;
           const z = zMin + w * zRange;
-          // Analytical velocity (same as solver generates)
-          const vx = Math.sin(Math.PI * t) * Math.cos(Math.PI * u);
-          const vy = -Math.cos(Math.PI * t) * Math.sin(Math.PI * u);
-          const vz = 0.3 * Math.sin(Math.PI * w);
+          const [vx, vy, vz] = sampleVel(x, y, z);
           const mag = Math.sqrt(vx * vx + vy * vy + vz * vz);
-          if (mag > 0.01) {
+          if (mag > 1e-6) {
             arrowData.push({
               pos: [x, y, z],
               dir: [vx / mag, vy / mag, vz / mag],
@@ -1536,6 +1574,7 @@ const StreamlineTraces: React.FC = () => {
   const showStreamlines = useAppStore((s) => s.showStreamlines);
   const meshDisplayData = useAppStore((s) => s.meshDisplayData);
   const vectorConfig = useAppStore((s) => s.vectorConfig);
+  const fieldData = useAppStore((s) => s.fieldData);
 
   const lines = useMemo(() => {
     if (!showStreamlines || !meshDisplayData) return null;
@@ -1555,8 +1594,35 @@ const StreamlineTraces: React.FC = () => {
     const yRange = yMax - yMin || 1;
     const zRange = zMax - zMin || 1;
 
-    // Analytical velocity field (same as solver)
+    // Look up per-component velocity fields
+    const vxField = fieldData.find(f => f.name === 'velocity_x');
+    const vyField = fieldData.find(f => f.name === 'velocity_y');
+    const vzField = fieldData.find(f => f.name === 'velocity_z');
+    const hasRealVector = !!vxField && !!vyField && !!vzField;
+
+    const vertIndex: { x: number; y: number; z: number; idx: number }[] = [];
+    if (hasRealVector) {
+      const stride = Math.max(1, Math.floor(nVerts / 2000));
+      for (let i = 0; i < nVerts; i += stride) {
+        vertIndex.push({ x: positions[i * 3], y: positions[i * 3 + 1], z: positions[i * 3 + 2], idx: i });
+      }
+    }
+
     const vel = (x: number, y: number, z: number): [number, number, number] => {
+      if (hasRealVector && vxField && vyField && vzField && vertIndex.length > 0) {
+        let nearestIdx = vertIndex[0].idx;
+        let best = Infinity;
+        for (const v of vertIndex) {
+          const dd = (v.x - x) * (v.x - x) + (v.y - y) * (v.y - y) + (v.z - z) * (v.z - z);
+          if (dd < best) { best = dd; nearestIdx = v.idx; }
+        }
+        return [
+          vxField.values[nearestIdx] ?? 0,
+          vyField.values[nearestIdx] ?? 0,
+          vzField.values[nearestIdx] ?? 0,
+        ];
+      }
+      // Fallback analytical field
       const tx = (x - xMin) / xRange;
       const ty = (y - yMin) / yRange;
       const tz = (z - zMin) / zRange;
@@ -1608,7 +1674,7 @@ const StreamlineTraces: React.FC = () => {
     }
 
     return streamlines;
-  }, [showStreamlines, meshDisplayData, vectorConfig]);
+  }, [showStreamlines, meshDisplayData, vectorConfig, fieldData]);
 
   if (!showStreamlines || !lines || lines.length === 0) return null;
 

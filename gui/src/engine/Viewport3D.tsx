@@ -194,16 +194,14 @@ function FpsMonitor() {
   return null;
 }
 
-/** Screenshot capture: listens for gfd-screenshot event and saves canvas as PNG */
+/** Screenshot capture: listens for gfd-screenshot event and opens preview modal */
 function ScreenshotCapture() {
   const { gl } = useThree();
   useEffect(() => {
     const handler = () => {
       const dataUrl = gl.domElement.toDataURL('image/png');
-      const a = document.createElement('a');
-      a.href = dataUrl;
-      a.download = `gfd-screenshot-${Date.now()}.png`;
-      a.click();
+      // Publish to App-level modal; App.tsx listens for this and renders a preview dialog.
+      window.dispatchEvent(new CustomEvent('gfd-screenshot-ready', { detail: dataUrl }));
     };
     window.addEventListener('gfd-screenshot', handler);
     return () => window.removeEventListener('gfd-screenshot', handler);
@@ -322,6 +320,42 @@ export default function Viewport3D() {
 
       {/* Contour color legend overlay */}
       <ContourLegend />
+
+      {/* Probe activation hint (Results tab) */}
+      <ProbeHint />
+    </div>
+  );
+}
+
+/** Shows a floating hint banner when the user is on Results with field data but no probes yet. */
+function ProbeHint() {
+  const activeRibbonTab = useAppStore((s) => s.activeRibbonTab);
+  const activeField = useAppStore((s) => s.activeField);
+  const fieldData = useAppStore((s) => s.fieldData);
+  const probePoints = useAppStore((s) => s.probePoints);
+  const [dismissed, setDismissed] = useState(false);
+
+  if (dismissed) return null;
+  if (activeRibbonTab !== 'results') return null;
+  if (!activeField || fieldData.length === 0) return null;
+  if (probePoints.length > 0) return null;
+
+  return (
+    <div style={{
+      position: 'absolute', top: 8, right: 8,
+      background: 'rgba(22, 104, 220, 0.92)', color: '#fff',
+      padding: '6px 12px', borderRadius: 6, fontSize: 11,
+      pointerEvents: 'auto', zIndex: 6, display: 'flex', alignItems: 'center', gap: 8,
+      boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+    }}>
+      <span>💡 Double-click any point in the viewport to drop a probe</span>
+      <span
+        onClick={() => setDismissed(true)}
+        style={{ cursor: 'pointer', opacity: 0.8, padding: '0 4px' }}
+        title="Dismiss"
+      >
+        ×
+      </span>
     </div>
   );
 }

@@ -54,7 +54,18 @@ const ContourSettings: React.FC = () => {
   const unitMap: Record<string, string> = {
     pressure: 'Pa',
     velocity: 'm/s',
+    velocity_x: 'm/s',
+    velocity_y: 'm/s',
+    velocity_z: 'm/s',
     temperature: 'K',
+    tke: 'm²/s²',
+    radiation_G: 'W/m²',
+    wall_yplus: '',
+    von_mises_stress: 'Pa',
+    displacement_mag: 'm',
+    displacement_x: 'm',
+    displacement_y: 'm',
+    displacement_z: 'm',
   };
   const unit = unitMap[contourConfig.field] || '';
 
@@ -93,6 +104,8 @@ const ContourSettings: React.FC = () => {
               { label: 'Incident Radiation (W/m²)', value: 'radiation_G' },
               { label: 'Species Mass Fraction', value: 'species_Y' },
               { label: 'Wall y+', value: 'wall_yplus' },
+              { label: 'Von Mises Stress (Pa)', value: 'von_mises_stress' },
+              { label: 'Displacement Magnitude (m)', value: 'displacement_mag' },
             ]}
             onChange={(v) => {
               updateContourConfig({ field: v as never });

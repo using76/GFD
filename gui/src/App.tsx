@@ -129,48 +129,128 @@ const AppMenu: React.FC = () => {
         message.warning('No mesh data to export. Generate a mesh first.');
         return;
       }
-      // Build VTK Legacy ASCII format
+
+      const nx = mesh.nx | 0;
+      const ny = mesh.ny | 0;
+      const nz = mesh.nz | 0;
+      const canWriteVolume = nx > 0 && ny > 0 && nz > 0;
+
+      // Compute domain bounds from the surface-triangle positions (fluid extent)
+      let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity, zMin = Infinity, zMax = -Infinity;
+      const nTriVerts = mesh.positions.length / 3;
+      for (let i = 0; i < nTriVerts; i++) {
+        const x = mesh.positions[i*3], y = mesh.positions[i*3+1], z = mesh.positions[i*3+2];
+        if (x < xMin) xMin = x; if (x > xMax) xMax = x;
+        if (y < yMin) yMin = y; if (y > yMax) yMax = y;
+        if (z < zMin) zMin = z; if (z > zMax) zMax = z;
+      }
+
       const lines: string[] = [];
       lines.push('# vtk DataFile Version 3.0');
       lines.push('GFD Export');
       lines.push('ASCII');
-      lines.push('DATASET UNSTRUCTURED_GRID');
 
-      // Extract unique vertices from triangle positions
-      const nTriVerts = mesh.positions.length / 3;
+      if (canWriteVolume) {
+        // === VTK UNSTRUCTURED GRID with hexahedral (type 12) cells ===
+        const npX = nx + 1, npY = ny + 1, npZ = nz + 1;
+        const totalPoints = npX * npY * npZ;
+        const totalCells = nx * ny * nz;
+        const dx = (xMax - xMin) / nx;
+        const dy = (yMax - yMin) / ny;
+        const dz = (zMax - zMin) / nz;
+
+        lines.push('DATASET UNSTRUCTURED_GRID');
+        lines.push(`POINTS ${totalPoints} float`);
+        for (let k = 0; k <= nz; k++) {
+          for (let j = 0; j <= ny; j++) {
+            for (let i = 0; i <= nx; i++) {
+              const px = xMin + i * dx;
+              const py = yMin + j * dy;
+              const pz = zMin + k * dz;
+              lines.push(`${px.toFixed(6)} ${py.toFixed(6)} ${pz.toFixed(6)}`);
+            }
+          }
+        }
+
+        // Hex cells: each uses 9 ints (1 count + 8 node indices)
+        const nodeId = (i: number, j: number, k: number) => k * npX * npY + j * npX + i;
+        lines.push(`CELLS ${totalCells} ${totalCells * 9}`);
+        for (let k = 0; k < nz; k++) {
+          for (let j = 0; j < ny; j++) {
+            for (let i = 0; i < nx; i++) {
+              const n0 = nodeId(i,   j,   k);
+              const n1 = nodeId(i+1, j,   k);
+              const n2 = nodeId(i+1, j+1, k);
+              const n3 = nodeId(i,   j+1, k);
+              const n4 = nodeId(i,   j,   k+1);
+              const n5 = nodeId(i+1, j,   k+1);
+              const n6 = nodeId(i+1, j+1, k+1);
+              const n7 = nodeId(i,   j+1, k+1);
+              lines.push(`8 ${n0} ${n1} ${n2} ${n3} ${n4} ${n5} ${n6} ${n7}`);
+            }
+          }
+        }
+
+        lines.push(`CELL_TYPES ${totalCells}`);
+        for (let i = 0; i < totalCells; i++) lines.push('12'); // VTK_HEXAHEDRON
+
+        // Write CELL_DATA for fields whose length matches totalCells,
+        // otherwise write as POINT_DATA interpolated (first totalPoints samples).
+        const cellFields = state.fieldData.filter(f => f.values.length === totalCells);
+        const pointFields = state.fieldData.filter(f => f.values.length !== totalCells);
+
+        if (cellFields.length > 0) {
+          lines.push(`CELL_DATA ${totalCells}`);
+          cellFields.forEach(f => {
+            lines.push(`SCALARS ${f.name} float 1`);
+            lines.push('LOOKUP_TABLE default');
+            for (let i = 0; i < totalCells; i++) lines.push(f.values[i].toFixed(6));
+          });
+        }
+
+        if (pointFields.length > 0) {
+          lines.push(`POINT_DATA ${totalPoints}`);
+          pointFields.forEach(f => {
+            lines.push(`SCALARS ${f.name} float 1`);
+            lines.push('LOOKUP_TABLE default');
+            const n = Math.min(f.values.length, totalPoints);
+            for (let i = 0; i < n; i++) lines.push(f.values[i].toFixed(6));
+            for (let i = n; i < totalPoints; i++) lines.push('0.000000');
+          });
+        }
+
+        const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'gfd_export.vtk';
+        a.click();
+        URL.revokeObjectURL(url);
+        message.success(`Exported VTK volume: ${totalCells.toLocaleString()} hex cells, ${cellFields.length + pointFields.length} field(s)`);
+        return;
+      }
+
+      // === Fallback: surface triangle mesh (legacy behavior) ===
+      lines.push('DATASET UNSTRUCTURED_GRID');
       const nTris = nTriVerts / 3;
       lines.push(`POINTS ${nTriVerts} float`);
       for (let i = 0; i < nTriVerts; i++) {
         lines.push(`${mesh.positions[i*3].toFixed(6)} ${mesh.positions[i*3+1].toFixed(6)} ${mesh.positions[i*3+2].toFixed(6)}`);
       }
-
-      // Cells: each triangle = 3 vertices
       lines.push(`CELLS ${nTris} ${nTris * 4}`);
-      for (let i = 0; i < nTris; i++) {
-        lines.push(`3 ${i*3} ${i*3+1} ${i*3+2}`);
-      }
-
-      // Cell types: 5 = VTK_TRIANGLE
+      for (let i = 0; i < nTris; i++) lines.push(`3 ${i*3} ${i*3+1} ${i*3+2}`);
       lines.push(`CELL_TYPES ${nTris}`);
       for (let i = 0; i < nTris; i++) lines.push('5');
-
-      // Point data (field values)
       if (state.fieldData.length > 0) {
         lines.push(`POINT_DATA ${nTriVerts}`);
         state.fieldData.forEach(f => {
           lines.push(`SCALARS ${f.name} float 1`);
           lines.push('LOOKUP_TABLE default');
           const nVals = Math.min(f.values.length, nTriVerts);
-          for (let i = 0; i < nVals; i++) {
-            lines.push(f.values[i].toFixed(6));
-          }
-          // Pad if field values are shorter
-          for (let i = nVals; i < nTriVerts; i++) {
-            lines.push('0.000000');
-          }
+          for (let i = 0; i < nVals; i++) lines.push(f.values[i].toFixed(6));
+          for (let i = nVals; i < nTriVerts; i++) lines.push('0.000000');
         });
       }
-
       const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -178,7 +258,7 @@ const AppMenu: React.FC = () => {
       a.download = 'gfd_export.vtk';
       a.click();
       URL.revokeObjectURL(url);
-      message.success(`Exported VTK: ${nTris} triangles, ${state.fieldData.length} fields`);
+      message.success(`Exported VTK surface: ${nTris} triangles, ${state.fieldData.length} fields`);
     }},
     { key: 'exportfoam', icon: <ExportOutlined />, label: 'Export OpenFOAM...', action: () => {
       const state = useAppStore.getState();
@@ -720,7 +800,6 @@ function useKeyboardShortcuts() {
           case 'p':
             e.preventDefault();
             window.dispatchEvent(new CustomEvent('gfd-screenshot'));
-            message.success('Screenshot saved');
             return;
           case 's':
             e.preventDefault();
@@ -1027,6 +1106,87 @@ function useAutoSave() {
 }
 
 // ============================================================
+// Screenshot Preview Modal
+// ============================================================
+function ScreenshotPreview() {
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const url = (e as CustomEvent).detail as string;
+      if (typeof url === 'string') setDataUrl(url);
+    };
+    window.addEventListener('gfd-screenshot-ready', handler);
+    return () => window.removeEventListener('gfd-screenshot-ready', handler);
+  }, []);
+
+  if (!dataUrl) return null;
+
+  const close = () => setDataUrl(null);
+  const save = () => {
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = `gfd-screenshot-${Date.now()}.png`;
+    a.click();
+    close();
+  };
+  const copy = async () => {
+    try {
+      const resp = await fetch(dataUrl);
+      const blob = await resp.blob();
+      if (typeof window !== 'undefined' && typeof (window as unknown as { ClipboardItem?: unknown }).ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+        const ClipItem = (window as unknown as { ClipboardItem: new (items: Record<string, Blob>) => unknown }).ClipboardItem;
+        await navigator.clipboard.write([new ClipItem({ 'image/png': blob }) as never]);
+        message.success('Screenshot copied to clipboard');
+      } else {
+        message.warning('Clipboard API unavailable — use Save instead.');
+      }
+    } catch {
+      message.error('Copy failed.');
+    }
+  };
+
+  return (
+    <div
+      onClick={close}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 9998,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: '#1a1a2e', border: '1px solid #303050', borderRadius: 12,
+          padding: 20, maxWidth: '90vw', maxHeight: '90vh',
+          display: 'flex', flexDirection: 'column', gap: 12,
+          boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+        }}
+      >
+        <div style={{ fontSize: 14, fontWeight: 600, color: '#ccd' }}>Screenshot Preview</div>
+        <img
+          src={dataUrl}
+          alt="Screenshot preview"
+          style={{ maxWidth: '80vw', maxHeight: '70vh', objectFit: 'contain', background: '#000', borderRadius: 4 }}
+        />
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button onClick={copy} style={{ background: '#252540', color: '#ccd', border: '1px solid #303050', padding: '6px 14px', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
+            Copy to Clipboard
+          </button>
+          <button onClick={save} style={{ background: '#1668dc', color: '#fff', border: 'none', padding: '6px 14px', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+            Save PNG
+          </button>
+          <button onClick={close} style={{ background: 'transparent', color: '#889', border: '1px solid #303050', padding: '6px 14px', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // Keyboard Shortcuts Overlay
 // ============================================================
 function ShortcutsOverlay() {
@@ -1193,6 +1353,9 @@ export default function App() {
 
       {/* ============ Context Menu (rendered at top level for z-index) ============ */}
       <ContextMenu3D />
+
+      {/* ============ Screenshot Preview Modal ============ */}
+      <ScreenshotPreview />
 
       {/* ============ Keyboard Shortcuts Overlay ============ */}
       <ShortcutsOverlay />

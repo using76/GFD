@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Space, Tag, Typography, Tooltip } from 'antd';
 import {
   PlayCircleOutlined,
@@ -5,13 +6,37 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   LoadingOutlined,
+  ApiOutlined,
 } from '@ant-design/icons';
 import { useAppStore } from '../store/useAppStore';
+import { getBackendStatus } from '../ipc/gfdClient';
 import SelectionFilter from './SelectionFilter';
 
 const { Text } = Typography;
 
 export default function StatusBar() {
+  const [backendState, setBackendState] = useState<'unknown' | 'connected' | 'simulation'>('unknown');
+
+  useEffect(() => {
+    // Detect backend on mount and periodically thereafter
+    let mounted = true;
+    const check = () => {
+      const hasApi = typeof window !== 'undefined' && !!window.gfdAPI;
+      if (!hasApi) {
+        if (mounted) setBackendState('simulation');
+        return;
+      }
+      getBackendStatus().then((s) => {
+        if (!mounted) return;
+        setBackendState(s.running ? 'connected' : 'simulation');
+      }).catch(() => {
+        if (mounted) setBackendState('simulation');
+      });
+    };
+    check();
+    const id = setInterval(check, 5000);
+    return () => { mounted = false; clearInterval(id); };
+  }, []);
   const solverStatus = useAppStore((s) => s.solverStatus);
   const currentIteration = useAppStore((s) => s.currentIteration);
   const residuals = useAppStore((s) => s.residuals);
@@ -183,6 +208,19 @@ export default function StatusBar() {
         >
           {useGpu ? 'GPU' : 'CPU'}
         </Tag>
+
+        <Tooltip title={backendState === 'connected'
+          ? 'Rust gfd-server is running — solver will call the real backend.'
+          : 'No backend detected — using in-browser simulation mode.'
+        }>
+          <Tag
+            color={backendState === 'connected' ? 'green' : 'default'}
+            icon={<ApiOutlined />}
+            style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0, cursor: 'help' }}
+          >
+            {backendState === 'connected' ? 'Backend' : 'Simulation'}
+          </Tag>
+        </Tooltip>
       </Space>
     </div>
   );

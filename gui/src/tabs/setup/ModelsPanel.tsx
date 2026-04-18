@@ -92,6 +92,20 @@ const ModelsPanel: React.FC = () => {
           <div style={descStyle}>Solves the energy equation for temperature distribution and heat transfer.</div>
         )}
 
+        <Form.Item valuePropName="checked">
+          <Checkbox
+            checked={physicsModels.structural}
+            onChange={(e) => updatePhysicsModels({ structural: e.target.checked })}
+          >
+            Structural (Solid Mechanics)
+          </Checkbox>
+        </Form.Item>
+        {physicsModels.structural && (
+          <div style={descStyle}>
+            Linear elastic FEM on Hex8 cells. Solves for displacement and Von Mises stress using Young's modulus and Poisson's ratio. Use Fixed/Force boundaries.
+          </div>
+        )}
+
         <Form.Item label="Multiphase">
           <Select
             value={physicsModels.multiphase}

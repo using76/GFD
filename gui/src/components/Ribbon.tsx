@@ -1095,6 +1095,19 @@ const ResultsRibbon: React.FC = () => {
         useAppStore.getState().setActiveRibbonTab('results');
         switchResultsSection('streamlines');
       }} />
+      <RibbonButton icon={<ThunderboltOutlined />} label="Stress" onClick={() => {
+        const state = useAppStore.getState();
+        const hasStress = state.fieldData.some(f => f.name === 'von_mises_stress');
+        if (!hasStress) {
+          message.warning('No stress field. Enable Structural in Models tab and run the solver.');
+          return;
+        }
+        setRenderMode('contour');
+        setActiveField('von_mises_stress');
+        state.updateContourConfig({ field: 'von_mises_stress' as never });
+        state.setActiveRibbonTab('results');
+        switchResultsSection('contours');
+      }} />
       <GroupSep label="Display" />
 
       <RibbonButton icon={<FileTextOutlined />} label="Reports" onClick={() => {

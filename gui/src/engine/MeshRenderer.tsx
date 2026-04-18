@@ -121,6 +121,8 @@ export default function MeshRenderer() {
   const contourConfig = useAppStore((s) => s.contourConfig);
   const activeTab = useAppStore((s) => s.activeTab);
   const sectionPlane = useAppStore((s) => s.sectionPlane);
+  const boundaries = useAppStore((s) => s.boundaries);
+  const meshSurfaces = useAppStore((s) => s.meshSurfaces);
 
   // Compute THREE.js clipping planes from section plane state
   const clipPlanes = useMemo(() => {
@@ -132,6 +134,49 @@ export default function MeshRenderer() {
   // Track geometry ref for dynamic color updates
   const geomRef = useRef<THREE.BufferGeometry | null>(null);
 
+  // Resolve the "Show On Boundary" filter plane when a specific patch is selected.
+  // Returns a predicate: (triangle centroid) → boolean (keep or skip).
+  const boundaryFilter = useMemo(() => {
+    const target = contourConfig.showOnBoundary;
+    if (!target || target === 'all' || target === '') return null;
+
+    // Compute mesh extent (for inferring face direction by name)
+    if (!meshDisplayData || meshDisplayData.positions.length === 0) return null;
+    const pos = meshDisplayData.positions;
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity, zMin = Infinity, zMax = -Infinity;
+    for (let i = 0; i < pos.length; i += 3) {
+      if (pos[i] < xMin) xMin = pos[i]; if (pos[i] > xMax) xMax = pos[i];
+      if (pos[i+1] < yMin) yMin = pos[i+1]; if (pos[i+1] > yMax) yMax = pos[i+1];
+      if (pos[i+2] < zMin) zMin = pos[i+2]; if (pos[i+2] > zMax) zMax = pos[i+2];
+    }
+    const tolX = Math.max((xMax - xMin) * 0.02, 1e-4);
+    const tolY = Math.max((yMax - yMin) * 0.02, 1e-4);
+    const tolZ = Math.max((zMax - zMin) * 0.02, 1e-4);
+
+    // Prefer explicit meshSurface center/normal when available
+    const surf = meshSurfaces.find(s => s.id === target);
+    if (surf && surf.width > 0 && surf.height > 0) {
+      const { center, normal } = surf;
+      return (cx: number, cy: number, cz: number) => {
+        const d = (cx - center[0]) * normal[0] + (cy - center[1]) * normal[1] + (cz - center[2]) * normal[2];
+        return Math.abs(d) < Math.max(tolX, tolY, tolZ);
+      };
+    }
+
+    // Infer from boundary name / id (matches mesh zones generated in useAppStore)
+    const boundary = boundaries.find(b => b.id === target) ?? null;
+    const name = (boundary?.name ?? surf?.name ?? target).toLowerCase();
+    // xmin / xmax / ymin / ymax / zmin / zmax patterns
+    const match = (pattern: string) => name.includes(pattern);
+    if (match('xmin') || match('inlet')) return (cx: number) => Math.abs(cx - xMin) < tolX;
+    if (match('xmax') || match('outlet')) return (cx: number) => Math.abs(cx - xMax) < tolX;
+    if (match('ymin')) return (_cx: number, cy: number) => Math.abs(cy - yMin) < tolY;
+    if (match('ymax')) return (_cx: number, cy: number) => Math.abs(cy - yMax) < tolY;
+    if (match('zmin')) return (_cx: number, _cy: number, cz: number) => Math.abs(cz - zMin) < tolZ;
+    if (match('zmax')) return (_cx: number, _cy: number, cz: number) => Math.abs(cz - zMax) < tolZ;
+    return null;
+  }, [contourConfig.showOnBoundary, meshSurfaces, boundaries, meshDisplayData]);
+
   // Build the mesh surface geometry (colored triangles)
   const geometry = useMemo(() => {
     if (!meshDisplayData) return null;
@@ -141,13 +186,45 @@ export default function MeshRenderer() {
 
     // New format: per-triangle positions (no index buffer needed)
     if (meshDisplayData.indices === null) {
-      const posCopy = new Float32Array(meshDisplayData.positions);
+      let posCopy: Float32Array;
+      let colorCopy: Float32Array | null = null;
+
+      if (boundaryFilter) {
+        // Filter triangles by centroid against boundary plane
+        const src = meshDisplayData.positions;
+        const colSrc = meshDisplayData.colors;
+        const nTris = src.length / 9;
+        const kept: number[] = [];
+        const keptColors: number[] = [];
+        for (let t = 0; t < nTris; t++) {
+          const ax = src[t*9], ay = src[t*9+1], az = src[t*9+2];
+          const bx = src[t*9+3], by = src[t*9+4], bz = src[t*9+5];
+          const cx = src[t*9+6], cy = src[t*9+7], cz = src[t*9+8];
+          const mx = (ax + bx + cx) / 3, my = (ay + by + cy) / 3, mz = (az + bz + cz) / 3;
+          if (boundaryFilter(mx, my, mz)) {
+            kept.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+            if (colSrc) {
+              const o = t * 9;
+              keptColors.push(
+                colSrc[o], colSrc[o+1], colSrc[o+2],
+                colSrc[o+3], colSrc[o+4], colSrc[o+5],
+                colSrc[o+6], colSrc[o+7], colSrc[o+8],
+              );
+            }
+          }
+        }
+        posCopy = new Float32Array(kept);
+        if (keptColors.length > 0) colorCopy = new Float32Array(keptColors);
+      } else {
+        posCopy = new Float32Array(meshDisplayData.positions);
+        if (meshDisplayData.colors && meshDisplayData.colors.length > 0) {
+          colorCopy = new Float32Array(meshDisplayData.colors);
+        }
+      }
+
       geom.setAttribute('position', new THREE.BufferAttribute(posCopy, 3));
       geom.computeVertexNormals();
-
-      // Apply vertex colors if available
-      if (meshDisplayData.colors && meshDisplayData.colors.length > 0) {
-        const colorCopy = new Float32Array(meshDisplayData.colors);
+      if (colorCopy && colorCopy.length > 0) {
         geom.setAttribute('color', new THREE.BufferAttribute(colorCopy, 3));
       }
     } else {
@@ -161,7 +238,7 @@ export default function MeshRenderer() {
 
     geomRef.current = geom;
     return geom;
-  }, [meshDisplayData]);
+  }, [meshDisplayData, boundaryFilter]);
 
   // Build wireframe geometry from wireframePositions
   const wireGeometry = useMemo(() => {

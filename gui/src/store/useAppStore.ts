@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { sendRequest } from '../ipc/gfdClient';
 
 // ---- Shape types for CAD ----
 export type ShapeKind = 'box' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'pipe' | 'stl' | 'enclosure';
@@ -164,7 +165,7 @@ export type MultiphaseModel = 'none' | 'vof' | 'euler' | 'mixture' | 'dpm';
 export type RadiationModel = 'none' | 'p1' | 'dom';
 export type SpeciesModel = 'none' | 'species-transport' | 'combustion';
 export type SolverMethod = 'SIMPLE' | 'PISO' | 'SIMPLEC';
-export type BoundaryType = 'wall' | 'inlet' | 'outlet' | 'symmetry';
+export type BoundaryType = 'wall' | 'inlet' | 'outlet' | 'symmetry' | 'fixed' | 'force';
 export type TimeMode = 'steady' | 'transient';
 export type SpatialScheme = 'first-order' | 'second-order' | 'QUICK';
 export type PressureScheme = 'standard' | 'second-order';
@@ -177,6 +178,8 @@ export interface PhysicsModels {
   multiphase: MultiphaseModel;
   radiation: RadiationModel;
   species: SpeciesModel;
+  /** Enable structural (solid mechanics) analysis alongside or instead of fluid */
+  structural: boolean;
 }
 
 export interface Material {
@@ -185,6 +188,10 @@ export interface Material {
   viscosity: number;
   cp: number;
   conductivity: number;
+  /** Young's modulus (Pa) — used only when structural physics is enabled */
+  youngsModulus: number;
+  /** Poisson's ratio — used only when structural physics is enabled */
+  poissonRatio: number;
 }
 
 export interface BoundaryCondition {
@@ -198,6 +205,8 @@ export interface BoundaryCondition {
   wallThermalCondition: WallThermalCondition;
   heatFlux: number;
   movingWallVelocity: [number, number, number];
+  /** Applied force vector (N) for 'force' boundary type in structural analysis */
+  force: [number, number, number];
 }
 
 export interface SolverSettings {
@@ -229,7 +238,24 @@ export interface ResidualPoint {
 
 // ---- Results types ----
 export type ColormapType = 'jet' | 'rainbow' | 'grayscale' | 'coolwarm';
-export type ResultField = 'pressure' | 'velocity' | 'temperature' | 'tke' | 'vof_alpha' | 'radiation_G' | 'species_Y' | 'wall_yplus' | 'quality';
+export type ResultField =
+  | 'pressure'
+  | 'velocity'
+  | 'velocity_x'
+  | 'velocity_y'
+  | 'velocity_z'
+  | 'temperature'
+  | 'tke'
+  | 'vof_alpha'
+  | 'radiation_G'
+  | 'species_Y'
+  | 'wall_yplus'
+  | 'quality'
+  | 'von_mises_stress'
+  | 'displacement_mag'
+  | 'displacement_x'
+  | 'displacement_y'
+  | 'displacement_z';
 
 export interface ContourConfig {
   field: ResultField;
@@ -602,6 +628,98 @@ interface AppState {
 }
 
 let solverInterval: ReturnType<typeof setInterval> | null = null;
+/** Current backend job id (non-null while a Rust backend job is active) */
+let backendJobId: string | null = null;
+/** When true, bypass the backend dispatch in startSolver (used for fallback) */
+let forceSimulationMode = false;
+
+/** Used by the backend bridge when the backend fails — restarts the solver in simulation mode. */
+function runSimulatedSolverLoop(
+  _getter: () => AppState,
+  setter: (u: Partial<AppState> | ((s: AppState) => Partial<AppState>)) => void,
+) {
+  forceSimulationMode = true;
+  // Reset solver state and call startSolver again — the bridge will skip because forceSimulationMode=true
+  setter({ solverStatus: 'idle', currentIteration: 0, residuals: [] });
+  setTimeout(() => {
+    _getter().startSolver();
+    forceSimulationMode = false;
+  }, 10);
+}
+
+/** Shape of a solver response residual record (best-effort, tolerant to absent fields). */
+interface BackendResidual {
+  continuity?: number;
+  xMomentum?: number;
+  yMomentum?: number;
+  energy?: number;
+  residual?: number;
+}
+
+interface BackendStatus {
+  running?: boolean;
+  iteration?: number;
+  residual?: number;
+  residuals?: BackendResidual;
+  status?: string;
+  log?: string;
+}
+
+/** Build the JSON-RPC payload for solve.start from the current store state. */
+function buildBackendSolveParams(state: AppState): Record<string, unknown> {
+  // Decide physics flavor: structural takes priority → then thermal-only (when fluid disabled) → else fluid
+  const physics = state.physicsModels.structural
+    ? 'structural'
+    : (state.physicsModels.energy && !state.boundaries.some(b => b.type === 'inlet'))
+      ? 'thermal'
+      : 'fluid';
+
+  const rpcBcs = state.boundaries.map(b => {
+    const base = {
+      patch: b.name,
+      type: b.type === 'inlet' ? 'velocity_inlet'
+        : b.type === 'outlet' ? 'pressure_outlet'
+        : b.type === 'wall' ? 'wall'
+        : b.type === 'fixed' ? 'fixed'
+        : b.type === 'force' ? 'force'
+        : 'symmetry',
+      vx: b.velocity[0], vy: b.velocity[1], vz: b.velocity[2],
+      pressure: b.pressure,
+      temperature: b.temperature,
+      fx: b.force?.[0] ?? 0, fy: b.force?.[1] ?? 0, fz: b.force?.[2] ?? 0,
+    };
+    return base;
+  });
+
+  return {
+    physics,
+    max_iterations: state.solverSettings.maxIterations,
+    tolerance: state.solverSettings.tolerance,
+    density: state.material.density,
+    viscosity: state.material.viscosity,
+    conductivity: state.material.conductivity,
+    youngs_modulus: state.material.youngsModulus,
+    poisson_ratio: state.material.poissonRatio,
+    alpha_u: state.solverSettings.relaxVelocity,
+    alpha_p: state.solverSettings.relaxPressure,
+    turbulence: state.physicsModels.turbulence,
+    radiation: state.physicsModels.radiation,
+    multiphase: state.physicsModels.multiphase,
+    species: state.physicsModels.species,
+    energy: state.physicsModels.energy,
+    boundary_conditions: rpcBcs,
+  };
+}
+
+/** Fields the backend should return for a given physics flavor. */
+function backendFieldListFor(state: AppState): string[] {
+  if (state.physicsModels.structural) {
+    return ['displacement_x', 'displacement_y', 'displacement_z', 'displacement_mag', 'von_mises_stress'];
+  }
+  const list = ['pressure', 'velocity_magnitude', 'vx', 'vy', 'vz'];
+  if (state.physicsModels.energy) list.push('temperature');
+  return list;
+}
 
 export const useAppStore = create<AppState>((set, get) => ({
   // Active tab
@@ -1383,6 +1501,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           wallThermalCondition: 'adiabatic' as const,
           heatFlux: 0,
           movingWallVelocity: [0, 0, 0] as [number, number, number],
+          force: [0, 0, 0] as [number, number, number],
         }));
 
       // --- Mesh quality statistics (deterministic for structured hex mesh) ---
@@ -1522,6 +1641,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     multiphase: 'none',
     radiation: 'none',
     species: 'none',
+    structural: false,
   },
   material: {
     name: 'Air',
@@ -1529,6 +1649,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     viscosity: 1.789e-5,
     cp: 1006.43,
     conductivity: 0.0242,
+    youngsModulus: 2.1e11,
+    poissonRatio: 0.3,
   },
   boundaries: [],
   solverSettings: {
@@ -1591,10 +1713,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (state.boundaries.length === 0) {
         warnings.push('No boundary conditions defined.');
       }
-      const inletBC = state.boundaries.find(b => b.type === 'inlet');
-      if (inletBC) {
-        const vMag = Math.sqrt(inletBC.velocity[0]**2 + inletBC.velocity[1]**2 + inletBC.velocity[2]**2);
-        if (vMag === 0) warnings.push('Inlet velocity is zero.');
+      if (state.physicsModels.structural) {
+        const fixedBC = state.boundaries.find(b => b.type === 'fixed');
+        if (!fixedBC) warnings.push('Structural analysis requires at least one Fixed support BC.');
+        const forceBC = state.boundaries.find(b => b.type === 'force');
+        if (!forceBC) warnings.push('Structural analysis: no force boundary defined — using default tip load.');
+        if (state.material.youngsModulus <= 0) warnings.push('Young\'s modulus must be positive for structural analysis.');
+      } else {
+        const inletBC = state.boundaries.find(b => b.type === 'inlet');
+        if (inletBC) {
+          const vMag = Math.sqrt(inletBC.velocity[0]**2 + inletBC.velocity[1]**2 + inletBC.velocity[2]**2);
+          if (vMag === 0) warnings.push('Inlet velocity is zero.');
+        }
       }
       if (state.solverSettings.maxIterations < 1) {
         warnings.push('Max iterations must be >= 1.');
@@ -1652,6 +1782,118 @@ export const useAppStore = create<AppState>((set, get) => ({
       currentIteration: isResume ? state.currentIteration : 0,
       consoleLines: initLines,
     });
+
+    // ---------------- Backend bridge ----------------
+    // When the Electron host exposes window.gfdAPI, dispatch to the Rust JSON-RPC server.
+    // Failures fall through to the JavaScript simulation below.
+    const hasBackend = typeof window !== 'undefined' && !!window.gfdAPI && !forceSimulationMode;
+    if (hasBackend && !isResume) {
+      const startParams = buildBackendSolveParams(state);
+      const fieldsToFetch = backendFieldListFor(state);
+      const maxIter = state.solverSettings.maxIterations;
+      const tsBack = new Date().toLocaleTimeString();
+      set((s) => ({
+        consoleLines: [...s.consoleLines, `[${tsBack}] [GFD] Connecting to Rust backend (solve.start)...`],
+      }));
+
+      sendRequest('solve.start', startParams).then((resp) => {
+        const jobId = (resp as { job_id?: string })?.job_id;
+        if (!jobId) {
+          set((s) => ({
+            consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [GFD] Backend returned no job_id. Falling back to simulation.`],
+          }));
+          // Backend refused — run simulation as fallback
+          runSimulatedSolverLoop(get, set);
+          return;
+        }
+        backendJobId = jobId;
+        set((s) => ({
+          consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [GFD] Backend job started: ${jobId}`],
+        }));
+
+        // Poll status at 200ms
+        solverInterval = setInterval(() => {
+          void (async () => {
+            if (get().solverStatus !== 'running') return;
+            try {
+              const st = await sendRequest('solve.status', { job_id: jobId }) as BackendStatus;
+              const iter = Math.max(1, st.iteration ?? get().currentIteration + 1);
+              const residualScalar = st.residual ?? st.residuals?.continuity ?? st.residuals?.residual ?? NaN;
+              // Compose a residual point — fill missing channels with best-effort values
+              const point: ResidualPoint = {
+                iteration: iter,
+                continuity: st.residuals?.continuity ?? residualScalar,
+                xMomentum: st.residuals?.xMomentum ?? residualScalar * 0.5,
+                yMomentum: st.residuals?.yMomentum ?? residualScalar * 0.5,
+                energy: st.residuals?.energy ?? 0,
+              };
+              const line = st.log ?? `[Iter ${iter}] residual=${Number.isFinite(residualScalar) ? residualScalar.toExponential(3) : 'N/A'}`;
+              set((s) => ({
+                currentIteration: iter,
+                residuals: [...s.residuals, point],
+                consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] ${line}`],
+              }));
+
+              const stillRunning = st.running !== false;
+              if (!stillRunning || iter >= maxIter) {
+                if (solverInterval) clearInterval(solverInterval);
+                solverInterval = null;
+                // Fetch final fields
+                const finalFields: FieldData[] = [];
+                for (const name of fieldsToFetch) {
+                  try {
+                    const fr = await sendRequest('field.get', { field: name }) as { values?: number[]; min?: number; max?: number };
+                    if (fr?.values && fr.values.length > 0) {
+                      const arr = new Float32Array(fr.values);
+                      finalFields.push({
+                        name: name === 'velocity_magnitude' ? 'velocity' : name,
+                        values: arr,
+                        min: fr.min ?? Math.min(...fr.values),
+                        max: fr.max ?? Math.max(...fr.values),
+                      });
+                    }
+                  } catch {
+                    // Field not available — skip silently
+                  }
+                }
+                const finishTs = new Date().toLocaleTimeString();
+                const doneMsg = st.status
+                  ? `[${finishTs}] [GFD] Backend solve ${st.status} (${iter} iterations).`
+                  : `[${finishTs}] [GFD] Backend solve complete (${iter} iterations).`;
+                set((s) => ({
+                  solverStatus: 'finished',
+                  fieldData: finalFields.length > 0 ? finalFields : s.fieldData,
+                  activeField: finalFields.length > 0 ? finalFields[0].name : s.activeField,
+                  consoleLines: [
+                    ...s.consoleLines,
+                    doneMsg,
+                    `[${finishTs}] [GFD] Retrieved ${finalFields.length} field(s) from backend.`,
+                  ],
+                }));
+                backendJobId = null;
+              }
+            } catch (err) {
+              // Backend error — stop polling and mark finished
+              if (solverInterval) clearInterval(solverInterval);
+              solverInterval = null;
+              set((s) => ({
+                solverStatus: 'finished',
+                consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [GFD] Backend poll error: ${String(err)}`],
+              }));
+              backendJobId = null;
+            }
+          })();
+        }, 200);
+      }).catch((err) => {
+        set((s) => ({
+          consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [GFD] Backend solve.start failed: ${String(err)}. Falling back to simulation.`],
+        }));
+        runSimulatedSolverLoop(get, set);
+      });
+      return;
+    }
+    // ---------------- End backend bridge ----------------
+
     solverInterval = setInterval(() => {
       const s = get();
       if (s.solverStatus !== 'running') return;
@@ -1758,24 +2000,46 @@ export const useAppStore = create<AppState>((set, get) => ({
           fields.push({ name: 'pressure', values: pressureValues, min: pMin, max: pMax });
 
           // Velocity field: cavity-like pattern scaled by inlet velocity
+          // Store magnitude for contour + separate vx/vy/vz components for vectors & streamlines
           const velValues = new Float32Array(nVerts);
+          const vxValues = new Float32Array(nVerts);
+          const vyValues = new Float32Array(nVerts);
+          const vzValues = new Float32Array(nVerts);
           let vMin = Infinity, vMax = -Infinity;
+          let vxMin = Infinity, vxMax = -Infinity;
+          let vyMin = Infinity, vyMax = -Infinity;
+          let vzMin = Infinity, vzMax = -Infinity;
           for (let i = 0; i < nVerts; i++) {
             const x = (meshData.positions[i * 3] - xMin) / xRange;
             const y = (meshData.positions[i * 3 + 1] - yMin) / yRange;
             const z = (meshData.positions[i * 3 + 2] - zMin) / zRange;
-            const vx = inletVel * inletDir[0] * Math.sin(Math.PI * x) * Math.cos(Math.PI * y);
-            const vy = inletVel * (inletDir[1] !== 0 ? inletDir[1] : -1) * Math.cos(Math.PI * x) * Math.sin(Math.PI * y);
-            const vz = inletVel * 0.3 * Math.sin(Math.PI * z);
+            const rawVx = inletVel * inletDir[0] * Math.sin(Math.PI * x) * Math.cos(Math.PI * y);
+            const rawVy = inletVel * (inletDir[1] !== 0 ? inletDir[1] : -1) * Math.cos(Math.PI * x) * Math.sin(Math.PI * y);
+            const rawVz = inletVel * 0.3 * Math.sin(Math.PI * z);
             // Near-wall damping (turbulent boundary layer effect)
             const wallDist = Math.min(y, 1 - y, z, 1 - z);
             const wallDamp = s.physicsModels.turbulence !== 'none' ? Math.min(1, wallDist * 10) : 1;
-            const mag = Math.sqrt(vx * vx + vy * vy + vz * vz) * wallDamp;
+            const dampedVx = rawVx * wallDamp;
+            const dampedVy = rawVy * wallDamp;
+            const dampedVz = rawVz * wallDamp;
+            const mag = Math.sqrt(dampedVx * dampedVx + dampedVy * dampedVy + dampedVz * dampedVz);
             velValues[i] = mag;
+            vxValues[i] = dampedVx;
+            vyValues[i] = dampedVy;
+            vzValues[i] = dampedVz;
             if (mag < vMin) vMin = mag;
             if (mag > vMax) vMax = mag;
+            if (dampedVx < vxMin) vxMin = dampedVx;
+            if (dampedVx > vxMax) vxMax = dampedVx;
+            if (dampedVy < vyMin) vyMin = dampedVy;
+            if (dampedVy > vyMax) vyMax = dampedVy;
+            if (dampedVz < vzMin) vzMin = dampedVz;
+            if (dampedVz > vzMax) vzMax = dampedVz;
           }
           fields.push({ name: 'velocity', values: velValues, min: vMin, max: vMax });
+          fields.push({ name: 'velocity_x', values: vxValues, min: vxMin, max: vxMax });
+          fields.push({ name: 'velocity_y', values: vyValues, min: vyMin, max: vyMax });
+          fields.push({ name: 'velocity_z', values: vzValues, min: vzMin, max: vzMax });
 
           // Temperature field: only if energy equation is enabled
           if (s.physicsModels.energy) {
@@ -1887,6 +2151,64 @@ export const useAppStore = create<AppState>((set, get) => ({
             }
             fields.push({ name: 'wall_yplus', values: ypValues, min: ypMin, max: ypMax });
           }
+
+          // Structural fields: displacement + Von Mises stress
+          // Simplified cantilever-beam analytical model: fixed at x=xMin, force at x=xMax
+          if (s.physicsModels.structural) {
+            const E = Math.max(mat.youngsModulus || 2.1e11, 1e3);
+            const nu = Math.max(0, Math.min(0.49, mat.poissonRatio || 0.3));
+            // Total applied force vector (sum over force BCs)
+            const forceBCs = bcs.filter(b => b.type === 'force');
+            const Fx = forceBCs.reduce((sum, b) => sum + (b.force?.[0] ?? 0), 0) || 0;
+            const Fy = forceBCs.reduce((sum, b) => sum + (b.force?.[1] ?? 0), 0) || (forceBCs.length === 0 ? -100 : 0);
+            const Fz = forceBCs.reduce((sum, b) => sum + (b.force?.[2] ?? 0), 0) || 0;
+            const Fmag = Math.sqrt(Fx * Fx + Fy * Fy + Fz * Fz) || 100;
+            // Cantilever beam: tip deflection δ_tip = F·L³ / (3·E·I)
+            // Use a representative cross-section moment of inertia based on domain size
+            const L = xRange || 1;
+            const A = (yRange || 1) * (zRange || 1);
+            const I = A * A / 12;
+            const tipDeflection = Fmag * L * L * L / (3 * E * Math.max(I, 1e-12));
+            // Yield reference: use Fmag / A as base stress scale
+            const baseStress = Fmag / Math.max(A, 1e-6);
+
+            const dispX = new Float32Array(nVerts);
+            const dispY = new Float32Array(nVerts);
+            const dispZ = new Float32Array(nVerts);
+            const dispMag = new Float32Array(nVerts);
+            const vonMises = new Float32Array(nVerts);
+            let dxMin = Infinity, dxMax = -Infinity, dyMin = Infinity, dyMax = -Infinity, dzMin = Infinity, dzMax = -Infinity;
+            let dmMin = Infinity, dmMax = -Infinity, vmMin = Infinity, vmMax = -Infinity;
+            const fHat = [Fx / Fmag, Fy / Fmag, Fz / Fmag];
+
+            for (let i = 0; i < nVerts; i++) {
+              const x = (meshData.positions[i * 3] - xMin) / xRange;
+              // Cantilever deflection profile: (3Lx² - x³)/(2L³)
+              const shape = (3 * x * x - x * x * x) * 0.5; // 0 at fixed end, 1 at tip
+              const ux = tipDeflection * fHat[0] * shape;
+              const uy = tipDeflection * fHat[1] * shape;
+              const uz = tipDeflection * fHat[2] * shape;
+              dispX[i] = ux;
+              dispY[i] = uy;
+              dispZ[i] = uz;
+              const umag = Math.sqrt(ux * ux + uy * uy + uz * uz);
+              dispMag[i] = umag;
+              // Von Mises: peaks at the fixed end (x=0), linearly decays toward tip.
+              // Include Poisson contribution via 1/(1-nu) amplification on normal stress.
+              const vm = baseStress * (1 - x) * (1 + 0.3 * nu) * 6;
+              vonMises[i] = vm;
+              if (ux < dxMin) dxMin = ux; if (ux > dxMax) dxMax = ux;
+              if (uy < dyMin) dyMin = uy; if (uy > dyMax) dyMax = uy;
+              if (uz < dzMin) dzMin = uz; if (uz > dzMax) dzMax = uz;
+              if (umag < dmMin) dmMin = umag; if (umag > dmMax) dmMax = umag;
+              if (vm < vmMin) vmMin = vm; if (vm > vmMax) vmMax = vm;
+            }
+            fields.push({ name: 'displacement_x', values: dispX, min: dxMin, max: dxMax });
+            fields.push({ name: 'displacement_y', values: dispY, min: dyMin, max: dyMax });
+            fields.push({ name: 'displacement_z', values: dispZ, min: dzMin, max: dzMax });
+            fields.push({ name: 'displacement_mag', values: dispMag, min: dmMin, max: dmMax });
+            fields.push({ name: 'von_mises_stress', values: vonMises, min: vmMin, max: vmMax });
+          }
         }
 
         const finishTs = new Date().toLocaleTimeString();
@@ -1931,6 +2253,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   stopSolver: () => {
     if (solverInterval) clearInterval(solverInterval);
     solverInterval = null;
+    // Best-effort: notify backend if a job is active
+    if (backendJobId) {
+      const jid = backendJobId;
+      backendJobId = null;
+      void sendRequest('solve.stop', { job_id: jid }).catch(() => {
+        /* ignore — best effort */
+      });
+    }
     set((s) => ({
       solverStatus: 'idle',
       currentIteration: 0,

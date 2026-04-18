@@ -4,11 +4,17 @@ import { PlusOutlined } from '@ant-design/icons';
 import { useAppStore } from '../../store/useAppStore';
 import type { BoundaryType, WallThermalCondition } from '../../store/useAppStore';
 
-const typeOptions = [
+const fluidTypeOptions = [
   { label: 'Wall', value: 'wall' },
   { label: 'Velocity Inlet', value: 'inlet' },
   { label: 'Pressure Outlet', value: 'outlet' },
   { label: 'Symmetry', value: 'symmetry' },
+];
+
+const structuralTypeOptions = [
+  { label: 'Fixed Support', value: 'fixed' },
+  { label: 'Applied Force', value: 'force' },
+  { label: 'Free (Wall)', value: 'wall' },
 ];
 
 const typeColors: Record<BoundaryType, string> = {
@@ -16,6 +22,8 @@ const typeColors: Record<BoundaryType, string> = {
   outlet: '#ff4444',
   wall: '#44cc44',
   symmetry: '#ffcc00',
+  fixed: '#aa44ff',
+  force: '#ff8800',
 };
 
 const BoundaryPanel: React.FC = () => {
@@ -26,6 +34,8 @@ const BoundaryPanel: React.FC = () => {
   const addBoundary = useAppStore((s) => s.addBoundary);
   const meshGenerated = useAppStore((s) => s.meshGenerated);
   const meshSurfaces = useAppStore((s) => s.meshSurfaces);
+  const physicsModels = useAppStore((s) => s.physicsModels);
+  const typeOptions = physicsModels.structural ? structuralTypeOptions : fluidTypeOptions;
 
   const selected = boundaries.find((b) => b.id === selectedBoundaryId);
 
@@ -42,6 +52,7 @@ const BoundaryPanel: React.FC = () => {
       wallThermalCondition: 'adiabatic',
       heatFlux: 0,
       movingWallVelocity: [0, 0, 0],
+      force: [0, 0, 0],
     });
     selectBoundary(id);
   };
@@ -67,6 +78,7 @@ const BoundaryPanel: React.FC = () => {
           wallThermalCondition: 'adiabatic',
           heatFlux: 0,
           movingWallVelocity: [0, 0, 0],
+          force: [0, 0, 0],
         });
       }
     });
@@ -279,6 +291,38 @@ const BoundaryPanel: React.FC = () => {
             <div style={{ padding: 8, color: '#667', fontSize: 11 }}>
               Symmetry boundary: no additional parameters required. Zero normal gradient for all variables.
             </div>
+          )}
+
+          {/* FIXED support (structural) */}
+          {selected.type === 'fixed' && (
+            <div style={{ padding: 8, color: '#667', fontSize: 11 }}>
+              Fixed support: zero displacement on all axes. Used as the reaction boundary in structural analysis.
+            </div>
+          )}
+
+          {/* APPLIED FORCE (structural) */}
+          {selected.type === 'force' && (
+            <Form layout="vertical" size="small">
+              <Form.Item label="Force (N) [Fx, Fy, Fz]">
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {(['X', 'Y', 'Z'] as const).map((axis, i) => (
+                    <InputNumber
+                      key={axis}
+                      value={(selected.force ?? [0, 0, 0])[i]}
+                      step={10}
+                      placeholder={axis}
+                      style={{ flex: 1 }}
+                      onChange={(v) => {
+                        const cur = selected.force ?? [0, 0, 0];
+                        const next = [...cur] as [number, number, number];
+                        next[i] = v ?? 0;
+                        updateBoundary(selected.id, { force: next });
+                      }}
+                    />
+                  ))}
+                </div>
+              </Form.Item>
+            </Form>
           )}
         </>
       )}
