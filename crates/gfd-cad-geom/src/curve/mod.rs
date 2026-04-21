@@ -14,7 +14,7 @@ pub use bezier::Bezier;
 pub use bspline::BSplineCurve;
 pub use circle::Circle;
 pub use ellipse::Ellipse;
-pub use hermite::Hermite;
+pub use hermite::{catmull_rom_sample, Hermite};
 pub use line::Line;
 pub use polyline::Polyline;
 

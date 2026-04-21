@@ -9,7 +9,8 @@ Gaussian curvature per-vertex + Gauss-Bonnet total (iter 201),
 dihedral angle stats + sharp edge detection (iter 202),
 Bezier curve primitive with de Casteljau evaluation (iter 203),
 TriMesh::close_boundary_loops fan-fill heal op (iter 204),
-Hermite cubic curve with analytical tangent (iter 205).
+Hermite cubic curve with analytical tangent (iter 205),
+Catmull-Rom polyline sampler + cad.profile.catmull_rom RPC (iter 206).
 
 ## Current totals (iter 195)
 

@@ -31,6 +31,56 @@ impl Hermite {
     }
 }
 
+/// Sample a uniform Catmull-Rom spline through `points`, returning one
+/// polyline that passes through every control point with C¹-continuous
+/// tangents (finite differences of neighbors).
+///
+/// `samples_per_segment` controls density between consecutive control
+/// points; a value of 16 is typical for smooth GUI rendering. Each
+/// Catmull-Rom segment is a cubic Hermite with tangents
+///   v_i = 0.5 · (p_{i+1} − p_{i−1})
+/// for interior points, and one-sided differences at the endpoints.
+///
+/// Returns `None` if fewer than 2 points are provided.
+pub fn catmull_rom_sample(points: &[Point3], samples_per_segment: usize) -> Option<Vec<Point3>> {
+    let n = points.len();
+    if n < 2 { return None; }
+    let samples = samples_per_segment.max(1);
+    // Precompute tangents.
+    let mut tangents: Vec<Vector3> = Vec::with_capacity(n);
+    for i in 0..n {
+        let v = if i == 0 {
+            let d = points[1];
+            let s = points[0];
+            Vector3::new(d.x - s.x, d.y - s.y, d.z - s.z)
+        } else if i == n - 1 {
+            let s = points[n - 2];
+            let d = points[n - 1];
+            Vector3::new(d.x - s.x, d.y - s.y, d.z - s.z)
+        } else {
+            let a = points[i - 1];
+            let b = points[i + 1];
+            Vector3::new(0.5 * (b.x - a.x), 0.5 * (b.y - a.y), 0.5 * (b.z - a.z))
+        };
+        tangents.push(v);
+    }
+    let total_points = (n - 1) * samples + 1;
+    let mut out = Vec::with_capacity(total_points);
+    for seg in 0..(n - 1) {
+        let h = Hermite::new(points[seg], tangents[seg], points[seg + 1], tangents[seg + 1]);
+        let steps = if seg == n - 2 { samples } else { samples };
+        let inclusive = seg == n - 2;
+        for k in 0..steps {
+            let t = k as f64 / samples as f64;
+            if let Ok(p) = h.eval(t) { out.push(p); }
+        }
+        if inclusive {
+            out.push(points[n - 1]);
+        }
+    }
+    Some(out)
+}
+
 impl Curve for Hermite {
     fn u_range(&self) -> (f64, f64) { (0.0, 1.0) }
 
@@ -132,6 +182,44 @@ mod tests {
         let p = h.eval(0.5).unwrap();
         assert_abs_diff_eq!(p.x, 1.0, epsilon = 1e-10);
         assert_abs_diff_eq!(p.y, 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn catmull_rom_passes_through_controls() {
+        // 4 control points; sampled polyline must contain all of them.
+        let pts = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(2.0, 0.0, 0.0),
+            Point3::new(3.0, 1.0, 0.0),
+        ];
+        let samples = catmull_rom_sample(&pts, 8).unwrap();
+        assert_eq!(samples.first().unwrap().x, 0.0);
+        assert_abs_diff_eq!(samples.last().unwrap().x, 3.0, epsilon = 1e-10);
+        // Must contain each control point exactly (at segment boundaries).
+        for cp in &pts {
+            let hit = samples.iter().any(|p|
+                (p.x - cp.x).abs() < 1e-9 &&
+                (p.y - cp.y).abs() < 1e-9 &&
+                (p.z - cp.z).abs() < 1e-9
+            );
+            assert!(hit, "control point {:?} not in sampled polyline", cp);
+        }
+    }
+
+    #[test]
+    fn catmull_rom_two_points_is_straight_line() {
+        let pts = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(2.0, 0.0, 0.0),
+        ];
+        let samples = catmull_rom_sample(&pts, 4).unwrap();
+        // Start and end match, and every intermediate y == 0 and x monotonic.
+        assert_abs_diff_eq!(samples[0].x, 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(samples.last().unwrap().x, 2.0, epsilon = 1e-10);
+        for p in &samples {
+            assert_abs_diff_eq!(p.y, 0.0, epsilon = 1e-10);
+        }
     }
 
     #[test]

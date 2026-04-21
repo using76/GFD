@@ -305,6 +305,12 @@ export const cadClient = {
       'cad.profile.helix', { radius, pitch, turns, segments_per_turn },
     ),
 
+  catmullRom: (points: number[], samples_per_segment = 16) =>
+    send<{
+      points: number[]; point_count: number;
+      control_count: number; samples_per_segment: number;
+    }>('cad.profile.catmull_rom', { points, samples_per_segment }),
+
   sketchList: () =>
     send<{
       sketches: { index: number; point_count: number; entity_count: number; constraint_count: number }[];
