@@ -21,8 +21,9 @@
 
 Phase 1–8 scope is comprehensively covered. Deliberately deferred (non-blocking):
 B-Rep-level CSG (SSI + face classification), generic-edge rolling-ball fillet,
-full STEP AP214 reader with topology reconstruction, analytical B-spline derivatives.
-(`BSplineSurface` landed in iter 196, dodecahedron in iter 197 — now 5/5 Platonic solids.)
+full STEP AP214 reader with topology reconstruction.
+(`BSplineSurface` landed in iter 196, dodecahedron in iter 197, analytical
+B-spline curve/surface derivatives in iter 198 — now 5/5 Platonic solids.)
 **Goal**: FreeCAD 1.0의 Part Design + Sketcher + Shape Healing 기능을 **Pure Rust**로 재구현. OCCT 의존 없음. GUI는 Electron + React + Three.js (현재 스택 유지). 기존 Design/Display/Measure/Repair 탭 전체 제거 후 재작성.
 
 ---
@@ -100,8 +101,9 @@ full STEP AP214 reader with topology reconstruction, analytical B-spline derivat
 - [x] `Surface::eval` / `normal`
 - [x] `BoundingBox`
 - [x] `Ellipse` — iter 92
-- [x] `BSplineSurface` — iter 196 (tensor-product Cox-de Boor, clamped_uniform + normal via FD)
-- [ ] Analytical curve derivatives — **iter 3+**
+- [x] `BSplineSurface` — iter 196 (tensor-product Cox-de Boor, clamped_uniform)
+- [x] Analytical curve derivatives — iter 198 (`BSplineCurve::derivative`, `tangent` analytical)
+- [x] Analytical surface partial derivatives — iter 198 (`BSplineSurface::{partial_u, partial_v}`, `normal` analytical)
 
 ### Phase 2 — Topology (gfd-cad-topo) ⏳ **(iter 2–21)**
 - [x] `Shape` enum: Compound/Solid/Shell/Face/Wire/Edge/Vertex

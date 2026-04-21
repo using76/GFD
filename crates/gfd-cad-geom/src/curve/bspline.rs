@@ -53,6 +53,29 @@ impl BSplineCurve {
         lo
     }
 
+    /// Analytical derivative curve: degree-p B-spline → degree-(p-1) B-spline
+    /// with control points Q_i = p · (P_{i+1} − P_i) / (u_{i+p+1} − u_{i+1})
+    /// and knot vector self.knots\[1..len-1\]. The result's control points are
+    /// stored as `Point3` but represent tangent vectors (linear-combination
+    /// evaluates to a vector, since the Qi are already position differences).
+    pub fn derivative(&self) -> GeomResult<BSplineCurve> {
+        if self.degree == 0 {
+            return Err(GeomError::Degenerate("cannot differentiate degree-0 B-spline"));
+        }
+        let p = self.degree;
+        let n = self.control_points.len();
+        let mut new_cps = Vec::with_capacity(n - 1);
+        for i in 0..n - 1 {
+            let denom = self.knots[i + p + 1] - self.knots[i + 1];
+            let coef = if denom.abs() < f64::EPSILON { 0.0 } else { p as f64 / denom };
+            let a = self.control_points[i];
+            let b = self.control_points[i + 1];
+            new_cps.push(Point3::new(coef * (b.x - a.x), coef * (b.y - a.y), coef * (b.z - a.z)));
+        }
+        let new_knots = self.knots[1..self.knots.len() - 1].to_vec();
+        BSplineCurve::new(p - 1, new_cps, new_knots)
+    }
+
     fn basis_functions(&self, span: usize, u: f64) -> Vec<f64> {
         let p = self.degree;
         let mut n = vec![0.0; p + 1];
@@ -101,16 +124,15 @@ impl Curve for BSplineCurve {
     }
 
     fn tangent(&self, u: f64) -> GeomResult<Vector3> {
-        // Finite-difference fallback — analytical derivative via degree-reduction
-        // lands with Phase 4 sketcher use.
-        let h = 1.0e-6;
-        let (u0, u1) = self.u_range();
-        let um = (u - h).max(u0);
-        let up = (u + h).min(u1);
-        let pm = self.eval(um)?;
-        let pp = self.eval(up)?;
-        let dt = (up - um).max(f64::EPSILON);
-        Ok(Vector3::new((pp.x - pm.x) / dt, (pp.y - pm.y) / dt, (pp.z - pm.z) / dt))
+        // Analytical derivative via degree reduction. For degree-0 B-splines
+        // (piecewise-constant) the tangent is the zero vector — a finite
+        // difference fallback approximates it but the analytical result is 0.
+        if self.degree == 0 {
+            return Ok(Vector3::ZERO);
+        }
+        let deriv = self.derivative()?;
+        let v = deriv.eval(u)?;
+        Ok(Vector3::new(v.x, v.y, v.z))
     }
 
     fn length(&self) -> f64 {
@@ -158,5 +180,52 @@ mod tests {
         let p1 = c.eval(1.0).unwrap();
         assert_abs_diff_eq!(p0.x, 0.0, epsilon = 1e-10);
         assert_abs_diff_eq!(p1.x, 2.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn degree1_tangent_constant() {
+        // Degree-1 clamped uniform between (0,0,0) and (2,0,0): tangent is
+        // (2, 0, 0) everywhere (constant derivative of a straight line segment).
+        let cps = vec![Point3::new(0.0, 0.0, 0.0), Point3::new(2.0, 0.0, 0.0)];
+        let c = BSplineCurve::clamped_uniform(1, cps).unwrap();
+        let t = c.tangent(0.5).unwrap();
+        assert_abs_diff_eq!(t.x, 2.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(t.y, 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(t.z, 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn analytic_tangent_matches_finite_difference() {
+        // For a quadratic clamped B-spline the analytical derivative should
+        // match a centered finite difference to high precision.
+        let cps = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 2.0, 0.0),
+            Point3::new(3.0, 0.0, 0.0),
+        ];
+        let c = BSplineCurve::clamped_uniform(2, cps).unwrap();
+        let u = 0.37;
+        let h = 1.0e-5;
+        let pm = c.eval(u - h).unwrap();
+        let pp = c.eval(u + h).unwrap();
+        let fd = Vector3::new((pp.x - pm.x) / (2.0 * h), (pp.y - pm.y) / (2.0 * h), (pp.z - pm.z) / (2.0 * h));
+        let an = c.tangent(u).unwrap();
+        assert_abs_diff_eq!(an.x, fd.x, epsilon = 1e-6);
+        assert_abs_diff_eq!(an.y, fd.y, epsilon = 1e-6);
+        assert_abs_diff_eq!(an.z, fd.z, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn derivative_curve_reduces_degree() {
+        let cps = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 2.0, 0.0),
+            Point3::new(3.0, 0.0, 0.0),
+            Point3::new(5.0, 2.0, 0.0),
+        ];
+        let c = BSplineCurve::clamped_uniform(3, cps).unwrap();
+        let d = c.derivative().unwrap();
+        assert_eq!(d.degree, 2);
+        assert_eq!(d.control_points.len(), 3);
     }
 }

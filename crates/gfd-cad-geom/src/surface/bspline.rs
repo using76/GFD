@@ -187,29 +187,75 @@ impl Surface for BSplineSurface {
     }
 
     fn normal(&self, u: f64, v: f64) -> GeomResult<Vector3> {
-        // Finite-difference partial derivatives — matches BSplineCurve::tangent
-        // approach. Analytical derivative lands with later Phase 1 work.
-        let h = 1.0e-6;
-        let (u0, u1) = self.u_range();
-        let (v0, v1) = self.v_range();
-        let um = (u - h).max(u0);
-        let up = (u + h).min(u1);
-        let vm = (v - h).max(v0);
-        let vp = (v + h).min(v1);
-        let pu_m = self.eval(um, v)?;
-        let pu_p = self.eval(up, v)?;
-        let pv_m = self.eval(u, vm)?;
-        let pv_p = self.eval(u, vp)?;
-        let du = (up - um).max(f64::EPSILON);
-        let dv = (vp - vm).max(f64::EPSILON);
-        let su = Vector3::new((pu_p.x - pu_m.x) / du, (pu_p.y - pu_m.y) / du, (pu_p.z - pu_m.z) / du);
-        let sv = Vector3::new((pv_p.x - pv_m.x) / dv, (pv_p.y - pv_m.y) / dv, (pv_p.z - pv_m.z) / dv);
+        // Analytical partial derivatives via tensor-product rule.
+        let su = self.partial_u(u, v)?;
+        let sv = self.partial_v(u, v)?;
         let n = su.cross(sv);
         let len = n.norm();
         if len < f64::EPSILON {
             return Err(GeomError::Degenerate("degenerate surface normal"));
         }
         Ok(Vector3::new(n.x / len, n.y / len, n.z / len))
+    }
+}
+
+impl BSplineSurface {
+    /// Analytical ∂S/∂u via degree reduction in u.
+    pub fn partial_u(&self, u: f64, v: f64) -> GeomResult<Vector3> {
+        if self.u_degree == 0 {
+            return Ok(Vector3::ZERO);
+        }
+        let p = self.u_degree;
+        let q = self.v_degree;
+        let n_u = self.u_control_count;
+        let n_v = self.v_control_count;
+        // Build derivative control net Q_{i,j} = p * (P_{i+1,j} - P_{i,j}) / (u_{i+p+1} - u_{i+1}).
+        let mut q_net: Vec<Point3> = Vec::with_capacity((n_u - 1) * n_v);
+        for i in 0..n_u - 1 {
+            let denom = self.u_knots[i + p + 1] - self.u_knots[i + 1];
+            let coef = if denom.abs() < f64::EPSILON { 0.0 } else { p as f64 / denom };
+            for j in 0..n_v {
+                let a = self.control_points[i * n_v + j];
+                let b = self.control_points[(i + 1) * n_v + j];
+                q_net.push(Point3::new(coef * (b.x - a.x), coef * (b.y - a.y), coef * (b.z - a.z)));
+            }
+        }
+        let new_u_knots = self.u_knots[1..self.u_knots.len() - 1].to_vec();
+        let deriv = BSplineSurface::new(
+            p - 1, q, n_u - 1, n_v,
+            q_net, new_u_knots, self.v_knots.clone(),
+        )?;
+        let p_eval = deriv.eval(u, v)?;
+        Ok(Vector3::new(p_eval.x, p_eval.y, p_eval.z))
+    }
+
+    /// Analytical ∂S/∂v via degree reduction in v.
+    pub fn partial_v(&self, u: f64, v: f64) -> GeomResult<Vector3> {
+        if self.v_degree == 0 {
+            return Ok(Vector3::ZERO);
+        }
+        let p = self.u_degree;
+        let q = self.v_degree;
+        let n_u = self.u_control_count;
+        let n_v = self.v_control_count;
+        // Q_{i,j} = q * (P_{i,j+1} - P_{i,j}) / (v_{j+q+1} - v_{j+1}).
+        let mut q_net: Vec<Point3> = Vec::with_capacity(n_u * (n_v - 1));
+        for i in 0..n_u {
+            for j in 0..n_v - 1 {
+                let denom = self.v_knots[j + q + 1] - self.v_knots[j + 1];
+                let coef = if denom.abs() < f64::EPSILON { 0.0 } else { q as f64 / denom };
+                let a = self.control_points[i * n_v + j];
+                let b = self.control_points[i * n_v + (j + 1)];
+                q_net.push(Point3::new(coef * (b.x - a.x), coef * (b.y - a.y), coef * (b.z - a.z)));
+            }
+        }
+        let new_v_knots = self.v_knots[1..self.v_knots.len() - 1].to_vec();
+        let deriv = BSplineSurface::new(
+            p, q - 1, n_u, n_v - 1,
+            q_net, self.u_knots.clone(), new_v_knots,
+        )?;
+        let p_eval = deriv.eval(u, v)?;
+        Ok(Vector3::new(p_eval.x, p_eval.y, p_eval.z))
     }
 }
 
@@ -256,6 +302,25 @@ mod tests {
         assert_abs_diff_eq!(n.x, 0.0, epsilon = 1e-5);
         assert_abs_diff_eq!(n.y, 0.0, epsilon = 1e-5);
         assert_abs_diff_eq!(n.z.abs(), 1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn bilinear_partial_u_is_x_axis() {
+        // ∂S/∂u on the flat 1×1 patch is always (1, 0, 0): u runs along +x.
+        let s = flat_patch();
+        let du = s.partial_u(0.3, 0.7).unwrap();
+        assert_abs_diff_eq!(du.x, 1.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(du.y, 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(du.z, 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn bilinear_partial_v_is_y_axis() {
+        let s = flat_patch();
+        let dv = s.partial_v(0.3, 0.7).unwrap();
+        assert_abs_diff_eq!(dv.x, 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(dv.y, 1.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(dv.z, 0.0, epsilon = 1e-10);
     }
 
     #[test]
