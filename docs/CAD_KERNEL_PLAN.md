@@ -99,7 +99,8 @@ full STEP AP214 reader with topology reconstruction, `BSplineSurface`, dodecahed
 - [x] `Surface::eval` / `normal`
 - [x] `BoundingBox`
 - [x] `Ellipse` — iter 92
-- [ ] `BSplineSurface`, analytical curve derivatives — **iter 3+**
+- [x] `BSplineSurface` — iter 196 (tensor-product Cox-de Boor, clamped_uniform + normal via FD)
+- [ ] Analytical curve derivatives — **iter 3+**
 
 ### Phase 2 — Topology (gfd-cad-topo) ⏳ **(iter 2–21)**
 - [x] `Shape` enum: Compound/Solid/Shell/Face/Wire/Edge/Vertex
