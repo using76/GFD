@@ -2,12 +2,14 @@
 
 use crate::{Point3, Vector3, GeomResult};
 
+pub mod bezier;
 pub mod bspline;
 pub mod circle;
 pub mod ellipse;
 pub mod line;
 pub mod polyline;
 
+pub use bezier::Bezier;
 pub use bspline::BSplineCurve;
 pub use circle::Circle;
 pub use ellipse::Ellipse;
