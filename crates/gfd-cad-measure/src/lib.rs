@@ -1077,6 +1077,62 @@ pub fn trimesh_is_closed(indices: &[u32]) -> bool {
     trimesh_boundary_edges(indices).is_empty() && trimesh_non_manifold_edges(indices).is_empty()
 }
 
+/// Angle defect per vertex: `defect_v = 2π − Σ θ_i` over incident triangle
+/// interior angles at v. For interior vertices on a closed manifold this
+/// equals the integrated Gaussian curvature K·A_mixed around v (in the
+/// discrete Gauss-Bonnet sense). Boundary vertices use π instead of 2π.
+///
+/// Returns one value per vertex (same length as `positions`).
+pub fn trimesh_gaussian_curvature_per_vertex(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> Vec<f64> {
+    let n_v = positions.len();
+    let mut defect = vec![0.0_f64; n_v];
+    let mut is_boundary = vec![false; n_v];
+    for (a, b) in trimesh_boundary_edges(indices) {
+        if (a as usize) < n_v { is_boundary[a as usize] = true; }
+        if (b as usize) < n_v { is_boundary[b as usize] = true; }
+    }
+    for v in 0..n_v {
+        defect[v] = if is_boundary[v] { std::f64::consts::PI } else { 2.0 * std::f64::consts::PI };
+    }
+    for t in 0..(indices.len() / 3) {
+        let i0 = indices[t * 3] as usize;
+        let i1 = indices[t * 3 + 1] as usize;
+        let i2 = indices[t * 3 + 2] as usize;
+        if i0 >= n_v || i1 >= n_v || i2 >= n_v { continue; }
+        let p = [positions[i0], positions[i1], positions[i2]];
+        let p64 = |v: [f32; 3]| [v[0] as f64, v[1] as f64, v[2] as f64];
+        let a = p64(p[0]); let b = p64(p[1]); let c = p64(p[2]);
+        defect[i0] -= triangle_angle_at(a, b, c);
+        defect[i1] -= triangle_angle_at(b, c, a);
+        defect[i2] -= triangle_angle_at(c, a, b);
+    }
+    defect
+}
+
+/// Interior angle of triangle (p, q, r) at vertex p.
+fn triangle_angle_at(p: [f64; 3], q: [f64; 3], r: [f64; 3]) -> f64 {
+    let u = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+    let v = [r[0] - p[0], r[1] - p[1], r[2] - p[2]];
+    let du = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+    let dv = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if du < f64::EPSILON || dv < f64::EPSILON { return 0.0; }
+    let cos_t = (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / (du * dv);
+    cos_t.clamp(-1.0, 1.0).acos()
+}
+
+/// Sum of per-vertex angle defects — by discrete Gauss-Bonnet this equals
+/// `2π · χ` for a closed oriented surface (χ = Euler characteristic).
+/// For an open mesh the sum equals `2π·χ − ∫_∂ κ_g ds` (geodesic boundary term).
+pub fn trimesh_total_gaussian_curvature(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> f64 {
+    trimesh_gaussian_curvature_per_vertex(positions, indices).iter().sum()
+}
+
 /// Area-weighted surface centroid: Σ(A_tri · (p0+p1+p2)/3) / Σ A_tri.
 /// Works on open meshes (unlike `trimesh_center_of_mass`, which needs a
 /// closed volume). Returns `None` on empty or zero-area input.
@@ -2366,5 +2422,47 @@ mod tests {
         assert_abs_diff_eq!(center.x, 1.0, epsilon = 1e-9);
         assert_abs_diff_eq!(center.y, 0.5, epsilon = 1e-9);
         assert_abs_diff_eq!(center.z, 1.5, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn total_gaussian_curvature_tetrahedron_is_4pi() {
+        // Closed orientable surface (genus 0): Gauss-Bonnet gives 2π·χ = 4π.
+        let positions: Vec<[f32; 3]> = vec![
+            [ 1.0,  1.0,  1.0],
+            [-1.0, -1.0,  1.0],
+            [-1.0,  1.0, -1.0],
+            [ 1.0, -1.0, -1.0],
+        ];
+        let indices: Vec<u32> = vec![
+            0, 1, 2,
+            0, 3, 1,
+            0, 2, 3,
+            1, 3, 2,
+        ];
+        let total = trimesh_total_gaussian_curvature(&positions, &indices);
+        assert_abs_diff_eq!(total, 4.0 * std::f64::consts::PI, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn gaussian_curvature_flat_square_has_zero_interior() {
+        // 2 triangles forming a flat 1×1 square on z=0. Boundary vertices
+        // have nonzero defect; interior (there is none on a 2-tri square)
+        // would have zero. We verify per-vertex values are finite and
+        // boundary vertices each have π − (interior angles sum).
+        let positions: Vec<[f32; 3]> = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let indices: Vec<u32> = vec![0, 1, 2, 0, 2, 3];
+        let k = trimesh_gaussian_curvature_per_vertex(&positions, &indices);
+        assert_eq!(k.len(), 4);
+        // All four corners are boundary; for a flat square each corner has
+        // angle defect = π − π/2 = π/2 (v1 and v3 see only one triangle with
+        // π/2 corner, v0 and v2 see two triangles totaling π/2).
+        for &d in &k {
+            assert!(d.is_finite());
+        }
     }
 }

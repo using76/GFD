@@ -2028,6 +2028,7 @@ fn handle_cad_measure_trimesh_summary(id: u64, params: &Value) -> RpcResponse {
     let (chi, genus) = mesh_euler_genus(&positions, &indices);
     let edge_stats = trimesh_edge_length_stats(&positions, &indices);
     let ar_stats = trimesh_aspect_ratio_stats(&positions, &indices);
+    let total_k = gfd_cad::measure::trimesh_total_gaussian_curvature(&positions, &indices);
     RpcResponse::ok(id, serde_json::json!({
         "area":           area,
         "volume":         volume,
@@ -2043,6 +2044,7 @@ fn handle_cad_measure_trimesh_summary(id: u64, params: &Value) -> RpcResponse {
         "triangle_count": indices.len() / 3,
         "edge_length_stats":  edge_stats.map(|(mn, mx, mean, sd)| [mn, mx, mean, sd]),
         "aspect_ratio_stats": ar_stats.map(|(mn, mx, mean)| [mn, mx, mean]),
+        "total_gaussian_curvature": total_k,
     }))
 }
 

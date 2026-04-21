@@ -4,7 +4,8 @@
 **Phase 1–8 all functionally complete** — see Completion Matrix in §9b.
 Recent additions: BSplineSurface (iter 196), dodecahedron (iter 197),
 analytical B-spline derivatives (iter 198), non-manifold edge + duplicate face
-validity (iter 199).
+validity (iter 199), remove_duplicate_faces fix op (iter 200),
+Gaussian curvature per-vertex + Gauss-Bonnet total (iter 201).
 
 ## Current totals (iter 195)
 
