@@ -1133,6 +1133,109 @@ pub fn trimesh_total_gaussian_curvature(
     trimesh_gaussian_curvature_per_vertex(positions, indices).iter().sum()
 }
 
+/// For every interior edge (shared by exactly 2 triangles), compute the
+/// dihedral angle between the triangle normals — 0 means coplanar,
+/// π means the surface folds back on itself. Boundary and non-manifold
+/// edges are skipped. Returns `Some((min, max, mean))` or `None` if no
+/// interior edge is found.
+pub fn trimesh_dihedral_angle_stats(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> Option<(f64, f64, f64)> {
+    let angles = dihedral_angles(positions, indices);
+    if angles.is_empty() { return None; }
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    let mut sum = 0.0;
+    for a in &angles {
+        if *a < min { min = *a; }
+        if *a > max { max = *a; }
+        sum += *a;
+    }
+    Some((min, max, sum / angles.len() as f64))
+}
+
+/// Every interior edge whose dihedral angle exceeds `threshold_rad`. Useful
+/// for feature detection (box corners, fillet transitions) and for picking
+/// preservation edges during mesh decimation. Returned edge pairs are
+/// (v_min, v_max).
+pub fn trimesh_sharp_edges(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+    threshold_rad: f64,
+) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    // Build edge → triangle-list map.
+    let mut edges: std::collections::HashMap<(u32, u32), Vec<usize>> =
+        std::collections::HashMap::new();
+    for t in 0..(indices.len() / 3) {
+        let i0 = indices[t * 3];
+        let i1 = indices[t * 3 + 1];
+        let i2 = indices[t * 3 + 2];
+        for (a, b) in [(i0, i1), (i1, i2), (i2, i0)] {
+            let k = if a < b { (a, b) } else { (b, a) };
+            edges.entry(k).or_default().push(t);
+        }
+    }
+    for (edge, tris) in edges {
+        if tris.len() != 2 { continue; }
+        let n0 = tri_normal(positions, indices, tris[0]);
+        let n1 = tri_normal(positions, indices, tris[1]);
+        let Some(angle) = normals_angle(n0, n1) else { continue };
+        if angle >= threshold_rad {
+            out.push(edge);
+        }
+    }
+    out
+}
+
+fn dihedral_angles(positions: &[[f32; 3]], indices: &[u32]) -> Vec<f64> {
+    let mut edges: std::collections::HashMap<(u32, u32), Vec<usize>> =
+        std::collections::HashMap::new();
+    for t in 0..(indices.len() / 3) {
+        let i0 = indices[t * 3];
+        let i1 = indices[t * 3 + 1];
+        let i2 = indices[t * 3 + 2];
+        for (a, b) in [(i0, i1), (i1, i2), (i2, i0)] {
+            let k = if a < b { (a, b) } else { (b, a) };
+            edges.entry(k).or_default().push(t);
+        }
+    }
+    let mut out = Vec::new();
+    for (_, tris) in edges {
+        if tris.len() != 2 { continue; }
+        let n0 = tri_normal(positions, indices, tris[0]);
+        let n1 = tri_normal(positions, indices, tris[1]);
+        if let Some(a) = normals_angle(n0, n1) { out.push(a); }
+    }
+    out
+}
+
+fn tri_normal(positions: &[[f32; 3]], indices: &[u32], t: usize) -> [f64; 3] {
+    let a = positions[indices[t * 3] as usize];
+    let b = positions[indices[t * 3 + 1] as usize];
+    let c = positions[indices[t * 3 + 2] as usize];
+    let ux = (b[0] - a[0]) as f64;
+    let uy = (b[1] - a[1]) as f64;
+    let uz = (b[2] - a[2]) as f64;
+    let vx = (c[0] - a[0]) as f64;
+    let vy = (c[1] - a[1]) as f64;
+    let vz = (c[2] - a[2]) as f64;
+    [
+        uy * vz - uz * vy,
+        uz * vx - ux * vz,
+        ux * vy - uy * vx,
+    ]
+}
+
+fn normals_angle(n0: [f64; 3], n1: [f64; 3]) -> Option<f64> {
+    let l0 = (n0[0] * n0[0] + n0[1] * n0[1] + n0[2] * n0[2]).sqrt();
+    let l1 = (n1[0] * n1[0] + n1[1] * n1[1] + n1[2] * n1[2]).sqrt();
+    if l0 < f64::EPSILON || l1 < f64::EPSILON { return None; }
+    let cos_t = (n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2]) / (l0 * l1);
+    Some(cos_t.clamp(-1.0, 1.0).acos())
+}
+
 /// Area-weighted surface centroid: Σ(A_tri · (p0+p1+p2)/3) / Σ A_tri.
 /// Works on open meshes (unlike `trimesh_center_of_mass`, which needs a
 /// closed volume). Returns `None` on empty or zero-area input.
@@ -2441,6 +2544,25 @@ mod tests {
         ];
         let total = trimesh_total_gaussian_curvature(&positions, &indices);
         assert_abs_diff_eq!(total, 4.0 * std::f64::consts::PI, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn dihedral_right_angle_on_box_corner() {
+        // Two triangles forming an L-shape meeting at edge (v1, v2) with 90°
+        // dihedral: one triangle on z=0 plane, the other on y=0 plane.
+        let positions: Vec<[f32; 3]> = vec![
+            [0.0, 0.0, 0.0], // v0
+            [1.0, 0.0, 0.0], // v1
+            [1.0, 1.0, 0.0], // v2  (shared edge goes v1→v2)
+            [1.0, 0.0, 1.0], // v3
+        ];
+        // T0 = v0,v1,v2 on z=0 (normal +Z)
+        // T1 = v1,v3,v2 on x=1 (normal +X)
+        let indices: Vec<u32> = vec![0, 1, 2, 1, 3, 2];
+        let stats = trimesh_dihedral_angle_stats(&positions, &indices).unwrap();
+        assert_abs_diff_eq!(stats.0, std::f64::consts::FRAC_PI_2, epsilon = 1e-10);
+        let sharp = trimesh_sharp_edges(&positions, &indices, std::f64::consts::FRAC_PI_4);
+        assert_eq!(sharp.len(), 1);
     }
 
     #[test]
