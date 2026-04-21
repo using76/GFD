@@ -19,8 +19,48 @@ impl Plane {
         Self::new(Point3::ORIGIN, Direction3::Z, Direction3::X)
     }
 
+    /// Construct the plane through three non-colinear points `a`, `b`, `c`.
+    /// The plane normal is (b-a) × (c-a) normalised; the `x_axis` is aligned
+    /// with (b-a). Returns `Err(Degenerate)` if the three points are
+    /// colinear or coincident within `LINEAR_TOL`.
+    pub fn from_three_points(a: Point3, b: Point3, c: Point3) -> GeomResult<Self> {
+        let ab = Vector3::new(b.x - a.x, b.y - a.y, b.z - a.z);
+        let ac = Vector3::new(c.x - a.x, c.y - a.y, c.z - a.z);
+        let n = ab.cross(ac);
+        let nd = n.to_direction()?;
+        let xd = ab.to_direction()?;
+        Ok(Self::new(a, nd, xd))
+    }
+
     fn y_axis(&self) -> Vector3 {
         self.normal.as_vec().cross(self.x_axis.as_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_abs_diff_eq;
+
+    #[test]
+    fn plane_from_three_points_z0() {
+        let p = Plane::from_three_points(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ).unwrap();
+        assert_abs_diff_eq!(p.normal.z.abs(), 1.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(p.x_axis.x, 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn plane_from_colinear_points_err() {
+        let r = Plane::from_three_points(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(2.0, 0.0, 0.0),
+        );
+        assert!(r.is_err());
     }
 }
 
