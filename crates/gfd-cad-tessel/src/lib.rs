@@ -264,6 +264,89 @@ impl TriMesh {
         }
     }
 
+    /// Fill every open boundary loop with a centroid-fan triangulation,
+    /// making the mesh watertight. Requires the mesh to be welded first
+    /// (use `weld(tol)` on STL-imported meshes). Returns the number of
+    /// boundary loops filled.
+    ///
+    /// Each boundary loop is detected by walking the half-edge graph:
+    /// only edges used by exactly one triangle are boundary edges, and the
+    /// winding order defines the loop direction. The fan is added with
+    /// winding consistent with the existing surrounding triangulation
+    /// (opposite to the boundary walk direction, so the new triangles face
+    /// outward).
+    pub fn close_boundary_loops(&mut self) -> usize {
+        // 1) Build directed edge list: (from, to) for every triangle edge.
+        let mut dir_edges: std::collections::HashMap<(u32, u32), u32> =
+            std::collections::HashMap::new();
+        for t in 0..(self.indices.len() / 3) {
+            let i0 = self.indices[t * 3];
+            let i1 = self.indices[t * 3 + 1];
+            let i2 = self.indices[t * 3 + 2];
+            for (a, b) in [(i0, i1), (i1, i2), (i2, i0)] {
+                *dir_edges.entry((a, b)).or_insert(0) += 1;
+            }
+        }
+        // 2) Boundary directed edge = one where the reverse does not exist.
+        //    These already have the correct orientation for the boundary loop.
+        let mut boundary: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        for ((a, b), _c) in &dir_edges {
+            if !dir_edges.contains_key(&(*b, *a)) {
+                boundary.insert(*a, *b);
+            }
+        }
+        if boundary.is_empty() { return 0; }
+        // 3) Walk the directed boundary graph to extract each closed loop.
+        let mut loops: Vec<Vec<u32>> = Vec::new();
+        let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for &start in boundary.keys() {
+            if visited.contains(&start) { continue; }
+            let mut loop_vs = Vec::new();
+            let mut cur = start;
+            let mut steps = 0;
+            let max_steps = boundary.len() + 1;
+            while !visited.contains(&cur) && steps < max_steps {
+                visited.insert(cur);
+                loop_vs.push(cur);
+                let Some(&next) = boundary.get(&cur) else { break };
+                cur = next;
+                steps += 1;
+                if cur == start { break; }
+            }
+            if loop_vs.len() >= 3 { loops.push(loop_vs); }
+        }
+        // 4) Fan-triangulate every loop: add centroid, emit triangles.
+        //    Winding (centroid, loop[i+1], loop[i]) is the reverse of the
+        //    boundary walk — the new face normal points *away* from the
+        //    existing adjacent triangle, i.e. outward on a previously open
+        //    shell.
+        let filled = loops.len();
+        for loop_vs in loops {
+            let n = loop_vs.len();
+            let mut cx = 0.0_f32;
+            let mut cy = 0.0_f32;
+            let mut cz = 0.0_f32;
+            for &v in &loop_vs {
+                let p = self.positions[v as usize];
+                cx += p[0]; cy += p[1]; cz += p[2];
+            }
+            cx /= n as f32; cy /= n as f32; cz /= n as f32;
+            let c_idx = self.positions.len() as u32;
+            self.positions.push([cx, cy, cz]);
+            if !self.normals.is_empty() {
+                self.normals.push([0.0, 0.0, 1.0]);
+            }
+            for i in 0..n {
+                let a = loop_vs[i];
+                let b = loop_vs[(i + 1) % n];
+                self.indices.push(c_idx);
+                self.indices.push(b);
+                self.indices.push(a);
+            }
+        }
+        filled
+    }
+
     /// Recomputes per-vertex normals from the area-weighted sum of incident
     /// triangle normals, then normalises. Replaces any existing `normals`.
     /// Uses the current `positions`/`indices`; call after `weld` if you
@@ -847,5 +930,60 @@ mod tests {
         }
         let chi = 8_i64 - edges.len() as i64 + (mesh.indices.len() / 3) as i64;
         assert_eq!(chi, 2);
+    }
+
+    #[test]
+    fn close_boundary_loops_caps_open_square() {
+        // An open unit square (2 triangles in z=0 plane) has 4 boundary
+        // edges forming one loop. Closing it should add 1 centroid vertex
+        // and 4 fan triangles — total 6 triangles, no more boundary edges.
+        let mut m = TriMesh {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            normals: vec![],
+            indices: vec![0, 1, 2, 0, 2, 3],
+        };
+        let filled = m.close_boundary_loops();
+        assert_eq!(filled, 1);
+        assert_eq!(m.positions.len(), 5);      // 4 corners + 1 centroid
+        assert_eq!(m.indices.len() / 3, 6);    // 2 original + 4 fan
+        // After close, every edge must be used exactly twice.
+        let mut use_counts: std::collections::HashMap<(u32, u32), u32> =
+            std::collections::HashMap::new();
+        for t in 0..(m.indices.len() / 3) {
+            let i0 = m.indices[t * 3];
+            let i1 = m.indices[t * 3 + 1];
+            let i2 = m.indices[t * 3 + 2];
+            for (a, b) in [(i0, i1), (i1, i2), (i2, i0)] {
+                let k = if a < b { (a, b) } else { (b, a) };
+                *use_counts.entry(k).or_insert(0) += 1;
+            }
+        }
+        for &n in use_counts.values() {
+            assert_eq!(n, 2, "every edge should be shared by exactly two triangles");
+        }
+    }
+
+    #[test]
+    fn close_boundary_loops_noop_on_closed_mesh() {
+        // Closed tetrahedron → no boundary to close.
+        let mut m = TriMesh {
+            positions: vec![
+                [1.0, 1.0, 1.0],
+                [-1.0, -1.0, 1.0],
+                [-1.0, 1.0, -1.0],
+                [1.0, -1.0, -1.0],
+            ],
+            normals: vec![],
+            indices: vec![0, 1, 2,  0, 3, 1,  0, 2, 3,  1, 3, 2],
+        };
+        let filled = m.close_boundary_loops();
+        assert_eq!(filled, 0);
+        assert_eq!(m.positions.len(), 4);
+        assert_eq!(m.indices.len() / 3, 4);
     }
 }

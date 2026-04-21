@@ -7,7 +7,8 @@ analytical B-spline derivatives (iter 198), non-manifold edge + duplicate face
 validity (iter 199), remove_duplicate_faces fix op (iter 200),
 Gaussian curvature per-vertex + Gauss-Bonnet total (iter 201),
 dihedral angle stats + sharp edge detection (iter 202),
-Bezier curve primitive with de Casteljau evaluation (iter 203).
+Bezier curve primitive with de Casteljau evaluation (iter 203),
+TriMesh::close_boundary_loops fan-fill heal op (iter 204).
 
 ## Current totals (iter 195)
 

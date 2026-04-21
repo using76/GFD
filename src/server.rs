@@ -498,6 +498,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.mesh.smooth"       => handle_cad_mesh_smooth(req.id, &req.params),
         "cad.mesh.subdivide"    => handle_cad_mesh_subdivide(req.id, &req.params),
         "cad.mesh.weld"         => handle_cad_mesh_weld(req.id, &req.params),
+        "cad.mesh.close_boundaries" => handle_cad_mesh_close_boundaries(req.id, &req.params),
         "cad.mesh.transform"    => handle_cad_mesh_transform(req.id, &req.params),
         "cad.mesh.compute_normals" => handle_cad_mesh_compute_normals(req.id, &req.params),
         "cad.mesh.reverse_winding" => handle_cad_mesh_reverse_winding(req.id, &req.params),
@@ -2533,6 +2534,12 @@ fn handle_cad_mesh_weld(id: u64, params: &Value) -> RpcResponse {
         "pruned":         pruned,
         "tol":            tol,
     }))
+}
+
+fn handle_cad_mesh_close_boundaries(id: u64, params: &Value) -> RpcResponse {
+    let mut m = match parse_raw_trimesh(params) { Ok(m) => m, Err(e) => return RpcResponse::err(id, e) };
+    let filled = m.close_boundary_loops();
+    dump_trimesh(id, &m, serde_json::json!({ "loops_filled": filled }))
 }
 
 /// Mesh boolean on raw TriMesh inputs (imported STL/OBJ/PLY etc.) —

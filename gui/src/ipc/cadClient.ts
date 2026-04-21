@@ -529,6 +529,13 @@ export const cadClient = {
       welded_removed: number; pruned: number; tol: number;
     }>('cad.mesh.weld', { positions, indices, tol }),
 
+  meshCloseBoundaries: (positions: number[], indices: number[]) =>
+    send<{
+      positions: number[]; normals: number[]; indices: number[];
+      triangle_count: number; vertex_count: number;
+      loops_filled: number;
+    }>('cad.mesh.close_boundaries', { positions, indices }),
+
   meshBooleanRaw: (
     a_positions: number[], a_indices: number[],
     b_positions: number[], b_indices: number[],
