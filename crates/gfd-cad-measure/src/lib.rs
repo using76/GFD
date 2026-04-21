@@ -304,6 +304,54 @@ pub fn principal_axes(arena: &ShapeArena, id: ShapeId) -> MeasureResult<(f64, f6
     Ok((vals.0, vals.1, vals.2, vecs))
 }
 
+/// Signed distance from a point to an oriented plane. The plane is given
+/// by a base point `origin` and a normal vector (need not be unit — we
+/// normalize). Positive means the query point is on the side the normal
+/// points toward; negative on the other. Returns 0 for a degenerate
+/// (zero-length) normal.
+pub fn point_plane_signed_distance(
+    point: Point3,
+    origin: Point3,
+    normal: [f64; 3],
+) -> f64 {
+    let nl = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+    if nl < f64::EPSILON { return 0.0; }
+    let nx = normal[0] / nl;
+    let ny = normal[1] / nl;
+    let nz = normal[2] / nl;
+    (point.x - origin.x) * nx + (point.y - origin.y) * ny + (point.z - origin.z) * nz
+}
+
+/// Ray-plane intersection. Ray = `ray_origin + t · ray_dir`, plane has
+/// `plane_origin` + unit (or non-unit) normal. Returns `Some((t, hit))`
+/// when the ray is not parallel to the plane and the hit parameter is
+/// finite; `None` when parallel within tolerance.
+///
+/// `t < 0` is legal — callers interested in forward-only hits should
+/// filter. Useful for click-to-plane picking, section views, and
+/// projecting 3D cursors onto construction planes.
+pub fn ray_plane_intersection(
+    ray_origin: Point3,
+    ray_dir: [f64; 3],
+    plane_origin: Point3,
+    plane_normal: [f64; 3],
+) -> Option<(f64, Point3)> {
+    let dn = ray_dir[0] * plane_normal[0]
+           + ray_dir[1] * plane_normal[1]
+           + ray_dir[2] * plane_normal[2];
+    if dn.abs() < 1.0e-12 { return None; }
+    let num = (plane_origin.x - ray_origin.x) * plane_normal[0]
+            + (plane_origin.y - ray_origin.y) * plane_normal[1]
+            + (plane_origin.z - ray_origin.z) * plane_normal[2];
+    let t = num / dn;
+    let hit = Point3::new(
+        ray_origin.x + t * ray_dir[0],
+        ray_origin.y + t * ray_dir[1],
+        ray_origin.z + t * ray_dir[2],
+    );
+    Some((t, hit))
+}
+
 /// Standalone Lumelsky segment-segment closest points in 3D. Returns the
 /// distance plus the two closest points (`cp_a` on segment A, `cp_b` on
 /// segment B) and the segment parameters `(s, t)` in [0, 1]. Degenerate
@@ -2601,6 +2649,46 @@ mod tests {
         ];
         let total = trimesh_total_gaussian_curvature(&positions, &indices);
         assert_abs_diff_eq!(total, 4.0 * std::f64::consts::PI, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn point_plane_signed_distance_above_below() {
+        // Plane: z=0 with normal +Z. Points above have positive distance.
+        let origin = Point3::new(0.0, 0.0, 0.0);
+        let n = [0.0, 0.0, 1.0];
+        assert_abs_diff_eq!(
+            point_plane_signed_distance(Point3::new(1.0, 2.0, 3.0), origin, n),
+            3.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(
+            point_plane_signed_distance(Point3::new(1.0, 2.0, -3.0), origin, n),
+            -3.0, epsilon = 1e-10);
+        // Non-unit normal should still give correct (normalized) distance.
+        assert_abs_diff_eq!(
+            point_plane_signed_distance(Point3::new(1.0, 2.0, 3.0), origin, [0.0, 0.0, 5.0]),
+            3.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn ray_plane_hits_plane_z_eq_zero() {
+        let (t, hit) = ray_plane_intersection(
+            Point3::new(0.0, 0.0, 10.0),
+            [0.0, 0.0, -1.0],
+            Point3::new(0.0, 0.0, 0.0),
+            [0.0, 0.0, 1.0],
+        ).unwrap();
+        assert_abs_diff_eq!(t, 10.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(hit.z, 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn ray_plane_parallel_returns_none() {
+        let result = ray_plane_intersection(
+            Point3::new(0.0, 0.0, 5.0),
+            [1.0, 0.0, 0.0],
+            Point3::new(0.0, 0.0, 0.0),
+            [0.0, 0.0, 1.0],
+        );
+        assert!(result.is_none());
     }
 
     #[test]

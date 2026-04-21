@@ -13,7 +13,8 @@ Hermite cubic curve with analytical tangent (iter 205),
 Catmull-Rom polyline sampler + cad.profile.catmull_rom RPC (iter 206),
 Vertex valence statistics in trimesh_summary (iter 207),
 NurbsCurve (rational B-spline) with analytical derivative (iter 208),
-segment-segment distance 3D standalone + RPC (iter 209).
+segment-segment distance 3D standalone + RPC (iter 209),
+point-plane signed distance + ray-plane intersection (iter 210).
 
 ## Current totals (iter 195)
 

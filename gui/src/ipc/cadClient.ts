@@ -402,6 +402,25 @@ export const cadClient = {
       s: number; t: number;
     }>('cad.measure.segment_segment', { a0, a1, b0, b1 }),
 
+  pointPlaneDistance: (
+    point: [number, number, number],
+    plane_origin: [number, number, number],
+    plane_normal: [number, number, number],
+  ) =>
+    send<{ signed_distance: number; distance: number }>(
+      'cad.measure.point_plane', { point, plane_origin, plane_normal },
+    ),
+
+  rayPlaneIntersect: (
+    ray_origin: [number, number, number],
+    ray_dir: [number, number, number],
+    plane_origin: [number, number, number],
+    plane_normal: [number, number, number],
+  ) =>
+    send<{ t?: number; hit?: [number, number, number]; parallel: boolean }>(
+      'cad.measure.ray_plane', { ray_origin, ray_dir, plane_origin, plane_normal },
+    ),
+
   meshQuality: (shape_id: string, weld = true, tol = 1e-4, u_steps = 32, v_steps = 16) =>
     send<{
       shape_id: string;

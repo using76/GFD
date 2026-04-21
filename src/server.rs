@@ -530,6 +530,8 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.measure.bbox_volume"  => handle_cad_measure_bbox_volume(state, req.id, &req.params),
         "cad.measure.distance"     => handle_cad_measure_distance(state, req.id, &req.params),
         "cad.measure.segment_segment" => handle_cad_measure_segment_segment(req.id, &req.params),
+        "cad.measure.point_plane"     => handle_cad_measure_point_plane(req.id, &req.params),
+        "cad.measure.ray_plane"       => handle_cad_measure_ray_plane(req.id, &req.params),
         "cad.measure.surface_area" => handle_cad_measure_surface_area(state, req.id, &req.params),
         "cad.measure.volume"       => handle_cad_measure_volume(state, req.id, &req.params),
         "cad.measure.center_of_mass" => handle_cad_measure_com(state, req.id, &req.params),
@@ -3812,6 +3814,47 @@ fn handle_cad_measure_distance(state: &ServerState, id: u64, params: &Value) -> 
     match cad_distance(arena, a, b) {
         Ok(d) => RpcResponse::ok(id, serde_json::json!({ "distance": d })),
         Err(e) => RpcResponse::err(id, format!("distance failed: {}", e)),
+    }
+}
+
+fn parse_xyz(params: &Value, key: &str) -> Result<[f64; 3], String> {
+    let arr = params.get(key).and_then(|v| v.as_array())
+        .ok_or_else(|| format!("missing {} [x,y,z]", key))?;
+    if arr.len() < 3 { return Err(format!("{} must have 3 components", key)); }
+    Ok([
+        arr[0].as_f64().unwrap_or(0.0),
+        arr[1].as_f64().unwrap_or(0.0),
+        arr[2].as_f64().unwrap_or(0.0),
+    ])
+}
+
+fn handle_cad_measure_point_plane(id: u64, params: &Value) -> RpcResponse {
+    let point = match parse_xyz(params, "point") { Ok(p) => p, Err(e) => return RpcResponse::err(id, e) };
+    let origin = match parse_xyz(params, "plane_origin") { Ok(p) => p, Err(e) => return RpcResponse::err(id, e) };
+    let normal = match parse_xyz(params, "plane_normal") { Ok(p) => p, Err(e) => return RpcResponse::err(id, e) };
+    let d = gfd_cad::measure::point_plane_signed_distance(
+        gfd_cad::geom::Point3::new(point[0], point[1], point[2]),
+        gfd_cad::geom::Point3::new(origin[0], origin[1], origin[2]),
+        normal,
+    );
+    RpcResponse::ok(id, serde_json::json!({ "signed_distance": d, "distance": d.abs() }))
+}
+
+fn handle_cad_measure_ray_plane(id: u64, params: &Value) -> RpcResponse {
+    let ro = match parse_xyz(params, "ray_origin") { Ok(p) => p, Err(e) => return RpcResponse::err(id, e) };
+    let rd = match parse_xyz(params, "ray_dir") { Ok(p) => p, Err(e) => return RpcResponse::err(id, e) };
+    let po = match parse_xyz(params, "plane_origin") { Ok(p) => p, Err(e) => return RpcResponse::err(id, e) };
+    let pn = match parse_xyz(params, "plane_normal") { Ok(p) => p, Err(e) => return RpcResponse::err(id, e) };
+    match gfd_cad::measure::ray_plane_intersection(
+        gfd_cad::geom::Point3::new(ro[0], ro[1], ro[2]), rd,
+        gfd_cad::geom::Point3::new(po[0], po[1], po[2]), pn,
+    ) {
+        Some((t, hit)) => RpcResponse::ok(id, serde_json::json!({
+            "t": t,
+            "hit": [hit.x, hit.y, hit.z],
+            "parallel": false,
+        })),
+        None => RpcResponse::ok(id, serde_json::json!({ "parallel": true })),
     }
 }
 
