@@ -1,0 +1,11 @@
+[package]
+name = "gfd-cad-tessel"
+version = "0.1.0"
+edition = "2021"
+description = "GFD CAD — B-Rep → triangle mesh tessellation"
+
+[dependencies]
+gfd-cad-geom = { path = "../gfd-cad-geom" }
+gfd-cad-topo = { path = "../gfd-cad-topo" }
+thiserror    = { workspace = true }
+serde        = { workspace = true }

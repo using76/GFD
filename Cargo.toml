@@ -20,6 +20,16 @@ members = [
     "crates/gfd-vdb",
     "crates/gfd-gpu",
     "crates/gfd-mesh",
+    "crates/gfd-cad-geom",
+    "crates/gfd-cad-topo",
+    "crates/gfd-cad-bool",
+    "crates/gfd-cad-sketch",
+    "crates/gfd-cad-feature",
+    "crates/gfd-cad-io",
+    "crates/gfd-cad-heal",
+    "crates/gfd-cad-measure",
+    "crates/gfd-cad-tessel",
+    "crates/gfd-cad",
 ]
 
 [package]
@@ -84,6 +94,7 @@ gfd-boundary    = { path = "crates/gfd-boundary" }
 gfd-material    = { path = "crates/gfd-material" }
 gfd-postprocess = { path = "crates/gfd-postprocess" }
 gfd-mesh        = { path = "crates/gfd-mesh" }
+gfd-cad         = { path = "crates/gfd-cad" }
 gfd-gpu         = { path = "crates/gfd-gpu", optional = true }
 
 # External (from workspace)

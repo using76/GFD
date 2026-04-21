@@ -187,6 +187,7 @@ dependencies = [
  "anyhow",
  "clap",
  "gfd-boundary",
+ "gfd-cad",
  "gfd-core",
  "gfd-coupling",
  "gfd-discretize",
@@ -217,6 +218,125 @@ version = "0.1.0"
 dependencies = [
  "gfd-core",
  "gfd-expression",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "gfd-cad"
+version = "0.1.0"
+dependencies = [
+ "gfd-cad-bool",
+ "gfd-cad-feature",
+ "gfd-cad-geom",
+ "gfd-cad-heal",
+ "gfd-cad-io",
+ "gfd-cad-measure",
+ "gfd-cad-sketch",
+ "gfd-cad-tessel",
+ "gfd-cad-topo",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "gfd-cad-bool"
+version = "0.1.0"
+dependencies = [
+ "gfd-cad-geom",
+ "gfd-cad-tessel",
+ "gfd-cad-topo",
+ "thiserror",
+]
+
+[[package]]
+name = "gfd-cad-feature"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "gfd-cad-geom",
+ "gfd-cad-measure",
+ "gfd-cad-sketch",
+ "gfd-cad-topo",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "gfd-cad-geom"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "nalgebra",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "gfd-cad-heal"
+version = "0.1.0"
+dependencies = [
+ "gfd-cad-feature",
+ "gfd-cad-geom",
+ "gfd-cad-topo",
+ "thiserror",
+]
+
+[[package]]
+name = "gfd-cad-io"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gfd-cad-geom",
+ "gfd-cad-tessel",
+ "gfd-cad-topo",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "gfd-cad-measure"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "gfd-cad-bool",
+ "gfd-cad-feature",
+ "gfd-cad-geom",
+ "gfd-cad-tessel",
+ "gfd-cad-topo",
+ "nalgebra",
+ "thiserror",
+]
+
+[[package]]
+name = "gfd-cad-sketch"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "gfd-cad-geom",
+ "nalgebra",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "gfd-cad-tessel"
+version = "0.1.0"
+dependencies = [
+ "gfd-cad-geom",
+ "gfd-cad-topo",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "gfd-cad-topo"
+version = "0.1.0"
+dependencies = [
+ "gfd-cad-geom",
+ "nalgebra",
  "serde",
  "thiserror",
 ]

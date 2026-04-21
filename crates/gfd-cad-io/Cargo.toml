@@ -1,0 +1,14 @@
+[package]
+name = "gfd-cad-io"
+version = "0.1.0"
+edition = "2021"
+description = "GFD CAD — STEP / IGES / STL / BRep import & export"
+
+[dependencies]
+gfd-cad-geom   = { path = "../gfd-cad-geom" }
+gfd-cad-topo   = { path = "../gfd-cad-topo" }
+gfd-cad-tessel = { path = "../gfd-cad-tessel" }
+thiserror      = { workspace = true }
+anyhow         = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }

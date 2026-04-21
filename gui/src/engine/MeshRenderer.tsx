@@ -91,6 +91,7 @@ function buildContourColors(
   return colors;
 }
 
+
 /**
  * Renders a demo cube when no mesh is loaded (so the viewport is not empty).
  */
@@ -171,6 +172,52 @@ export default function MeshRenderer() {
     geom.setAttribute('position', new THREE.BufferAttribute(posCopy, 3));
     return geom;
   }, [meshDisplayData]);
+
+  // Build solid domain geometry (when domainMode is 'both')
+  const solidGeometry = useMemo(() => {
+    if (!meshDisplayData?.solidPositions || meshDisplayData.solidPositions.length === 0) return null;
+    const geom = new THREE.BufferGeometry();
+    const posCopy = new Float32Array(meshDisplayData.solidPositions);
+    geom.setAttribute('position', new THREE.BufferAttribute(posCopy, 3));
+    geom.computeVertexNormals();
+    if (meshDisplayData.solidColors && meshDisplayData.solidColors.length > 0) {
+      const colorCopy = new Float32Array(meshDisplayData.solidColors);
+      geom.setAttribute('color', new THREE.BufferAttribute(colorCopy, 3));
+    }
+    return geom;
+  }, [meshDisplayData]);
+
+  // Build solid domain wireframe
+  const solidWireGeometry = useMemo(() => {
+    if (!meshDisplayData?.solidWireframePositions || meshDisplayData.solidWireframePositions.length === 0) return null;
+    const geom = new THREE.BufferGeometry();
+    const posCopy = new Float32Array(meshDisplayData.solidWireframePositions);
+    geom.setAttribute('position', new THREE.BufferAttribute(posCopy, 3));
+    return geom;
+  }, [meshDisplayData]);
+
+  // Build section cap plane geometry — sized to mesh bounding box
+  const capGeometry = useMemo(() => {
+    if (!sectionPlane.enabled || !meshDisplayData) return null;
+    // Compute mesh bounding box for proper plane sizing
+    const positions = meshDisplayData.positions;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    const step = Math.max(1, Math.floor(positions.length / 3000)) * 3; // sample for speed
+    for (let i = 0; i < positions.length; i += step) {
+      const x = positions[i], y = positions[i+1], z = positions[i+2];
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+    const size = Math.max(maxX - minX, maxY - minY, maxZ - minZ) * 1.05;
+    const geom = new THREE.PlaneGeometry(size, size);
+    const normal = new THREE.Vector3(...sectionPlane.normal);
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+    geom.applyQuaternion(q);
+    const pos = normal.clone().multiplyScalar(sectionPlane.offset);
+    geom.translate(pos.x, pos.y, pos.z);
+    return geom;
+  }, [sectionPlane.enabled, sectionPlane.normal, sectionPlane.offset, meshDisplayData]);
 
   // Apply or remove contour colors when field data or active field changes
   useEffect(() => {
@@ -280,6 +327,64 @@ export default function MeshRenderer() {
             transparent
             opacity={renderMode === 'wireframe' ? 0.8 : renderMode === 'contour' ? 0.08 : 0.2}
             clippingPlanes={clipPlanes ?? []}
+          />
+        </mesh>
+      )}
+
+      {/* Solid domain mesh */}
+      {solidGeometry && renderMode !== 'wireframe' && (
+        <mesh geometry={solidGeometry}>
+          <meshStandardMaterial
+            vertexColors
+            side={THREE.DoubleSide}
+            transparent
+            opacity={0.9}
+            roughness={0.4}
+            metalness={0.05}
+            clippingPlanes={clipPlanes ?? []}
+            clipShadows
+          />
+        </mesh>
+      )}
+      {solidGeometry && renderMode === 'wireframe' && (
+        <mesh geometry={solidGeometry}>
+          <meshStandardMaterial
+            vertexColors
+            side={THREE.DoubleSide}
+            transparent
+            opacity={0.5}
+            roughness={0.5}
+            metalness={0}
+            clippingPlanes={clipPlanes ?? []}
+          />
+        </mesh>
+      )}
+      {solidWireGeometry && (
+        <lineSegments geometry={solidWireGeometry}>
+          <lineBasicMaterial
+            color={renderMode === 'wireframe' ? '#aa8844' : '#222233'}
+            transparent
+            opacity={renderMode === 'wireframe' ? 0.5 : 0.15}
+            linewidth={1}
+            clippingPlanes={clipPlanes ?? []}
+          />
+        </lineSegments>
+      )}
+
+      {/* Section cut plane indicator */}
+      {sectionPlane.enabled && capGeometry && (
+        <mesh geometry={capGeometry} renderOrder={-1}>
+          <meshStandardMaterial
+            color="#ff6633"
+            side={THREE.DoubleSide}
+            transparent
+            opacity={0.3}
+            depthWrite={false}
+            polygonOffset
+            polygonOffsetFactor={-1}
+            polygonOffsetUnits={-1}
+            roughness={0.5}
+            metalness={0}
           />
         </mesh>
       )}

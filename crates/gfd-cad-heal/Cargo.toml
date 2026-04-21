@@ -1,0 +1,13 @@
+[package]
+name = "gfd-cad-heal"
+version = "0.1.0"
+edition = "2021"
+description = "GFD CAD — Shape healing (sew / fix wires / remove small features)"
+
+[dependencies]
+gfd-cad-geom = { path = "../gfd-cad-geom" }
+gfd-cad-topo = { path = "../gfd-cad-topo" }
+thiserror    = { workspace = true }
+
+[dev-dependencies]
+gfd-cad-feature = { path = "../gfd-cad-feature" }

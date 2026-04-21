@@ -5,6 +5,7 @@ import { useAppStore } from '../store/useAppStore';
 import MeshRenderer from './MeshRenderer';
 import SelectionManager from './SelectionManager';
 import CadScene from './CadScene';
+import CadKernelLayer from './CadKernelLayer';
 import * as THREE from 'three';
 
 /** Listens for gfd-camera-preset events and animates camera to target position */
@@ -161,6 +162,9 @@ function SceneContent() {
 
       {/* CAD shapes */}
       <CadScene />
+
+      {/* gfd-cad kernel tessellated shapes */}
+      <CadKernelLayer />
 
       {/* Mesh */}
       <MeshRenderer />

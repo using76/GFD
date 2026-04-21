@@ -18,6 +18,16 @@ const meshTypeFields: PropertyField[] = [
       { label: 'Cut-Cell', value: 'cutcell' },
     ],
   },
+  {
+    key: 'domainMode',
+    label: 'Domain',
+    type: 'select',
+    options: [
+      { label: 'Fluid + Solid', value: 'both' },
+      { label: 'Fluid Only', value: 'fluid' },
+      { label: 'Solid Only', value: 'solid' },
+    ],
+  },
 ];
 
 const sizeFields: PropertyField[] = [

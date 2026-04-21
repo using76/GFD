@@ -1,0 +1,14 @@
+[package]
+name = "gfd-cad-sketch"
+version = "0.1.0"
+edition = "2021"
+description = "GFD CAD — 2D sketcher and constraint solver"
+
+[dependencies]
+gfd-cad-geom = { path = "../gfd-cad-geom" }
+nalgebra     = { workspace = true }
+thiserror    = { workspace = true }
+serde        = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }

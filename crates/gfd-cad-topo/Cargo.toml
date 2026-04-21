@@ -1,0 +1,11 @@
+[package]
+name = "gfd-cad-topo"
+version = "0.1.0"
+edition = "2021"
+description = "GFD CAD — B-Rep topology (Vertex/Edge/Wire/Face/Shell/Solid)"
+
+[dependencies]
+gfd-cad-geom = { path = "../gfd-cad-geom" }
+nalgebra     = { workspace = true }
+thiserror    = { workspace = true }
+serde        = { workspace = true }

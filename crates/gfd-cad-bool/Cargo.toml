@@ -1,0 +1,11 @@
+[package]
+name = "gfd-cad-bool"
+version = "0.1.0"
+edition = "2021"
+description = "GFD CAD — Boolean operations on B-Rep shapes"
+
+[dependencies]
+gfd-cad-geom   = { path = "../gfd-cad-geom" }
+gfd-cad-topo   = { path = "../gfd-cad-topo" }
+gfd-cad-tessel = { path = "../gfd-cad-tessel" }
+thiserror      = { workspace = true }

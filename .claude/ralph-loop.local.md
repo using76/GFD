@@ -1,10 +1,10 @@
 ---
 active: true
-iteration: 1
+iteration: 33
 session_id: 
 max_iterations: 50
 completion_promise: null
-started_at: "2026-03-30T01:48:35Z"
+started_at: "2026-04-20T04:13:51Z"
 ---
 
-모든 버튼들의 작동성과 연관되는 기능들의 작동성도 검토해줘
+페이즈 8까지 모두 구현해줘

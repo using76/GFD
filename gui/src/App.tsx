@@ -1109,12 +1109,78 @@ function ShortcutsOverlay() {
   );
 }
 
+/** Auto-load pre-generated mesh from public/mesh/mesh.bin on startup */
+function useAutoLoadMesh() {
+  const loadedRef = useRef(false);
+  useEffect(() => {
+    if (loadedRef.current) return;
+    loadedRef.current = true;
+    (async () => {
+      try {
+        const res = await fetch('./mesh/mesh.bin');
+        if (!res.ok) return;
+        const buf = await res.arrayBuffer();
+        const header = new DataView(buf, 0, 32);
+        const magic = String.fromCharCode(header.getUint8(0), header.getUint8(1), header.getUint8(2), header.getUint8(3));
+        if (magic !== 'GFDM') return;
+        const nFluidTri = header.getUint32(4, true);
+        const nSolidTri = header.getUint32(8, true);
+        const nx = header.getUint32(12, true);
+        const ny = header.getUint32(16, true);
+        const nz = header.getUint32(20, true);
+        const nFluidCells = header.getUint32(24, true);
+        const nSolidCells = header.getUint32(28, true);
+
+        let off = 32;
+        const fPos = new Float32Array(buf, off, nFluidTri * 9); off += nFluidTri * 9 * 4;
+        const fCol = new Float32Array(buf, off, nFluidTri * 9); off += nFluidTri * 9 * 4;
+        const fWire = new Float32Array(buf, off, nFluidTri * 18); off += nFluidTri * 18 * 4;
+        const sPos = new Float32Array(buf, off, nSolidTri * 9); off += nSolidTri * 9 * 4;
+        const sCol = new Float32Array(buf, off, nSolidTri * 9); off += nSolidTri * 9 * 4;
+        // solid wireframe skipped for performance
+        off += nSolidTri * 18 * 4;
+
+        useAppStore.setState({
+          meshGenerated: true,
+          meshGenerating: false,
+          meshDisplayData: {
+            positions: fPos,
+            indices: null,
+            colors: fCol,
+            wireframePositions: fWire,
+            solidPositions: nSolidTri > 0 ? sPos : null,
+            solidColors: nSolidTri > 0 ? sCol : null,
+            solidWireframePositions: null, // skip solid wireframe — too many lines
+            cellCount: nFluidCells,
+            nodeCount: (nx + 1) * (ny + 1) * (nz + 1),
+            fluidCellCount: nFluidCells,
+            solidCellCount: nSolidCells,
+            nx, ny, nz,
+          },
+        });
+        // Switch to mesh tab and fit camera after state settles
+        setTimeout(() => {
+          useAppStore.setState({ activeTab: 'mesh' as const });
+          window.dispatchEvent(new CustomEvent('gfd-camera-preset', {
+            detail: { position: [1.5, 1.5, 1.2] },
+          }));
+        }, 300);
+      } catch (err) {
+        useAppStore.setState((s) => ({
+          consoleLines: [...s.consoleLines, `[Mesh] Auto-load failed: ${err instanceof Error ? err.message : String(err)}`],
+        }));
+      }
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+}
+
 export default function App() {
   const TITLE_BAR_H = 36;
   const STATUS_BAR_H = 28;
 
   useKeyboardShortcuts();
   useAutoSave();
+  useAutoLoadMesh();
 
   return (
     <ConfigProvider

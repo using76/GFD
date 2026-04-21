@@ -1,0 +1,19 @@
+[package]
+name = "gfd-cad"
+version = "0.1.0"
+edition = "2021"
+description = "GFD CAD — facade crate and JSON-RPC types for GUI integration"
+
+[dependencies]
+gfd-cad-geom    = { path = "../gfd-cad-geom" }
+gfd-cad-topo    = { path = "../gfd-cad-topo" }
+gfd-cad-bool    = { path = "../gfd-cad-bool" }
+gfd-cad-sketch  = { path = "../gfd-cad-sketch" }
+gfd-cad-feature = { path = "../gfd-cad-feature" }
+gfd-cad-io      = { path = "../gfd-cad-io" }
+gfd-cad-heal    = { path = "../gfd-cad-heal" }
+gfd-cad-measure = { path = "../gfd-cad-measure" }
+gfd-cad-tessel  = { path = "../gfd-cad-tessel" }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }

@@ -22,3 +22,9 @@
 *.vtk
 gui/node_modules
 gui/dist
+
+# Large binary test assets (STL/STEP/3DM samples)
+/tests/mesh_test/
+
+# External snapshots (not part of this project)
+/claude-code-main/

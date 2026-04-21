@@ -1,0 +1,13 @@
+[package]
+name = "gfd-cad-geom"
+version = "0.1.0"
+edition = "2021"
+description = "GFD CAD — parametric geometry primitives (curves, surfaces)"
+
+[dependencies]
+nalgebra   = { workspace = true }
+thiserror  = { workspace = true }
+serde      = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }

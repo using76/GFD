@@ -93,7 +93,7 @@ const PipeInner: React.FC<{ shape: Shape }> = ({ shape }) => {
   );
 };
 
-/** Render imported STL mesh from raw vertex data */
+/** Render imported STL/3DM mesh from raw vertex data */
 const StlMesh: React.FC<{
   shape: Shape;
   isSelected: boolean;
@@ -102,17 +102,14 @@ const StlMesh: React.FC<{
   const geometry = useMemo(() => {
     if (!shape.stlData) return new THREE.BufferGeometry();
     const geo = new THREE.BufferGeometry();
-    const positions = shape.stlData.vertices;
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geo.computeVertexNormals();
-
-    // Center the geometry
-    geo.computeBoundingBox();
-    const box = geo.boundingBox;
-    if (box) {
-      const center = new THREE.Vector3();
-      box.getCenter(center);
-      geo.translate(-center.x, -center.y, -center.z);
+    const posCopy = new Float32Array(shape.stlData.vertices);
+    geo.setAttribute('position', new THREE.BufferAttribute(posCopy, 3));
+    // Use per-face normals from file for flat shading (sharp edges)
+    if (shape.stlData.normals && shape.stlData.normals.length === posCopy.length) {
+      const normCopy = new Float32Array(shape.stlData.normals);
+      geo.setAttribute('normal', new THREE.BufferAttribute(normCopy, 3));
+    } else {
+      geo.computeVertexNormals();
     }
     return geo;
   }, [shape.stlData]);
@@ -137,6 +134,7 @@ const StlMesh: React.FC<{
         transparent
         opacity={0.85}
         side={THREE.DoubleSide}
+        flatShading
       />
       <Edges color={isSelected ? '#60a0ff' : '#444466'} threshold={15} />
     </mesh>
@@ -515,6 +513,9 @@ const MeasureElements: React.FC = () => {
 /** Applies a global clipping plane when section view is enabled */
 const SectionPlaneClip: React.FC = () => {
   const sectionPlane = useAppStore((s) => s.sectionPlane);
+  const fieldData = useAppStore((s) => s.fieldData);
+  const activeField = useAppStore((s) => s.activeField);
+  const activeTab = useAppStore((s) => s.activeTab);
   const { gl } = useThree();
 
   useEffect(() => {
@@ -532,8 +533,6 @@ const SectionPlaneClip: React.FC = () => {
       gl.localClippingEnabled = false;
     };
   }, [sectionPlane.enabled, sectionPlane.normal, sectionPlane.offset, gl]);
-
-  if (!sectionPlane.enabled) return null;
 
   // Visual indicator: a semi-transparent plane
   const rotation = useMemo(() => {
@@ -554,23 +553,18 @@ const SectionPlaneClip: React.FC = () => {
   }, [sectionPlane.normal, sectionPlane.offset]);
 
   // Generate contour texture on section plane if field data available
-  const fieldData = useAppStore((s) => s.fieldData);
-  const activeField = useAppStore((s) => s.activeField);
   const contourTexture = useMemo(() => {
     if (fieldData.length === 0 || !activeField) return null;
     const field = fieldData.find(f => f.name === activeField);
     if (!field) return null;
-    // Create a 64x64 texture with field values sampled on the plane
     const res = 64;
     const data = new Uint8Array(res * res * 4);
     const fMin = field.min, fMax = field.max, fRange = fMax - fMin || 1;
     for (let iy = 0; iy < res; iy++) {
       for (let ix = 0; ix < res; ix++) {
         const tx = ix / res, ty = iy / res;
-        // Approximate field value from analytical pattern
         const v = fMin + fRange * (tx * 0.7 + 0.2 * Math.sin(Math.PI * ty) + 0.1 * Math.sin(2 * Math.PI * tx));
         const t = Math.max(0, Math.min(1, (v - fMin) / fRange));
-        // Jet colormap
         let r: number, g: number, b: number;
         if (t < 0.25) { r = 0; g = t*4; b = 1; }
         else if (t < 0.5) { r = 0; g = 1; b = 1-(t-0.25)*4; }
@@ -588,9 +582,13 @@ const SectionPlaneClip: React.FC = () => {
     return tex;
   }, [fieldData, activeField]);
 
+  // Don't render section plane indicator on mesh/setup/calc/results tabs — MeshRenderer handles it
+  if (!sectionPlane.enabled) return null;
+  if (['mesh', 'setup', 'calc', 'results'].includes(activeTab)) return null;
+
   return (
     <>
-      <mesh position={position} rotation={rotation}>
+      <mesh position={position} rotation={rotation} renderOrder={-1}>
         <planeGeometry args={[10, 10]} />
         {contourTexture ? (
           <meshBasicMaterial
@@ -599,14 +597,20 @@ const SectionPlaneClip: React.FC = () => {
             opacity={0.7}
             side={THREE.DoubleSide}
             depthWrite={false}
+            polygonOffset
+            polygonOffsetFactor={-2}
+            polygonOffsetUnits={-2}
           />
         ) : (
           <meshBasicMaterial
             color="#ff8c00"
             transparent
-            opacity={0.15}
+            opacity={0.12}
             side={THREE.DoubleSide}
             depthWrite={false}
+            polygonOffset
+            polygonOffsetFactor={-2}
+            polygonOffsetUnits={-2}
           />
         )}
       </mesh>

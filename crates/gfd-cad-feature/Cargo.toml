@@ -1,0 +1,16 @@
+[package]
+name = "gfd-cad-feature"
+version = "0.1.0"
+edition = "2021"
+description = "GFD CAD — parametric feature tree (Pad/Pocket/Revolve/Fillet/Primitive)"
+
+[dependencies]
+gfd-cad-geom    = { path = "../gfd-cad-geom" }
+gfd-cad-topo    = { path = "../gfd-cad-topo" }
+gfd-cad-sketch  = { path = "../gfd-cad-sketch" }
+thiserror       = { workspace = true }
+serde           = { workspace = true }
+
+[dev-dependencies]
+gfd-cad-measure = { path = "../gfd-cad-measure" }
+approx          = { workspace = true }

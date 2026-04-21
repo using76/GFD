@@ -1,0 +1,17 @@
+[package]
+name = "gfd-cad-measure"
+version = "0.1.0"
+edition = "2021"
+description = "GFD CAD — distance / area / volume / inertia measurements"
+
+[dependencies]
+gfd-cad-geom   = { path = "../gfd-cad-geom" }
+gfd-cad-topo   = { path = "../gfd-cad-topo" }
+gfd-cad-tessel = { path = "../gfd-cad-tessel" }
+gfd-cad-bool   = { path = "../gfd-cad-bool" }
+nalgebra       = { workspace = true }
+thiserror      = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+gfd-cad-feature = { path = "../gfd-cad-feature" }

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 // ---- Shape types for CAD ----
-export type ShapeKind = 'box' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'pipe' | 'stl' | 'enclosure';
+export type ShapeKind = 'box' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'pipe' | 'stl' | '3dm' | 'enclosure';
 
 export type BooleanOp = 'union' | 'subtract' | 'intersect' | 'split';
 
@@ -15,6 +15,7 @@ export interface BooleanOperation {
 
 export interface StlData {
   vertices: Float32Array;
+  normals?: Float32Array;
   faceCount: number;
 }
 
@@ -62,6 +63,7 @@ export interface NamedSelection {
 
 // ---- Mesh types ----
 export type MeshType = 'cartesian' | 'tet' | 'hex' | 'poly' | 'cutcell';
+export type MeshDomainMode = 'fluid' | 'solid' | 'both';
 
 export interface MeshZone {
   id: string;
@@ -105,6 +107,7 @@ export const BOUNDARY_COLORS: Record<MeshSurfaceBoundaryType, string> = {
 
 export interface MeshConfig {
   type: MeshType;
+  domainMode: MeshDomainMode;
   globalSize: number;
   minCellSize: number;
   growthRate: number;
@@ -139,6 +142,12 @@ export interface MeshDisplayData {
   colors: Float32Array | null;
   /** Wireframe line segment positions (pairs of xyz) */
   wireframePositions: Float32Array | null;
+  /** Solid domain mesh positions (when domainMode is 'both') */
+  solidPositions: Float32Array | null;
+  /** Solid domain vertex colors */
+  solidColors: Float32Array | null;
+  /** Solid domain wireframe line segment positions */
+  solidWireframePositions: Float32Array | null;
   cellCount: number;
   nodeCount: number;
   fluidCellCount: number;
@@ -906,6 +915,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   meshZones: [],
   meshConfig: {
     type: 'hex',
+    domainMode: 'both',
     globalSize: 0.2,
     minCellSize: 0.05,
     growthRate: 1.2,
@@ -1019,9 +1029,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const nyActual = yCoords.length - 1;
       const dy = domainLy / nyActual; // average dy for quality metrics
 
-      // --- Collect solid (non-enclosure) body shapes for hole-cutting ---
+      // --- Collect solid (non-enclosure, visible) body shapes for hole-cutting ---
       const bodyShapes = state.shapes.filter(
-        (s) => s.group !== 'enclosure' && s.kind !== 'enclosure'
+        (s) => s.group !== 'enclosure' && s.kind !== 'enclosure' && s.visible !== false
       );
 
       /** Returns true if a point is inside any solid body */
@@ -1204,6 +1214,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       const triPositions: number[] = [];
       const triColors: number[] = [];
       const wirePositions: number[] = [];
+      // Solid domain mesh arrays (used when domainMode is 'both')
+      const solidTriPositions: number[] = [];
+      const solidTriColors: number[] = [];
+      const solidWirePositions: number[] = [];
+      const domainMode = state.meshConfig.domainMode;
 
       /** Push two triangles forming a quad, plus wireframe edges */
       const isTet = state.meshConfig.type === 'tet';
@@ -1264,11 +1279,35 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
       }
 
+      // Solid domain color (grey-blue for distinction)
+      const solidBodyColor: [number, number, number] = [0.55, 0.55, 0.62];
+      const solidInterfaceColor: [number, number, number] = [1.0, 0.4, 0.133];
+
+      /** Helper to push a solid quad into solidTri/solidWire arrays */
+      function addSolidQuad(
+        x0: number, y0: number, z0: number,
+        x1: number, y1: number, z1: number,
+        x2: number, y2: number, z2: number,
+        x3: number, y3: number, z3: number,
+        color: [number, number, number],
+      ) {
+        solidTriPositions.push(x0, y0, z0, x1, y1, z1, x2, y2, z2);
+        solidTriPositions.push(x1, y1, z1, x3, y3, z3, x2, y2, z2);
+        for (let v = 0; v < 6; v++) solidTriColors.push(color[0], color[1], color[2]);
+        solidWirePositions.push(
+          x0, y0, z0, x1, y1, z1,
+          x1, y1, z1, x3, y3, z3,
+          x3, y3, z3, x2, y2, z2,
+          x2, y2, z2, x0, y0, z0
+        );
+      }
+
       for (let k = 0; k < nz; k++) {
         for (let j = 0; j < nyActual; j++) {
           for (let i = 0; i < nx; i++) {
             const cellIdx = k * nyActual * nx + j * nx + i;
-            if (cellTypes[cellIdx] === 1) continue; // skip solid cells
+            const isSolid = cellTypes[cellIdx] === 1;
+            const isFluid = !isSolid;
 
             const x0 = domainMin[0] + i * dx;
             const x1 = x0 + dx;
@@ -1277,48 +1316,88 @@ export const useAppStore = create<AppState>((set, get) => ({
             const z0 = domainMin[2] + k * dz;
             const z1 = z0 + dz;
 
-            // -X face: visible if i==0 or neighbor is solid
-            if (i === 0 || cellTypes[k * nyActual * nx + j * nx + (i - 1)] === 1) {
-              const faceType = i === 0 ? 'xmin' : 'solid_interface';
-              const color = getBoundaryFaceColor(faceType);
-              addQuadWithColor(x0, y0, z0, x0, y1, z0, x0, y0, z1, x0, y1, z1, color);
+            // --- Fluid cell surface extraction ---
+            if (isFluid && domainMode !== 'solid') {
+              // -X face: visible if i==0 or neighbor is solid
+              if (i === 0 || cellTypes[k * nyActual * nx + j * nx + (i - 1)] === 1) {
+                const faceType = i === 0 ? 'xmin' : 'solid_interface';
+                const color = getBoundaryFaceColor(faceType);
+                addQuadWithColor(x0, y0, z0, x0, y1, z0, x0, y0, z1, x0, y1, z1, color);
+              }
+              // +X face
+              if (i === nx - 1 || cellTypes[k * nyActual * nx + j * nx + (i + 1)] === 1) {
+                const faceType = i === nx - 1 ? 'xmax' : 'solid_interface';
+                const color = getBoundaryFaceColor(faceType);
+                addQuadWithColor(x1, y0, z0, x1, y0, z1, x1, y1, z0, x1, y1, z1, color);
+              }
+              // -Y face
+              if (j === 0 || cellTypes[k * nyActual * nx + (j - 1) * nx + i] === 1) {
+                const faceType = j === 0 ? 'ymin' : 'solid_interface';
+                const color = getBoundaryFaceColor(faceType);
+                addQuadWithColor(x0, y0, z0, x0, y0, z1, x1, y0, z0, x1, y0, z1, color);
+              }
+              // +Y face
+              if (j === nyActual - 1 || cellTypes[k * nyActual * nx + (j + 1) * nx + i] === 1) {
+                const faceType = j === nyActual - 1 ? 'ymax' : 'solid_interface';
+                const color = getBoundaryFaceColor(faceType);
+                addQuadWithColor(x0, y1, z0, x1, y1, z0, x0, y1, z1, x1, y1, z1, color);
+              }
+              // -Z face
+              if (k === 0 || cellTypes[(k - 1) * nyActual * nx + j * nx + i] === 1) {
+                const faceType = k === 0 ? 'zmin' : 'solid_interface';
+                const color = getBoundaryFaceColor(faceType);
+                addQuadWithColor(x0, y0, z0, x1, y0, z0, x0, y1, z0, x1, y1, z0, color);
+              }
+              // +Z face
+              if (k === nz - 1 || cellTypes[(k + 1) * nyActual * nx + j * nx + i] === 1) {
+                const faceType = k === nz - 1 ? 'zmax' : 'solid_interface';
+                const color = getBoundaryFaceColor(faceType);
+                addQuadWithColor(x0, y0, z1, x0, y1, z1, x1, y0, z1, x1, y1, z1, color);
+              }
             }
-            // +X face
-            if (i === nx - 1 || cellTypes[k * nyActual * nx + j * nx + (i + 1)] === 1) {
-              const faceType = i === nx - 1 ? 'xmax' : 'solid_interface';
-              const color = getBoundaryFaceColor(faceType);
-              addQuadWithColor(x1, y0, z0, x1, y0, z1, x1, y1, z0, x1, y1, z1, color);
-            }
-            // -Y face
-            if (j === 0 || cellTypes[k * nyActual * nx + (j - 1) * nx + i] === 1) {
-              const faceType = j === 0 ? 'ymin' : 'solid_interface';
-              const color = getBoundaryFaceColor(faceType);
-              addQuadWithColor(x0, y0, z0, x0, y0, z1, x1, y0, z0, x1, y0, z1, color);
-            }
-            // +Y face
-            if (j === nyActual - 1 || cellTypes[k * nyActual * nx + (j + 1) * nx + i] === 1) {
-              const faceType = j === nyActual - 1 ? 'ymax' : 'solid_interface';
-              const color = getBoundaryFaceColor(faceType);
-              addQuadWithColor(x0, y1, z0, x1, y1, z0, x0, y1, z1, x1, y1, z1, color);
-            }
-            // -Z face
-            if (k === 0 || cellTypes[(k - 1) * nyActual * nx + j * nx + i] === 1) {
-              const faceType = k === 0 ? 'zmin' : 'solid_interface';
-              const color = getBoundaryFaceColor(faceType);
-              addQuadWithColor(x0, y0, z0, x1, y0, z0, x0, y1, z0, x1, y1, z0, color);
-            }
-            // +Z face
-            if (k === nz - 1 || cellTypes[(k + 1) * nyActual * nx + j * nx + i] === 1) {
-              const faceType = k === nz - 1 ? 'zmax' : 'solid_interface';
-              const color = getBoundaryFaceColor(faceType);
-              addQuadWithColor(x0, y0, z1, x0, y1, z1, x1, y0, z1, x1, y1, z1, color);
+
+            // --- Solid cell surface extraction ---
+            if (isSolid && domainMode !== 'fluid') {
+              const targetArr = domainMode === 'solid' ? 'main' : 'solid';
+              const addFn = targetArr === 'main' ? addQuadWithColor : addSolidQuad;
+              // -X face: visible if on domain boundary or neighbor is fluid
+              if (i === 0 || cellTypes[k * nyActual * nx + j * nx + (i - 1)] === 0) {
+                const color = (i === 0) ? solidBodyColor : solidInterfaceColor;
+                addFn(x0, y0, z0, x0, y1, z0, x0, y0, z1, x0, y1, z1, color);
+              }
+              // +X face
+              if (i === nx - 1 || cellTypes[k * nyActual * nx + j * nx + (i + 1)] === 0) {
+                const color = (i === nx - 1) ? solidBodyColor : solidInterfaceColor;
+                addFn(x1, y0, z0, x1, y0, z1, x1, y1, z0, x1, y1, z1, color);
+              }
+              // -Y face
+              if (j === 0 || cellTypes[k * nyActual * nx + (j - 1) * nx + i] === 0) {
+                const color = (j === 0) ? solidBodyColor : solidInterfaceColor;
+                addFn(x0, y0, z0, x0, y0, z1, x1, y0, z0, x1, y0, z1, color);
+              }
+              // +Y face
+              if (j === nyActual - 1 || cellTypes[k * nyActual * nx + (j + 1) * nx + i] === 0) {
+                const color = (j === nyActual - 1) ? solidBodyColor : solidInterfaceColor;
+                addFn(x0, y1, z0, x1, y1, z0, x0, y1, z1, x1, y1, z1, color);
+              }
+              // -Z face
+              if (k === 0 || cellTypes[(k - 1) * nyActual * nx + j * nx + i] === 0) {
+                const color = (k === 0) ? solidBodyColor : solidInterfaceColor;
+                addFn(x0, y0, z0, x1, y0, z0, x0, y1, z0, x1, y1, z0, color);
+              }
+              // +Z face
+              if (k === nz - 1 || cellTypes[(k + 1) * nyActual * nx + j * nx + i] === 0) {
+                const color = (k === nz - 1) ? solidBodyColor : solidInterfaceColor;
+                addFn(x0, y0, z1, x0, y1, z1, x1, y0, z1, x1, y1, z1, color);
+              }
             }
           }
         }
       }
 
       // Progress: surface extraction complete
-      set((s) => ({ consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [Mesh] Surface extraction: ${triPositions.length / 9} triangles, ${wirePositions.length / 6} wireframe edges`] }));
+      const totalTris = triPositions.length / 9 + solidTriPositions.length / 9;
+      set((s) => ({ consoleLines: [...s.consoleLines, `[${new Date().toLocaleTimeString()}] [Mesh] Surface extraction: ${totalTris} triangles (fluid: ${triPositions.length / 9}, solid: ${solidTriPositions.length / 9}), ${wirePositions.length / 6} wireframe edges`] }));
 
       const meshPositions = new Float32Array(triPositions);
       const meshColors = new Float32Array(triColors);
@@ -1427,10 +1506,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...(refZones.length > 0 ? [`[${now}] [Mesh] Refinement zones: ${refZones.length} (max level ${maxRefLevel}x)`] : []),
       ];
       if (solidCellCount > 0) {
-        logLines.push(`[${now}] [Mesh] Solid cells excluded: ${solidCellCount} (${bodyShapes.length} solid bodies detected)`);
+        logLines.push(`[${now}] [Mesh] Solid cells: ${solidCellCount} (${bodyShapes.length} solid bodies detected)`);
       }
       logLines.push(
-        `[${now}] [Mesh] Fluid cells: ${fluidCellCount}, Surface triangles: ${triPositions.length / 9}`,
+        `[${now}] [Mesh] Domain mode: ${domainMode} | Fluid cells: ${fluidCellCount}, Solid cells: ${solidCellCount}`,
+        `[${now}] [Mesh] Surface triangles: fluid=${triPositions.length / 9}, solid=${solidTriPositions.length / 9}`,
         `[${now}] [Mesh] Wireframe edges: ${wirePositions.length / 6}`,
         `[${now}] [Mesh] Quality: orthogonality=${quality.minOrthogonality.toFixed(3)}, skewness=${quality.maxSkewness.toFixed(3)}, AR=${quality.maxAspectRatio.toFixed(2)}`,
         `[${now}] [Mesh] Boundary patches: ${zones.filter((z) => z.kind === 'surface').map((z) => z.name).join(', ')}`,
@@ -1449,7 +1529,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           indices: null,
           colors: meshColors,
           wireframePositions: meshWireframe,
-          cellCount: fluidCellCount,
+          solidPositions: solidTriPositions.length > 0 ? new Float32Array(solidTriPositions) : null,
+          solidColors: solidTriColors.length > 0 ? new Float32Array(solidTriColors) : null,
+          solidWireframePositions: solidWirePositions.length > 0 ? new Float32Array(solidWirePositions) : null,
+          cellCount: domainMode === 'solid' ? solidCellCount : fluidCellCount,
           nodeCount,
           fluidCellCount,
           solidCellCount,
