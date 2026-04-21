@@ -2060,6 +2060,7 @@ fn handle_cad_measure_trimesh_summary(id: u64, params: &Value) -> RpcResponse {
     let ar_stats = trimesh_aspect_ratio_stats(&positions, &indices);
     let total_k = gfd_cad::measure::trimesh_total_gaussian_curvature(&positions, &indices);
     let dihedral = gfd_cad::measure::trimesh_dihedral_angle_stats(&positions, &indices);
+    let valence = gfd_cad::measure::trimesh_vertex_valence_stats(&positions, &indices);
     RpcResponse::ok(id, serde_json::json!({
         "area":           area,
         "volume":         volume,
@@ -2077,6 +2078,9 @@ fn handle_cad_measure_trimesh_summary(id: u64, params: &Value) -> RpcResponse {
         "aspect_ratio_stats": ar_stats.map(|(mn, mx, mean)| [mn, mx, mean]),
         "total_gaussian_curvature": total_k,
         "dihedral_angle_stats": dihedral.map(|(mn, mx, mean)| [mn, mx, mean]),
+        "vertex_valence_stats": valence.map(|(mn, mx, mean, irr)| serde_json::json!({
+            "min": mn, "max": mx, "mean": mean, "irregular": irr
+        })),
     }))
 }
 

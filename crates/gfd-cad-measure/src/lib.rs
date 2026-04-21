@@ -1133,6 +1133,52 @@ pub fn trimesh_total_gaussian_curvature(
     trimesh_gaussian_curvature_per_vertex(positions, indices).iter().sum()
 }
 
+/// Vertex valence = number of distinct edges incident on a vertex. For a
+/// well-tessellated closed surface, interior vertices should have valence
+/// close to 6 (regular hex tiling of a plane); boundary vertices have lower.
+///
+/// Returns `Some((min, max, mean, irregular_count))` where `irregular_count`
+/// counts vertices with valence outside [5, 7] on the interior. `None` on
+/// an empty mesh.
+pub fn trimesh_vertex_valence_stats(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> Option<(u32, u32, f64, usize)> {
+    if positions.is_empty() || indices.is_empty() { return None; }
+    let mut incident: std::collections::HashMap<u32, std::collections::HashSet<u32>> =
+        std::collections::HashMap::new();
+    for t in 0..(indices.len() / 3) {
+        let i0 = indices[t * 3];
+        let i1 = indices[t * 3 + 1];
+        let i2 = indices[t * 3 + 2];
+        incident.entry(i0).or_default().extend([i1, i2]);
+        incident.entry(i1).or_default().extend([i0, i2]);
+        incident.entry(i2).or_default().extend([i0, i1]);
+    }
+    if incident.is_empty() { return None; }
+    // Boundary vertex set — those on open edges.
+    let mut is_boundary = std::collections::HashSet::new();
+    for (a, b) in trimesh_boundary_edges(indices) {
+        is_boundary.insert(a);
+        is_boundary.insert(b);
+    }
+    let mut min_v = u32::MAX;
+    let mut max_v = 0u32;
+    let mut sum = 0u64;
+    let mut irregular = 0usize;
+    let n = incident.len() as f64;
+    for (vid, neighbors) in &incident {
+        let val = neighbors.len() as u32;
+        if val < min_v { min_v = val; }
+        if val > max_v { max_v = val; }
+        sum += val as u64;
+        if !is_boundary.contains(vid) && !(5..=7).contains(&val) {
+            irregular += 1;
+        }
+    }
+    Some((min_v, max_v, sum as f64 / n, irregular))
+}
+
 /// For every interior edge (shared by exactly 2 triangles), compute the
 /// dihedral angle between the triangle normals — 0 means coplanar,
 /// π means the surface folds back on itself. Boundary and non-manifold
@@ -2544,6 +2590,21 @@ mod tests {
         ];
         let total = trimesh_total_gaussian_curvature(&positions, &indices);
         assert_abs_diff_eq!(total, 4.0 * std::f64::consts::PI, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn vertex_valence_tetrahedron_is_3() {
+        let positions: Vec<[f32; 3]> = vec![
+            [ 1.0,  1.0,  1.0],
+            [-1.0, -1.0,  1.0],
+            [-1.0,  1.0, -1.0],
+            [ 1.0, -1.0, -1.0],
+        ];
+        let indices: Vec<u32> = vec![0, 1, 2,  0, 3, 1,  0, 2, 3,  1, 3, 2];
+        let (mn, mx, mean, _irreg) = trimesh_vertex_valence_stats(&positions, &indices).unwrap();
+        assert_eq!(mn, 3);
+        assert_eq!(mx, 3);
+        assert_abs_diff_eq!(mean, 3.0, epsilon = 1e-10);
     }
 
     #[test]
