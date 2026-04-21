@@ -8,7 +8,8 @@ validity (iter 199), remove_duplicate_faces fix op (iter 200),
 Gaussian curvature per-vertex + Gauss-Bonnet total (iter 201),
 dihedral angle stats + sharp edge detection (iter 202),
 Bezier curve primitive with de Casteljau evaluation (iter 203),
-TriMesh::close_boundary_loops fan-fill heal op (iter 204).
+TriMesh::close_boundary_loops fan-fill heal op (iter 204),
+Hermite cubic curve with analytical tangent (iter 205).
 
 ## Current totals (iter 195)
 
@@ -102,7 +103,7 @@ B-spline curve/surface derivatives in iter 198 — now 5/5 Platonic solids.)
 
 ### Phase 1 — Geometry (gfd-cad-geom) ✅ **(iter 1–2)**
 - [x] `Point3`, `Vector3`, `Direction3`
-- [x] Curves: `Line`, `Circle`, `BSplineCurve` (Cox-de Boor, clamped uniform), `Bezier` (de Casteljau)
+- [x] Curves: `Line`, `Circle`, `BSplineCurve` (Cox-de Boor, clamped uniform), `Bezier` (de Casteljau), `Hermite` (cubic)
 - [x] Surfaces: `Plane`, `Cylinder`, `Sphere`, `Cone`, `Torus`
 - [x] `Curve::eval` / `tangent` / `length` / `closest_point` (golden-section)
 - [x] `Surface::eval` / `normal`

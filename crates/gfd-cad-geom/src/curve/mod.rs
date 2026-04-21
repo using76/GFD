@@ -6,6 +6,7 @@ pub mod bezier;
 pub mod bspline;
 pub mod circle;
 pub mod ellipse;
+pub mod hermite;
 pub mod line;
 pub mod polyline;
 
@@ -13,6 +14,7 @@ pub use bezier::Bezier;
 pub use bspline::BSplineCurve;
 pub use circle::Circle;
 pub use ellipse::Ellipse;
+pub use hermite::Hermite;
 pub use line::Line;
 pub use polyline::Polyline;
 
