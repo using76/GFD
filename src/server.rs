@@ -529,6 +529,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.measure.mesh_quality" => handle_cad_measure_mesh_quality(state, req.id, &req.params),
         "cad.measure.bbox_volume"  => handle_cad_measure_bbox_volume(state, req.id, &req.params),
         "cad.measure.distance"     => handle_cad_measure_distance(state, req.id, &req.params),
+        "cad.measure.segment_segment" => handle_cad_measure_segment_segment(req.id, &req.params),
         "cad.measure.surface_area" => handle_cad_measure_surface_area(state, req.id, &req.params),
         "cad.measure.volume"       => handle_cad_measure_volume(state, req.id, &req.params),
         "cad.measure.center_of_mass" => handle_cad_measure_com(state, req.id, &req.params),
@@ -3812,6 +3813,31 @@ fn handle_cad_measure_distance(state: &ServerState, id: u64, params: &Value) -> 
         Ok(d) => RpcResponse::ok(id, serde_json::json!({ "distance": d })),
         Err(e) => RpcResponse::err(id, format!("distance failed: {}", e)),
     }
+}
+
+fn handle_cad_measure_segment_segment(id: u64, params: &Value) -> RpcResponse {
+    let parse_pt = |key: &str| -> Result<gfd_cad::geom::Point3, String> {
+        let arr = params.get(key).and_then(|v| v.as_array())
+            .ok_or_else(|| format!("missing {} [x,y,z]", key))?;
+        if arr.len() < 3 { return Err(format!("{} must have 3 components", key)); }
+        Ok(gfd_cad::geom::Point3::new(
+            arr[0].as_f64().unwrap_or(0.0),
+            arr[1].as_f64().unwrap_or(0.0),
+            arr[2].as_f64().unwrap_or(0.0),
+        ))
+    };
+    let a0 = match parse_pt("a0") { Ok(p) => p, Err(e) => return RpcResponse::err(id, e) };
+    let a1 = match parse_pt("a1") { Ok(p) => p, Err(e) => return RpcResponse::err(id, e) };
+    let b0 = match parse_pt("b0") { Ok(p) => p, Err(e) => return RpcResponse::err(id, e) };
+    let b1 = match parse_pt("b1") { Ok(p) => p, Err(e) => return RpcResponse::err(id, e) };
+    let (d, cp_a, cp_b, s, t) = gfd_cad::measure::segment_segment_distance_3d(a0, a1, b0, b1);
+    RpcResponse::ok(id, serde_json::json!({
+        "distance": d,
+        "cp_a": [cp_a.x, cp_a.y, cp_a.z],
+        "cp_b": [cp_b.x, cp_b.y, cp_b.z],
+        "s": s,
+        "t": t,
+    }))
 }
 
 // ---------------------------------------------------------------------------

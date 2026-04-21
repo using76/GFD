@@ -392,6 +392,16 @@ export const cadClient = {
       hull_vertex_count: number;
     }>('cad.measure.polygon_full', { points }),
 
+  segmentSegmentDistance: (
+    a0: [number, number, number], a1: [number, number, number],
+    b0: [number, number, number], b1: [number, number, number],
+  ) =>
+    send<{
+      distance: number;
+      cp_a: [number, number, number]; cp_b: [number, number, number];
+      s: number; t: number;
+    }>('cad.measure.segment_segment', { a0, a1, b0, b1 }),
+
   meshQuality: (shape_id: string, weld = true, tol = 1e-4, u_steps = 32, v_steps = 16) =>
     send<{
       shape_id: string;

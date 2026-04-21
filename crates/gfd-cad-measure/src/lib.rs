@@ -304,15 +304,17 @@ pub fn principal_axes(arena: &ShapeArena, id: ShapeId) -> MeasureResult<(f64, f6
     Ok((vals.0, vals.1, vals.2, vecs))
 }
 
-/// Shortest distance between two line-backed edge segments in 3D.
-/// Implements the classic Lumelsky closest-points-between-segments
-/// algorithm (O(1)). Handles parallel / overlapping / endpoint cases.
-pub fn distance_edge_edge(arena: &ShapeArena, e1: ShapeId, e2: ShapeId) -> MeasureResult<f64> {
-    let (p1, q1) = edge_endpoints(arena, e1)?;
-    let (p2, q2) = edge_endpoints(arena, e2)?;
-    let d1 = (q1.x - p1.x, q1.y - p1.y, q1.z - p1.z);
-    let d2 = (q2.x - p2.x, q2.y - p2.y, q2.z - p2.z);
-    let r  = (p1.x - p2.x, p1.y - p2.y, p1.z - p2.z);
+/// Standalone Lumelsky segment-segment closest points in 3D. Returns the
+/// distance plus the two closest points (`cp_a` on segment A, `cp_b` on
+/// segment B) and the segment parameters `(s, t)` in [0, 1]. Degenerate
+/// (zero-length) segments are handled gracefully.
+pub fn segment_segment_distance_3d(
+    a0: Point3, a1: Point3,
+    b0: Point3, b1: Point3,
+) -> (f64, Point3, Point3, f64, f64) {
+    let d1 = (a1.x - a0.x, a1.y - a0.y, a1.z - a0.z);
+    let d2 = (b1.x - b0.x, b1.y - b0.y, b1.z - b0.z);
+    let r  = (a0.x - b0.x, a0.y - b0.y, a0.z - b0.z);
     let a = d1.0 * d1.0 + d1.1 * d1.1 + d1.2 * d1.2;
     let e = d2.0 * d2.0 + d2.1 * d2.1 + d2.2 * d2.2;
     let f = d2.0 * r.0 + d2.1 * r.1 + d2.2 * r.2;
@@ -343,9 +345,18 @@ pub fn distance_edge_edge(arena: &ShapeArena, e1: ShapeId, e2: ShapeId) -> Measu
             }
         }
     }
-    let cp1 = Point3::new(p1.x + d1.0 * s, p1.y + d1.1 * s, p1.z + d1.2 * s);
-    let cp2 = Point3::new(p2.x + d2.0 * t, p2.y + d2.1 * t, p2.z + d2.2 * t);
-    Ok(cp1.distance(cp2))
+    let cp_a = Point3::new(a0.x + d1.0 * s, a0.y + d1.1 * s, a0.z + d1.2 * s);
+    let cp_b = Point3::new(b0.x + d2.0 * t, b0.y + d2.1 * t, b0.z + d2.2 * t);
+    (cp_a.distance(cp_b), cp_a, cp_b, s, t)
+}
+
+/// Shortest distance between two line-backed edge segments in 3D.
+/// Implements the classic Lumelsky closest-points-between-segments
+/// algorithm (O(1)). Handles parallel / overlapping / endpoint cases.
+pub fn distance_edge_edge(arena: &ShapeArena, e1: ShapeId, e2: ShapeId) -> MeasureResult<f64> {
+    let (p1, q1) = edge_endpoints(arena, e1)?;
+    let (p2, q2) = edge_endpoints(arena, e2)?;
+    Ok(segment_segment_distance_3d(p1, q1, p2, q2).0)
 }
 
 /// Minimum distance between two polygon-outer-wire faces. Conservative: we
@@ -2590,6 +2601,32 @@ mod tests {
         ];
         let total = trimesh_total_gaussian_curvature(&positions, &indices);
         assert_abs_diff_eq!(total, 4.0 * std::f64::consts::PI, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn segment_segment_skew_lines() {
+        // Two skew lines: A along +x at y=0,z=0; B along +y at x=0.5,z=1.
+        // Nearest points are (0.5, 0, 0) on A and (0.5, 0, 1) on B → dist 1.
+        let (d, cp_a, cp_b, s, t) = segment_segment_distance_3d(
+            Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0),
+        );
+        assert_abs_diff_eq!(d, 1.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(cp_a.x, 0.5, epsilon = 1e-10);
+        assert_abs_diff_eq!(cp_b.z, 1.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(s, 0.5, epsilon = 1e-10);
+        assert_abs_diff_eq!(t, 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn segment_segment_parallel_offset() {
+        // Two parallel segments on x-axis, offset by y=2. Nearest dist = 2
+        // and there are many pairs; we only verify the distance.
+        let (d, _, _, _, _) = segment_segment_distance_3d(
+            Point3::new(0.0, 0.0, 0.0), Point3::new(5.0, 0.0, 0.0),
+            Point3::new(1.0, 2.0, 0.0), Point3::new(3.0, 2.0, 0.0),
+        );
+        assert_abs_diff_eq!(d, 2.0, epsilon = 1e-10);
     }
 
     #[test]

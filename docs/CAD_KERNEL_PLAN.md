@@ -12,7 +12,8 @@ TriMesh::close_boundary_loops fan-fill heal op (iter 204),
 Hermite cubic curve with analytical tangent (iter 205),
 Catmull-Rom polyline sampler + cad.profile.catmull_rom RPC (iter 206),
 Vertex valence statistics in trimesh_summary (iter 207),
-NurbsCurve (rational B-spline) with analytical derivative (iter 208).
+NurbsCurve (rational B-spline) with analytical derivative (iter 208),
+segment-segment distance 3D standalone + RPC (iter 209).
 
 ## Current totals (iter 195)
 
