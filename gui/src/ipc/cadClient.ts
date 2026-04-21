@@ -311,6 +311,12 @@ export const cadClient = {
       control_count: number; samples_per_segment: number;
     }>('cad.profile.catmull_rom', { points, samples_per_segment }),
 
+  simplifyPolylineDouglasPeucker: (points: number[], tolerance = 1e-3) =>
+    send<{
+      points: number[]; point_count: number;
+      before: number; dropped: number; tolerance: number;
+    }>('cad.profile.simplify_dp', { points, tolerance }),
+
   sketchList: () =>
     send<{
       sketches: { index: number; point_count: number; entity_count: number; constraint_count: number }[];

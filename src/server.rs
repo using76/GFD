@@ -462,6 +462,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.profile.spiral"        => handle_cad_profile_spiral(req.id, &req.params),
         "cad.profile.torus_knot"    => handle_cad_profile_torus_knot(req.id, &req.params),
         "cad.profile.catmull_rom"   => handle_cad_profile_catmull_rom(req.id, &req.params),
+        "cad.profile.simplify_dp"   => handle_cad_profile_simplify_dp(req.id, &req.params),
         "cad.profile.generate"      => handle_cad_profile_generate(req.id, &req.params),
         "cad.profile.list_kinds"    => handle_cad_profile_list_kinds(req.id),
         "cad.version"               => handle_cad_version(req.id),
@@ -1468,6 +1469,38 @@ fn handle_cad_profile_torus_knot(id: u64, params: &Value) -> RpcResponse {
 
 /// Samples a right-handed helix around the Z axis and returns the point
 /// list + analytic arc length. Pure-read RPC — no arena mutation.
+fn handle_cad_profile_simplify_dp(id: u64, params: &Value) -> RpcResponse {
+    let Some(arr) = params.get("points").and_then(|v| v.as_array()) else {
+        return RpcResponse::err(id, "missing points array");
+    };
+    if arr.len() % 3 != 0 {
+        return RpcResponse::err(id, "points length must be multiple of 3");
+    }
+    let mut pts: Vec<gfd_cad::geom::Point3> = Vec::with_capacity(arr.len() / 3);
+    for chunk in arr.chunks(3) {
+        pts.push(gfd_cad::geom::Point3::new(
+            chunk[0].as_f64().unwrap_or(0.0),
+            chunk[1].as_f64().unwrap_or(0.0),
+            chunk[2].as_f64().unwrap_or(0.0),
+        ));
+    }
+    let tol = params.get("tolerance").and_then(|v| v.as_f64()).unwrap_or(1.0e-3);
+    let before = pts.len();
+    let poly = match gfd_cad::geom::curve::Polyline::new(pts) {
+        Ok(p) => p,
+        Err(_) => return RpcResponse::err(id, "simplify_dp: need >= 2 points"),
+    };
+    let simp = poly.simplify_douglas_peucker(tol);
+    let flat: Vec<f64> = simp.points.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
+    RpcResponse::ok(id, serde_json::json!({
+        "points":      flat,
+        "point_count": simp.points.len(),
+        "before":      before,
+        "dropped":     before - simp.points.len(),
+        "tolerance":   tol,
+    }))
+}
+
 fn handle_cad_profile_catmull_rom(id: u64, params: &Value) -> RpcResponse {
     let Some(arr) = params.get("points").and_then(|v| v.as_array()) else {
         return RpcResponse::err(id, "missing points array");

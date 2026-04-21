@@ -28,6 +28,29 @@ impl Polyline {
         Ok(Self { points, cum })
     }
 
+    /// Douglas-Peucker polyline simplification: recursively drop points
+    /// whose perpendicular distance from the chord (first, last) is below
+    /// `tolerance`. Endpoints are always kept. Returns the simplified
+    /// polyline; if fewer than 2 points would remain, returns self.
+    ///
+    /// Typical tolerance = target chord error for GUI rendering or STL
+    /// cleanup (e.g. 0.001 units for mm-scale models).
+    pub fn simplify_douglas_peucker(&self, tolerance: f64) -> Polyline {
+        let n = self.points.len();
+        if n < 3 { return self.clone(); }
+        let mut keep = vec![false; n];
+        keep[0] = true;
+        keep[n - 1] = true;
+        dp_recurse(&self.points, 0, n - 1, tolerance, &mut keep);
+        let simplified: Vec<Point3> = self.points.iter().enumerate()
+            .filter(|(i, _)| keep[*i])
+            .map(|(_, p)| *p)
+            .collect();
+        // Guard against accidental collapse to <2 points.
+        if simplified.len() < 2 { return self.clone(); }
+        Polyline::new(simplified).unwrap_or_else(|_| self.clone())
+    }
+
     /// Map `u` ∈ [0, L] to (segment_index, local_fraction ∈ [0, 1]).
     fn locate(&self, u: f64) -> (usize, f64) {
         let l = *self.cum.last().unwrap_or(&0.0);
@@ -43,6 +66,38 @@ impl Polyline {
         }
         (self.points.len() - 2, 1.0)
     }
+}
+
+fn dp_recurse(points: &[Point3], lo: usize, hi: usize, tol: f64, keep: &mut [bool]) {
+    if hi <= lo + 1 { return; }
+    let a = points[lo];
+    let b = points[hi];
+    let mut max_d = 0.0_f64;
+    let mut idx = lo;
+    for i in (lo + 1)..hi {
+        let d = point_segment_perp(points[i], a, b);
+        if d > max_d { max_d = d; idx = i; }
+    }
+    if max_d > tol {
+        keep[idx] = true;
+        dp_recurse(points, lo, idx, tol, keep);
+        dp_recurse(points, idx, hi, tol, keep);
+    }
+}
+
+fn point_segment_perp(p: Point3, a: Point3, b: Point3) -> f64 {
+    let ab = Vector3::new(b.x - a.x, b.y - a.y, b.z - a.z);
+    let ap = Vector3::new(p.x - a.x, p.y - a.y, p.z - a.z);
+    let ab_len_sq = ab.x * ab.x + ab.y * ab.y + ab.z * ab.z;
+    if ab_len_sq < 1e-24 { return ap.norm(); }
+    let t = (ap.x * ab.x + ap.y * ab.y + ap.z * ab.z) / ab_len_sq;
+    let t_clamped = t.clamp(0.0, 1.0);
+    let proj = Point3::new(
+        a.x + t_clamped * ab.x,
+        a.y + t_clamped * ab.y,
+        a.z + t_clamped * ab.z,
+    );
+    p.distance(proj)
 }
 
 impl Curve for Polyline {
@@ -92,6 +147,37 @@ mod tests {
         // Midway along second segment (arc length 1 + 1 = 2) → (1, 1, 0).
         let q = p.eval(2.0).unwrap();
         assert!((q.x - 1.0).abs() < 1e-9 && (q.y - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn douglas_peucker_drops_near_linear_points() {
+        // A point sequence along the x-axis with tiny y perturbations should
+        // collapse to the two endpoints under a modest tolerance.
+        let pts = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.001, 0.0),
+            Point3::new(2.0, -0.001, 0.0),
+            Point3::new(3.0, 0.0005, 0.0),
+            Point3::new(4.0, 0.0, 0.0),
+        ];
+        let p = Polyline::new(pts).unwrap();
+        let simp = p.simplify_douglas_peucker(0.01);
+        assert_eq!(simp.points.len(), 2);
+        assert!((simp.points[0].x - 0.0).abs() < 1e-9);
+        assert!((simp.points[1].x - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn douglas_peucker_keeps_sharp_corner() {
+        // L-shape: corner must be preserved even at high tolerance.
+        let pts = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+        ];
+        let p = Polyline::new(pts).unwrap();
+        let simp = p.simplify_douglas_peucker(0.1);
+        assert_eq!(simp.points.len(), 3);
     }
 
     #[test]
