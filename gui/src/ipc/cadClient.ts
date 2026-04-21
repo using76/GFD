@@ -839,7 +839,13 @@ export const cadClient = {
 
   healFix: (
     shape_id: string,
-    options: { tolerance?: number; sew?: boolean; fix_wires?: boolean; remove_small?: boolean } = {},
+    options: {
+      tolerance?: number;
+      sew?: boolean;
+      fix_wires?: boolean;
+      remove_small?: boolean;
+      remove_duplicate_faces?: boolean;
+    } = {},
   ) =>
     send<{ log: string[] }>('cad.heal.fix', {
       shape_id,
@@ -847,6 +853,7 @@ export const cadClient = {
       sew: options.sew ?? true,
       fix_wires: options.fix_wires ?? false,
       remove_small: options.remove_small ?? true,
+      remove_duplicate_faces: options.remove_duplicate_faces ?? false,
     }),
 
   healStats: (shape_id: string) =>

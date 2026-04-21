@@ -24,6 +24,7 @@ pub struct HealOptions {
     pub fix_wires: bool,
     pub remove_small_edges: bool,
     pub unify_tolerances: bool,
+    pub remove_duplicate_faces: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +229,12 @@ pub fn fix_shape(arena: &mut ShapeArena, id: ShapeId, opts: &HealOptions) -> Hea
             log.push(format!("removed {} small edge(s) (tol={})", removed, tol));
         }
     }
+    if opts.remove_duplicate_faces {
+        let removed = remove_duplicate_faces(arena, id)?;
+        if removed > 0 {
+            log.push(format!("removed {} duplicate face ref(s) from shells", removed));
+        }
+    }
 
     let remaining = check_validity(arena, id)?;
     log.push(format!("post-fix validity: {} issue(s) remain", remaining.len()));
@@ -400,6 +407,53 @@ fn sew_vertices(arena: &mut ShapeArena, id: ShapeId, tol: f64) -> HealResult<usi
         }
     }
     Ok(rewrites)
+}
+
+/// For every pair of faces with identical wire sets, rewrite shell face
+/// references so only the first (canonical) face remains. Orientation of the
+/// dropped entry is discarded. Returns the number of shell entries dropped.
+fn remove_duplicate_faces(arena: &mut ShapeArena, id: ShapeId) -> HealResult<usize> {
+    use gfd_cad_topo::{collect_by_kind, ShapeKind};
+    // Build canonical map from wire-set key → first face id.
+    let faces = collect_by_kind(arena, id, ShapeKind::Face);
+    let mut canonical: std::collections::HashMap<Vec<u32>, ShapeId> = std::collections::HashMap::new();
+    let mut drop_face: std::collections::HashSet<ShapeId> = std::collections::HashSet::new();
+    for fid in &faces {
+        let key = match arena.get(*fid)? {
+            Shape::Face { wires, .. } => {
+                let mut k: Vec<u32> = wires.iter().map(|w| w.0).collect();
+                k.sort();
+                k
+            }
+            _ => continue,
+        };
+        if key.is_empty() { continue; }
+        if canonical.contains_key(&key) {
+            drop_face.insert(*fid);
+        } else {
+            canonical.insert(key, *fid);
+        }
+    }
+    if drop_face.is_empty() { return Ok(0); }
+    // Walk every shell and drop entries referencing flagged faces.
+    let shells = collect_by_kind(arena, id, ShapeKind::Shell);
+    let mut removed = 0usize;
+    for sid in shells {
+        if let Ok(Shape::Shell { faces }) = arena.get(sid) {
+            let len_before = faces.len();
+            let filtered: Vec<_> = faces.iter()
+                .filter(|(fid, _)| !drop_face.contains(fid))
+                .cloned()
+                .collect();
+            if filtered.len() != len_before {
+                removed += len_before - filtered.len();
+                if let Shape::Shell { faces } = arena.get_mut(sid)? {
+                    *faces = filtered;
+                }
+            }
+        }
+    }
+    Ok(removed)
 }
 
 fn remove_small_edges_in(arena: &mut ShapeArena, id: ShapeId, tol: f64) -> HealResult<usize> {
@@ -613,6 +667,41 @@ mod tests {
         let issues = check_validity(&arena, edge).unwrap();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].kind, "degenerate_edge");
+    }
+
+    #[test]
+    fn remove_duplicate_faces_collapses_shell() {
+        use gfd_cad_geom::{curve::Line, surface::Plane, Direction3, Point3};
+        use gfd_cad_topo::{shape::{CurveGeom, SurfaceGeom}, Orientation};
+        let mut arena = ShapeArena::new();
+        let v0 = arena.push(Shape::vertex(Point3::new(0.0, 0.0, 0.0)));
+        let v1 = arena.push(Shape::vertex(Point3::new(1.0, 0.0, 0.0)));
+        let v2 = arena.push(Shape::vertex(Point3::new(1.0, 1.0, 0.0)));
+        let v3 = arena.push(Shape::vertex(Point3::new(0.0, 1.0, 0.0)));
+        let mk = |a, b, arena: &mut ShapeArena, pa, pb| arena.push(Shape::Edge {
+            curve: CurveGeom::Line(Line::from_points(pa, pb).unwrap()),
+            vertices: [a, b],
+            orient: Orientation::Forward,
+        });
+        let e0 = mk(v0, v1, &mut arena, Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0));
+        let e1 = mk(v1, v2, &mut arena, Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0));
+        let e2 = mk(v2, v3, &mut arena, Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0));
+        let e3 = mk(v3, v0, &mut arena, Point3::new(0.0, 1.0, 0.0), Point3::new(0.0, 0.0, 0.0));
+        let wire = arena.push(Shape::Wire { edges: vec![
+            (e0, Orientation::Forward), (e1, Orientation::Forward),
+            (e2, Orientation::Forward), (e3, Orientation::Forward),
+        ]});
+        let plane = Plane::new(Point3::ORIGIN, Direction3::Z, Direction3::X);
+        let f1 = arena.push(Shape::Face { surface: SurfaceGeom::Plane(plane), wires: vec![wire], orient: Orientation::Forward });
+        let f2 = arena.push(Shape::Face { surface: SurfaceGeom::Plane(plane), wires: vec![wire], orient: Orientation::Forward });
+        let shell = arena.push(Shape::Shell { faces: vec![(f1, Orientation::Forward), (f2, Orientation::Forward)] });
+        let opts = HealOptions { remove_duplicate_faces: true, ..Default::default() };
+        let log = fix_shape(&mut arena, shell, &opts).unwrap();
+        assert!(log.iter().any(|l| l.contains("removed 1 duplicate face")));
+        if let Shape::Shell { faces } = arena.get(shell).unwrap() {
+            assert_eq!(faces.len(), 1);
+            assert_eq!(faces[0].0, f1);
+        }
     }
 
     #[test]

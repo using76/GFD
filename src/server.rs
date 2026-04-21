@@ -2641,12 +2641,14 @@ fn handle_cad_heal_fix(state: &mut ServerState, id: u64, params: &Value) -> RpcR
     let sew = params.get("sew").and_then(|v| v.as_bool()).unwrap_or(true);
     let fix_wires = params.get("fix_wires").and_then(|v| v.as_bool()).unwrap_or(false);
     let remove_small = params.get("remove_small").and_then(|v| v.as_bool()).unwrap_or(true);
+    let remove_dup_faces = params.get("remove_duplicate_faces").and_then(|v| v.as_bool()).unwrap_or(false);
     let opts = HealOptions {
         tolerance: tol,
         sew_faces: sew,
         fix_wires,
         remove_small_edges: remove_small,
         unify_tolerances: false,
+        remove_duplicate_faces: remove_dup_faces,
     };
     match fix_shape(&mut state.cad_doc.arena, arena_id, &opts) {
         Ok(log) => RpcResponse::ok(id, serde_json::json!({ "log": log })),
