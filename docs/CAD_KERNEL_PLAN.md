@@ -11,7 +11,8 @@ Bezier curve primitive with de Casteljau evaluation (iter 203),
 TriMesh::close_boundary_loops fan-fill heal op (iter 204),
 Hermite cubic curve with analytical tangent (iter 205),
 Catmull-Rom polyline sampler + cad.profile.catmull_rom RPC (iter 206),
-Vertex valence statistics in trimesh_summary (iter 207).
+Vertex valence statistics in trimesh_summary (iter 207),
+NurbsCurve (rational B-spline) with analytical derivative (iter 208).
 
 ## Current totals (iter 195)
 
@@ -105,7 +106,7 @@ B-spline curve/surface derivatives in iter 198 — now 5/5 Platonic solids.)
 
 ### Phase 1 — Geometry (gfd-cad-geom) ✅ **(iter 1–2)**
 - [x] `Point3`, `Vector3`, `Direction3`
-- [x] Curves: `Line`, `Circle`, `BSplineCurve` (Cox-de Boor, clamped uniform), `Bezier` (de Casteljau), `Hermite` (cubic)
+- [x] Curves: `Line`, `Circle`, `BSplineCurve` (Cox-de Boor, clamped uniform), `Bezier` (de Casteljau), `Hermite` (cubic), `NurbsCurve` (rational B-spline)
 - [x] Surfaces: `Plane`, `Cylinder`, `Sphere`, `Cone`, `Torus`
 - [x] `Curve::eval` / `tangent` / `length` / `closest_point` (golden-section)
 - [x] `Surface::eval` / `normal`

@@ -8,6 +8,7 @@ pub mod circle;
 pub mod ellipse;
 pub mod hermite;
 pub mod line;
+pub mod nurbs;
 pub mod polyline;
 
 pub use bezier::Bezier;
@@ -16,6 +17,7 @@ pub use circle::Circle;
 pub use ellipse::Ellipse;
 pub use hermite::{catmull_rom_sample, Hermite};
 pub use line::Line;
+pub use nurbs::NurbsCurve;
 pub use polyline::Polyline;
 
 /// A parametric curve C(u) : [u_min, u_max] → R^3.
