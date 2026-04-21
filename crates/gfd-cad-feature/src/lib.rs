@@ -26,7 +26,7 @@ pub mod revolve;
 pub use chamfer::{chamfered_box_solid, chamfered_box_top_edges};
 pub use fillet::{filleted_box_solid, filleted_box_top_edges, filleted_cylinder_solid};
 pub use helix::{archimedean_spiral_path, helix_length, helix_path, torus_knot_path};
-pub use platonic::{icosahedron_solid, icosphere_solid, octahedron_solid, tetrahedron_solid};
+pub use platonic::{dodecahedron_solid, icosahedron_solid, icosphere_solid, octahedron_solid, tetrahedron_solid};
 pub use profile::{
     airfoil_naca4_profile, c_channel_profile, capsule_revolve_profile, cup_revolve_profile, disc_solid,
     ellipse_profile, frustum_revolve_profile, gear_prism_solid, gear_profile_simple,

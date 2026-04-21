@@ -27,7 +27,7 @@ use gfd_thermal::ThermalState;
 
 use gfd_cad::{
     bool_::{compound_merge, mesh_boolean, MeshOp},
-    feature::{box_solid, c_channel_profile, t_beam_profile, z_section_profile, chamfered_box_solid, chamfered_box_top_edges, circular_array, cone_solid, capsule_revolve_profile, cup_revolve_profile, cylinder_solid, disc_solid, ellipse_profile, filleted_box_solid, filleted_box_top_edges, filleted_cylinder_solid, frustum_revolve_profile, gear_profile_simple, airfoil_naca4_profile, archimedean_spiral_path, helix_length, helix_path, honeycomb_pattern_solid, torus_knot_path, i_beam_profile, icosahedron_solid, icosphere_solid, l_angle_profile, linear_array, mirror_shape, ngon_prism_solid, octahedron_solid, offset_polygon_2d, pad_polygon_xy, pocket_polygon_xy, pyramid_solid, rectangle_profile, rectangular_array, regular_ngon_profile, revolve_profile_z, revolve_profile_z_partial, ring_revolve_profile, rotate_shape, rounded_rectangle_profile, scale_shape, slot_profile, sphere_solid, spiral_staircase_solid, stairs_solid, star_profile, tetrahedron_solid, torus_revolve_profile, torus_solid, translate_shape, tube_solid, wedge_solid, FeatureTree, MirrorPlane},
+    feature::{box_solid, c_channel_profile, t_beam_profile, z_section_profile, chamfered_box_solid, chamfered_box_top_edges, circular_array, cone_solid, capsule_revolve_profile, cup_revolve_profile, cylinder_solid, disc_solid, dodecahedron_solid, ellipse_profile, filleted_box_solid, filleted_box_top_edges, filleted_cylinder_solid, frustum_revolve_profile, gear_profile_simple, airfoil_naca4_profile, archimedean_spiral_path, helix_length, helix_path, honeycomb_pattern_solid, torus_knot_path, i_beam_profile, icosahedron_solid, icosphere_solid, l_angle_profile, linear_array, mirror_shape, ngon_prism_solid, octahedron_solid, offset_polygon_2d, pad_polygon_xy, pocket_polygon_xy, pyramid_solid, rectangle_profile, rectangular_array, regular_ngon_profile, revolve_profile_z, revolve_profile_z_partial, ring_revolve_profile, rotate_shape, rounded_rectangle_profile, scale_shape, slot_profile, sphere_solid, spiral_staircase_solid, stairs_solid, star_profile, tetrahedron_solid, torus_revolve_profile, torus_solid, translate_shape, tube_solid, wedge_solid, FeatureTree, MirrorPlane},
     heal::{check_validity, fix_shape, shape_stats, HealOptions},
     io::{export_step, import_brep, import_step, read_brep, read_obj, read_off, read_ply_ascii, read_stl, read_xyz, summarise_step, write_brep, write_dxf_3dface, write_obj, write_off, write_ply_ascii, write_stl_ascii, write_stl_binary, write_vtk_polydata, write_wrl, write_xyz, StlMesh},
     measure::{bbox_volume, bounding_sphere, center_of_mass, closest_point_on_shape, distance as cad_distance, distance_edge_edge, distance_vertex_edge, divergence_volume, edge_length, edge_length_range, hausdorff_distance_vertex, inertia_tensor_full, is_convex_polygon, is_point_inside_solid, mesh_euler_genus, polygon_area, polygon_area_signed, polygon_centroid, polygon_contains_point, polygon_convex_hull, polygon_perimeter, principal_axes, signed_distance, surface_area, trimesh_aspect_ratio_stats, trimesh_bounding_box, trimesh_boundary_edges, trimesh_center_of_mass, trimesh_closest_point, trimesh_edge_length_stats, trimesh_inertia_tensor, trimesh_is_closed, trimesh_non_manifold_edges, trimesh_point_inside, trimesh_ray_intersect, trimesh_signed_distance, trimesh_surface_area, trimesh_volume},
@@ -453,6 +453,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.feature.tetrahedron"     => handle_cad_feature_tetra(state, req.id, &req.params),
         "cad.feature.octahedron"      => handle_cad_feature_octa(state, req.id, &req.params),
         "cad.feature.icosahedron"     => handle_cad_feature_icosa(state, req.id, &req.params),
+        "cad.feature.dodecahedron"    => handle_cad_feature_dodeca(state, req.id, &req.params),
         "cad.feature.icosphere"       => handle_cad_feature_icosphere(state, req.id, &req.params),
         "cad.feature.stairs"          => handle_cad_feature_stairs(state, req.id, &req.params),
         "cad.feature.honeycomb"       => handle_cad_feature_honeycomb(state, req.id, &req.params),
@@ -1152,6 +1153,18 @@ fn handle_cad_feature_icosa(state: &mut ServerState, id: u64, params: &Value) ->
     let str_id = format!("shape_{}", state.next_cad_shape_id);
     state.cad_shape_map.insert(str_id.clone(), shape_id);
     RpcResponse::ok(id, serde_json::json!({ "shape_id": str_id, "arena_id": shape_id.0, "kind": "icosahedron" }))
+}
+
+fn handle_cad_feature_dodeca(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let scale = params.get("scale").and_then(|v| v.as_f64()).unwrap_or(0.5);
+    let shape_id = match dodecahedron_solid(&mut state.cad_doc.arena, scale) {
+        Ok(s) => s,
+        Err(e) => return RpcResponse::err(id, format!("dodecahedron failed: {}", e)),
+    };
+    state.next_cad_shape_id += 1;
+    let str_id = format!("shape_{}", state.next_cad_shape_id);
+    state.cad_shape_map.insert(str_id.clone(), shape_id);
+    RpcResponse::ok(id, serde_json::json!({ "shape_id": str_id, "arena_id": shape_id.0, "kind": "dodecahedron" }))
 }
 
 fn handle_cad_feature_spiral_staircase(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {

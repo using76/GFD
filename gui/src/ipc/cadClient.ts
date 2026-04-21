@@ -261,6 +261,11 @@ export const cadClient = {
       'cad.feature.icosahedron', { scale },
     ),
 
+  dodecahedron: (scale = 0.5) =>
+    send<{ shape_id: string; arena_id: number; kind: string }>(
+      'cad.feature.dodecahedron', { scale },
+    ),
+
   icosphere: (radius = 0.5, subdivisions = 2) =>
     send<{ shape_id: string; arena_id: number; kind: string }>(
       'cad.feature.icosphere', { radius, subdivisions },

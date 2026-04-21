@@ -163,6 +163,54 @@ pub fn icosahedron_solid(arena: &mut ShapeArena, scale: f64) -> TopoResult<Shape
     build_faceted_solid(arena, &v, &faces)
 }
 
+/// Regular dodecahedron centred at the origin, vertices scaled so that the
+/// bounding sphere radius = `scale`. 20 vertices, 12 pentagonal faces.
+/// Uses the classic φ parameterisation: (±1, ±1, ±1), (0, ±1/φ, ±φ),
+/// (±1/φ, ±φ, 0), (±φ, 0, ±1/φ).
+pub fn dodecahedron_solid(arena: &mut ShapeArena, scale: f64) -> TopoResult<ShapeId> {
+    if scale <= 0.0 {
+        return Err(TopoError::Geom(GeomError::Degenerate("dodecahedron: scale must be > 0")));
+    }
+    let phi = (1.0 + 5.0_f64.sqrt()) * 0.5;
+    let a = 1.0 / phi;
+    let b = phi;
+    // Bounding sphere radius for the un-scaled vertex set: sqrt(3) (cube
+    // corners). Non-cube verts live at sqrt(a² + b²) = sqrt(1/φ² + φ²) = sqrt(3).
+    let r = 3.0_f64.sqrt();
+    let n = scale / r;
+    //  0..7   cube corners  (±1, ±1, ±1)
+    //  8..11  XY-plane pair  (±a, ±b, 0)
+    // 12..15  YZ-plane pair  (0, ±a, ±b)
+    // 16..19  XZ-plane pair  (±b, 0, ±a)
+    let raw: [(f64, f64, f64); 20] = [
+        ( 1.0,  1.0,  1.0), ( 1.0,  1.0, -1.0), ( 1.0, -1.0,  1.0), ( 1.0, -1.0, -1.0),
+        (-1.0,  1.0,  1.0), (-1.0,  1.0, -1.0), (-1.0, -1.0,  1.0), (-1.0, -1.0, -1.0),
+        ( a,  b, 0.0), ( a, -b, 0.0), (-a,  b, 0.0), (-a, -b, 0.0),
+        ( 0.0,  a,  b), ( 0.0,  a, -b), ( 0.0, -a,  b), ( 0.0, -a, -b),
+        ( b, 0.0,  a), ( b, 0.0, -a), (-b, 0.0,  a), (-b, 0.0, -a),
+    ];
+    let v: Vec<Point3> = raw.iter().map(|(x, y, z)| Point3::new(x * n, y * n, z * n)).collect();
+    // 12 pentagonal faces. Ordering: each pentagon is a cyclic ring of 5
+    // vertices along shared edges. Face normal direction is not enforced
+    // per-face here (build_faceted_solid treats all edges uniformly); the
+    // winding is chosen consistently around each face center.
+    let faces: Vec<Vec<usize>> = vec![
+        vec![ 0,  8, 10,  4, 12],   // vertex-0 ring
+        vec![ 0, 12, 14,  2, 16],   // vertex-0 ring
+        vec![ 0, 16, 17,  1,  8],   // vertex-0 ring
+        vec![ 1, 17,  3, 13,  9],   // vertex-1 ring
+        vec![ 1,  9,  5, 10,  8],   // vertex-1 ring
+        vec![ 2, 14,  6, 15, 11],   // vertex-2 ring
+        vec![ 2, 11,  3, 17, 16],   // vertex-2 ring
+        vec![ 3, 11, 15,  7, 13],   // vertex-3 ring
+        vec![ 4, 10,  5, 19, 18],   // vertex-4 ring
+        vec![ 4, 18,  6, 14, 12],   // vertex-4 ring
+        vec![ 5,  9, 13,  7, 19],   // vertex-5 ring
+        vec![ 6, 18, 19,  7, 15],   // vertex-6 ring
+    ];
+    build_faceted_solid(arena, &v, &faces)
+}
+
 /// Regular octahedron centred at the origin, vertices on the ±axes at
 /// distance `scale`. 6 vertices + 8 triangle faces.
 pub fn octahedron_solid(arena: &mut ShapeArena, scale: f64) -> TopoResult<ShapeId> {

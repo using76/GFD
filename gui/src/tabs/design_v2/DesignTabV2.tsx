@@ -647,6 +647,9 @@ const DesignTabV2: React.FC = () => {
         <Button disabled={busy} onClick={() => addSimple('icosahedron', () => cadClient.icosahedron(0.5))}>
           Icosahedron
         </Button>
+        <Button disabled={busy} onClick={() => addSimple('dodecahedron', () => cadClient.dodecahedron(0.5))}>
+          Dodecahedron
+        </Button>
         <Button disabled={busy} onClick={() => addSimple('icosphere', () => cadClient.icosphere(0.5, 2))}>
           Icosphere
         </Button>

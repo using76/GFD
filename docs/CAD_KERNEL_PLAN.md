@@ -9,7 +9,7 @@
 - **~125 JSON-RPC methods**: document / feature / boolean / measure / heal / sketch / import / export / profile / version / arena / mesh / ping / misc
 - **Export formats (13, all disk + 9 in-memory)**: STL ASCII + binary, BRep-JSON, STEP AP214, OBJ, OFF, PLY, WRL, XYZ, VTK Legacy, DXF R12
 - **Import formats (7)**: STL, STEP (points-only), BRep-JSON, OBJ, OFF, PLY, XYZ
-- **Primitives (19)**: box / cube / rectangular_prism / sphere / cylinder / cone / torus / wedge / pyramid / ngon_prism / tube / disc / tetrahedron / octahedron / icosahedron / icosphere / stairs / honeycomb / spiral_staircase
+- **Primitives (20)**: box / cube / rectangular_prism / sphere / cylinder / cone / torus / wedge / pyramid / ngon_prism / tube / disc / tetrahedron / octahedron / icosahedron / dodecahedron / icosphere / stairs / honeycomb / spiral_staircase
 - **2D profile generators (13)**: ngon / star / rectangle / rounded_rectangle / slot / ellipse / gear / airfoil / i_beam / l_angle / c_channel / t_beam / z_section
 - **Revolve (r,z) profile generators (5)**: ring / cup / frustum / torus / capsule
 - **Curve samplers (3)**: helix / archimedean_spiral / torus_knot
@@ -21,7 +21,8 @@
 
 Phase 1–8 scope is comprehensively covered. Deliberately deferred (non-blocking):
 B-Rep-level CSG (SSI + face classification), generic-edge rolling-ball fillet,
-full STEP AP214 reader with topology reconstruction, `BSplineSurface`, dodecahedron.
+full STEP AP214 reader with topology reconstruction, analytical B-spline derivatives.
+(`BSplineSurface` landed in iter 196, dodecahedron in iter 197 — now 5/5 Platonic solids.)
 **Goal**: FreeCAD 1.0의 Part Design + Sketcher + Shape Healing 기능을 **Pure Rust**로 재구현. OCCT 의존 없음. GUI는 Electron + React + Three.js (현재 스택 유지). 기존 Design/Display/Measure/Repair 탭 전체 제거 후 재작성.
 
 ---
