@@ -68,7 +68,68 @@ pub struct ShapeStats {
 pub fn check_validity(arena: &ShapeArena, id: ShapeId) -> HealResult<Vec<ValidityIssue>> {
     let mut issues = Vec::new();
     walk(arena, id, &mut issues)?;
+    detect_non_manifold_edges(arena, id, &mut issues)?;
+    detect_duplicate_faces(arena, id, &mut issues)?;
     Ok(issues)
+}
+
+/// Flag every edge that is referenced by 3 or more faces. Two is the normal
+/// case for a closed manifold; a lone edge belonging to one face is a
+/// boundary (not a defect). This uses `EdgeFaceMap` for O(n) walk.
+fn detect_non_manifold_edges(
+    arena: &ShapeArena,
+    root: ShapeId,
+    issues: &mut Vec<ValidityIssue>,
+) -> HealResult<()> {
+    use gfd_cad_topo::adjacency::EdgeFaceMap;
+    let map = match EdgeFaceMap::build(arena, root) {
+        Ok(m) => m,
+        Err(_) => return Ok(()),
+    };
+    for (edge, faces) in &map.edge_to_faces {
+        if faces.len() > 2 {
+            issues.push(ValidityIssue {
+                shape_id: edge.0,
+                kind: "non_manifold_edge",
+                detail: format!("edge {:?} shared by {} faces", edge, faces.len()),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Two faces with identical wire sets (order-independent) are a topology
+/// defect: either one should be removed or they should be collapsed. We
+/// sort wire ids per face and compare.
+fn detect_duplicate_faces(
+    arena: &ShapeArena,
+    root: ShapeId,
+    issues: &mut Vec<ValidityIssue>,
+) -> HealResult<()> {
+    use gfd_cad_topo::{collect_by_kind, ShapeKind};
+    let faces = collect_by_kind(arena, root, ShapeKind::Face);
+    let mut seen: std::collections::HashMap<Vec<u32>, ShapeId> = std::collections::HashMap::new();
+    for fid in &faces {
+        let key = match arena.get(*fid)? {
+            Shape::Face { wires, .. } => {
+                let mut k: Vec<u32> = wires.iter().map(|w| w.0).collect();
+                k.sort();
+                k
+            }
+            _ => continue,
+        };
+        if key.is_empty() { continue; }
+        if let Some(prev) = seen.get(&key) {
+            issues.push(ValidityIssue {
+                shape_id: fid.0,
+                kind: "duplicate_face",
+                detail: format!("face {:?} shares wire set with face {:?}", fid, prev),
+            });
+        } else {
+            seen.insert(key, *fid);
+        }
+    }
+    Ok(())
 }
 
 fn walk(arena: &ShapeArena, id: ShapeId, issues: &mut Vec<ValidityIssue>) -> HealResult<()> {
@@ -552,5 +613,38 @@ mod tests {
         let issues = check_validity(&arena, edge).unwrap();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].kind, "degenerate_edge");
+    }
+
+    #[test]
+    fn duplicate_face_reported() {
+        // Two faces that share the exact same wire set — classic import defect.
+        use gfd_cad_geom::{curve::Line, surface::Plane, Direction3, Point3};
+        use gfd_cad_topo::{shape::{CurveGeom, SurfaceGeom}, Orientation};
+        let mut arena = ShapeArena::new();
+        let v0 = arena.push(Shape::vertex(Point3::new(0.0, 0.0, 0.0)));
+        let v1 = arena.push(Shape::vertex(Point3::new(1.0, 0.0, 0.0)));
+        let v2 = arena.push(Shape::vertex(Point3::new(1.0, 1.0, 0.0)));
+        let v3 = arena.push(Shape::vertex(Point3::new(0.0, 1.0, 0.0)));
+        let mk_edge = |a, b, arena: &mut ShapeArena, pa, pb| {
+            arena.push(Shape::Edge {
+                curve: CurveGeom::Line(Line::from_points(pa, pb).unwrap()),
+                vertices: [a, b],
+                orient: Orientation::Forward,
+            })
+        };
+        let e0 = mk_edge(v0, v1, &mut arena, Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0));
+        let e1 = mk_edge(v1, v2, &mut arena, Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0));
+        let e2 = mk_edge(v2, v3, &mut arena, Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0));
+        let e3 = mk_edge(v3, v0, &mut arena, Point3::new(0.0, 1.0, 0.0), Point3::new(0.0, 0.0, 0.0));
+        let wire = arena.push(Shape::Wire { edges: vec![
+            (e0, Orientation::Forward), (e1, Orientation::Forward),
+            (e2, Orientation::Forward), (e3, Orientation::Forward),
+        ]});
+        let plane = Plane::new(Point3::ORIGIN, Direction3::Z, Direction3::X);
+        let f1 = arena.push(Shape::Face { surface: SurfaceGeom::Plane(plane), wires: vec![wire], orient: Orientation::Forward });
+        let f2 = arena.push(Shape::Face { surface: SurfaceGeom::Plane(plane), wires: vec![wire], orient: Orientation::Forward });
+        let shell = arena.push(Shape::Shell { faces: vec![(f1, Orientation::Forward), (f2, Orientation::Forward)] });
+        let issues = check_validity(&arena, shell).unwrap();
+        assert!(issues.iter().any(|i| i.kind == "duplicate_face"));
     }
 }

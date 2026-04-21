@@ -1,7 +1,10 @@
 # GFD CAD Kernel Port Plan — Pure Rust FreeCAD Reimplementation
 
-**Status**: Iteration 195 complete (2026-04-20). Test count: **989 passing**.
+**Status**: Iteration 199 complete (2026-04-21). Test count: **1000+ passing**.
 **Phase 1–8 all functionally complete** — see Completion Matrix in §9b.
+Recent additions: BSplineSurface (iter 196), dodecahedron (iter 197),
+analytical B-spline derivatives (iter 198), non-manifold edge + duplicate face
+validity (iter 199).
 
 ## Current totals (iter 195)
 
