@@ -44,8 +44,12 @@ core.store.subscribe((s) => render(s));          // React mirrors AppState
 ## Phase status
 
 - **Phase 0 ✅** — command-core (registry, dispatcher, journal, state, patches, entity, consent, transport).
-- **Phase 1 ✅** — real-backend solver runner + `mesh.generate` / `calc.run` / `calc.stop` / `results.load_field` commands wired to gfd-server. Simulation remains only in the legacy store's `!window.gfdAPI` branch until the UI migrates (Phase 2–4).
-- **Next** — Phase 2 (command-ify geometry + unify ids), Phase 3 (split renderer), Phase 4 (data-driven ribbon/panels + port 168 features), Phase 5 (MCP/control server), Phase 6 (vision), Phase 7 (pluggable physics), Phase 8 (LLM providers).
+- **Phase 1 ✅** — real-backend solver runner + `mesh.generate` / `calc.run` / `calc.stop` / `results.load_field`.
+- **Phase 2 ✅** — geometry & sketch commands (`geometry.create_primitive`, transforms, delete/rename/tessellate, `sketch.*`); canonical id == backend shape_id; GeometryTree; name/bbox entity addressing.
+- **Phase 5 ✅** — `mcp/bridge.ts` auto-maps the registry to MCP tools + meta-tools (`get_state`, `list_entities`, `run_command`, `select`, `query_spatial`, `screenshot` stub, undo/redo). `selection.set` + `view.set_camera` commands.
+- **Phase 7 ✅** — pluggable physics manifest (`physics/manifest.ts`) + `physics.*` commands (validate_expression, set_constitutive, set_term, remove_term, apply_manifest). Default Navier–Stokes manifest in state.
+- **Phase 8 ✅** — pluggable LLM provider layer (`llm/`): provider-agnostic interface + registry, Claude + Ollama adapters, MCP→Anthropic/OpenAI tool converters.
+- **Remaining (need the interactive React/Three/Electron app)** — Phase 3 (split the 2,184-line CadScene renderer + picking → selection commands), Phase 4 (data-driven ribbon/panels from the registry + port all 168 features + retire legacy store), Phase 6 (annotated-screenshot capture for the vision loop), plus the Electron-main MCP/WebSocket transport (see `mcp/README.md`) and the backend `physics.*` RPCs + `ExpressionSourceTerm`.
 
 See `/root/.claude/plans/gfd-gui-atomic-cocoa.md` for the full plan.
 

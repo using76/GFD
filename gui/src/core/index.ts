@@ -20,6 +20,7 @@ export * from './dispatcher';
 export * from './transport/rpcClient';
 export * from './solver/realSolver';
 export * from './mcp';
+export * from './llm';
 
 import { CommandRegistry } from './registry';
 import { StateStore, createInitialState, type AppState } from './state';
