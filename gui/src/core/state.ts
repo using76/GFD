@@ -8,6 +8,7 @@
 
 import type { Vec3 } from './types';
 import { applyPatch, type AppliedOp, type PatchOp } from './patch';
+import { buildDefaultManifest, type PhysicsManifest } from './physics/manifest';
 
 export interface GeometryNode {
   /** Canonical stable id — equals the backend `shape_id` (no more dual IDs). */
@@ -77,7 +78,7 @@ export interface PhysicsSetup {
   };
   material: { name: string; density: number; viscosity: number; cp: number; conductivity: number };
   /** Pluggable governing-equation/constitutive manifest (Phase 7). */
-  manifestId: string | null;
+  manifest: PhysicsManifest | null;
 }
 
 export interface UiState {
@@ -117,7 +118,7 @@ export function createInitialState(): AppState {
     physics: {
       models: { flow: 'incompressible', turbulence: 'none', energy: false, multiphase: 'none', radiation: 'none' },
       material: { name: 'air', density: 1.225, viscosity: 1.8e-5, cp: 1006, conductivity: 0.0257 },
-      manifestId: null,
+      manifest: buildDefaultManifest(),
     },
     solver: { jobId: null, status: 'idle', iteration: 0, residual: null, maxIterations: 200 },
     results: null,

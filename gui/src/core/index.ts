@@ -10,6 +10,7 @@ export * from './types';
 export * from './schema';
 export * from './patch';
 export * from './state';
+export * from './physics/manifest';
 export * from './entity';
 export * from './command';
 export * from './registry';
