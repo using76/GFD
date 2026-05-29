@@ -12,17 +12,23 @@
 
 import type { CommandRegistry } from '../registry';
 import { registerSystemCommands } from './system';
+import { registerGeometryCommands } from './geometry';
+import { registerSketchCommands } from './sketch';
 import { registerMeshCommands } from './mesh';
 import { registerCalcCommands } from './calc';
 import { registerResultsCommands } from './results';
 
 export * from './system';
+export * from './geometry';
+export * from './sketch';
 export * from './mesh';
 export * from './calc';
 export * from './results';
 
 export function registerCoreCommands(registry: CommandRegistry): void {
   registerSystemCommands(registry);
+  registerGeometryCommands(registry);
+  registerSketchCommands(registry);
   registerMeshCommands(registry);
   registerCalcCommands(registry);
   registerResultsCommands(registry);
