@@ -81,6 +81,31 @@ export interface PhysicsSetup {
   manifest: PhysicsManifest | null;
 }
 
+/** A boundary condition in the backend's solve.start wire format. */
+export interface BoundaryCondition {
+  patch: string;
+  type: string;
+  parameters: Record<string, number>;
+}
+
+export interface SolverSettings {
+  method: 'SIMPLE' | 'PISO' | 'SIMPLEC';
+  maxIterations: number;
+  tolerance: number;
+  relaxVelocity: number;
+  relaxPressure: number;
+}
+
+export interface SetupState {
+  boundaries: BoundaryCondition[];
+  solver: SolverSettings;
+}
+
+export interface DisplayState {
+  renderMode: 'shaded' | 'wireframe' | 'shaded_edges';
+  sectionPlane: { enabled: boolean; axis: 'x' | 'y' | 'z'; offset: number };
+}
+
 export interface UiState {
   activeTab: string;
   activeTool: string | null;
@@ -98,6 +123,8 @@ export interface AppState {
   camera: CameraState;
   mesh: MeshState | null;
   physics: PhysicsSetup;
+  setup: SetupState;
+  display: DisplayState;
   solver: SolverStatus;
   results: ResultsSummary | null;
   ui: UiState;
@@ -120,6 +147,11 @@ export function createInitialState(): AppState {
       material: { name: 'air', density: 1.225, viscosity: 1.8e-5, cp: 1006, conductivity: 0.0257 },
       manifest: buildDefaultManifest(),
     },
+    setup: {
+      boundaries: [],
+      solver: { method: 'SIMPLE', maxIterations: 200, tolerance: 1e-4, relaxVelocity: 0.5, relaxPressure: 0.3 },
+    },
+    display: { renderMode: 'shaded', sectionPlane: { enabled: false, axis: 'x', offset: 0 } },
     solver: { jobId: null, status: 'idle', iteration: 0, residual: null, maxIterations: 200 },
     results: null,
     ui: { activeTab: 'geometry', activeTool: null, units: 'SI' },

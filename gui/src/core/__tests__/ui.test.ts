@@ -19,8 +19,10 @@ describe('Phase 4 data-driven UI models', () => {
     // Physics + calc tabs exist because commands are registered there.
     expect(model.some((t) => t.category === 'physics')).toBe(true);
     expect(model.some((t) => t.category === 'calc')).toBe(true);
-    // Empty categories (no commands) are omitted.
-    expect(model.some((t) => t.category === 'repair')).toBe(false);
+    // Categories with commands now appear (repair was authored in Phase 4).
+    expect(model.some((t) => t.category === 'repair')).toBe(true);
+    // Empty categories (no commands authored yet) are omitted — e.g. 'prepare'.
+    expect(model.some((t) => t.category === 'prepare')).toBe(false);
   });
 
   it('derives form fields from a command paramsSchema', () => {

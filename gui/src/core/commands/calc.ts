@@ -31,19 +31,20 @@ export interface CalcRunParams {
 function buildConfig(ctx: CommandContext, params: CalcRunParams): SolverConfig {
   const s = ctx.getState();
   const physics = s.physics;
+  const setup = s.setup;
   const isThermal = physics.models.flow === 'none';
   return {
     flow: physics.models.flow,
     turbulence: physics.models.turbulence,
     physics: isThermal ? 'thermal' : 'fluid',
-    maxIterations: params.maxIterations ?? s.solver.maxIterations,
-    tolerance: params.tolerance ?? 1e-4,
+    maxIterations: params.maxIterations ?? setup.solver.maxIterations,
+    tolerance: params.tolerance ?? setup.solver.tolerance,
     density: physics.material.density,
     viscosity: physics.material.viscosity,
     conductivity: physics.material.conductivity,
-    alphaU: 0.5,
-    alphaP: 0.3,
-    boundaryConditions: params.boundaryConditions ?? [],
+    alphaU: setup.solver.relaxVelocity,
+    alphaP: setup.solver.relaxPressure,
+    boundaryConditions: params.boundaryConditions ?? (setup.boundaries as unknown as JsonValue[]),
   };
 }
 
