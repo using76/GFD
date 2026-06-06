@@ -106,6 +106,18 @@ export interface DisplayState {
   sectionPlane: { enabled: boolean; axis: 'x' | 'y' | 'z'; offset: number };
 }
 
+/** A CFD-prep named face/shape group, used to map geometry to boundary patches. */
+export interface NamedSelection {
+  name: string;
+  shapeId?: string;
+  faceIds: string[];
+  bcType?: string;
+}
+
+export interface PrepareState {
+  namedSelections: NamedSelection[];
+}
+
 export interface UiState {
   activeTab: string;
   activeTool: string | null;
@@ -124,6 +136,7 @@ export interface AppState {
   mesh: MeshState | null;
   physics: PhysicsSetup;
   setup: SetupState;
+  prepare: PrepareState;
   display: DisplayState;
   solver: SolverStatus;
   results: ResultsSummary | null;
@@ -151,6 +164,7 @@ export function createInitialState(): AppState {
       boundaries: [],
       solver: { method: 'SIMPLE', maxIterations: 200, tolerance: 1e-4, relaxVelocity: 0.5, relaxPressure: 0.3 },
     },
+    prepare: { namedSelections: [] },
     display: { renderMode: 'shaded', sectionPlane: { enabled: false, axis: 'x', offset: 0 } },
     solver: { jobId: null, status: 'idle', iteration: 0, residual: null, maxIterations: 200 },
     results: null,
