@@ -54,7 +54,9 @@ Verification gates: `npx tsc --noEmit` (0 errors), `npm test` (62 passing),
 | Run / stop solver, residual stream | O | events + status |
 | Results: field list + stats + load field | O | `results.load_field` |
 | Contour render (solved field in viewport) | O | `results.contour` + ResultsFieldLayer + ResultsPanel |
-| Vector / streamline / isosurface render | X | contour done; vector/streamline pending |
+| Vector glyphs + streamlines render | O | `field.vectors`/`field.streamlines` → VectorGlyphLayer/StreamlineLayer |
+| Results viz user controls (toggles + sliders) | O | ResultsPanel: contour/vectors/streamlines toggles, scale/density/seeds/steps → `results.set_viz` |
+| Isosurface render | X | pending |
 
 ### Measure / repair / display
 | Feature | Status | Notes |
