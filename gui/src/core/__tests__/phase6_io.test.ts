@@ -77,3 +77,19 @@ describe('Phase 6 screenshot bridge', () => {
     expect(shot.labels[0].id).toBe('shape_1');
   });
 });
+
+describe('OpenUSD / OpenVDB export commands', () => {
+  it('exports USDA and VDB through commands', async () => {
+    const rpc = createMockRpcClient((method: string) => {
+      if (method === 'cad.feature.primitive') return { shape_id: 'shape_1', arena_id: 1, kind: 'box' };
+      if (method === 'cad.export.usd_string') return { content: '#usda 1.0\n', length: 10, shapes: 1 };
+      if (method === 'field.export_vdb') return { ok: true, path: '/tmp/f.vdb', voxels: 256 };
+      return {};
+    });
+    const core = createCore({ rpc });
+    const usd = await core.dispatcher.dispatch({ commandId: 'io.export_usd', params: {}, source: 'agent' });
+    expect((usd.result as { content: string }).content).toMatch(/^#usda/);
+    const vdb = await core.dispatcher.dispatch({ commandId: 'results.export_vdb', params: { field: 'pressure', path: '/tmp/f.vdb' }, source: 'agent' });
+    expect((vdb.result as { voxels: number }).voxels).toBe(256);
+  });
+});

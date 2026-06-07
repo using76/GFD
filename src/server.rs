@@ -556,6 +556,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.export.vtk"           => handle_cad_export_vtk(state, req.id, &req.params),
         "cad.export.dxf"           => handle_cad_export_dxf(state, req.id, &req.params),
         "cad.export.stl_string"    => handle_cad_export_stl_string(state, req.id, &req.params),
+        "cad.export.usd_string"    => handle_cad_export_usd_string(state, req.id, &req.params),
         "cad.export.obj_string"    => handle_cad_export_obj_string(state, req.id, &req.params),
         "cad.export.ply_string"    => handle_cad_export_ply_string(state, req.id, &req.params),
         "cad.export.step_string"   => handle_cad_export_step_string(state, req.id, &req.params),
@@ -603,6 +604,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         // -- Field / Results --
         "field.get" => handle_field_get(state, req.id, &req.params),
         "field.contour" => handle_field_contour(state, req.id, &req.params),
+        "field.export_vdb" => handle_field_export_vdb(state, req.id, &req.params),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
     }
@@ -3534,6 +3536,69 @@ fn handle_cad_export_ply_string(state: &ServerState, id: u64, params: &Value) ->
 
 /// In-memory STL ASCII export. Returns the file content as a string
 /// (no disk write). Useful for browser-side downloads, preview, etc.
+/// Sanitize a string into a valid USD prim identifier (alphanumeric + '_').
+fn sanitize_usd_name(name: &str) -> String {
+    let mut s: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    if s.is_empty() || s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true) {
+        s = format!("_{}", s);
+    }
+    s
+}
+
+/// Export the document (or one shape) as OpenUSD ASCII (.usda) — UsdGeomMesh
+/// prims, Z-up, metersPerUnit=1 — compatible with NVIDIA Omniverse / Isaac Sim.
+fn handle_cad_export_usd_string(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    let u_steps = params.get("u_steps").and_then(|v| v.as_u64()).unwrap_or(32) as usize;
+    let v_steps = params.get("v_steps").and_then(|v| v.as_u64()).unwrap_or(16) as usize;
+
+    let mut entries: Vec<(String, ShapeId)> = match params.get("shape_id").and_then(|v| v.as_str()) {
+        Some(sid) => match state.cad_shape_map.get(sid) {
+            Some(a) => vec![(sid.to_string(), *a)],
+            None => return RpcResponse::err(id, format!("unknown shape_id: {}", sid)),
+        },
+        None => state.cad_shape_map.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+    };
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut usd = String::new();
+    usd.push_str("#usda 1.0\n(\n    defaultPrim = \"World\"\n    metersPerUnit = 1\n    upAxis = \"Z\"\n)\n\n");
+    usd.push_str("def Xform \"World\"\n{\n");
+    let mut emitted = 0usize;
+    for (name, aid) in &entries {
+        let opts = TessellationOptions { u_steps, v_steps, ..Default::default() };
+        let tri = match tessellate(&state.cad_doc.arena, *aid, opts) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if tri.indices.len() < 3 {
+            continue;
+        }
+        let ntri = tri.indices.len() / 3;
+        let counts = vec!["3"; ntri].join(", ");
+        let idx = tri.indices.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+        let pts = tri
+            .positions
+            .iter()
+            .map(|p| format!("({}, {}, {})", p[0], p[1], p[2]))
+            .collect::<Vec<_>>()
+            .join(", ");
+        usd.push_str(&format!("    def Mesh \"{}\"\n    {{\n", sanitize_usd_name(name)));
+        usd.push_str(&format!("        int[] faceVertexCounts = [{}]\n", counts));
+        usd.push_str(&format!("        int[] faceVertexIndices = [{}]\n", idx));
+        usd.push_str(&format!("        point3f[] points = [{}]\n", pts));
+        usd.push_str("        uniform token subdivisionScheme = \"none\"\n");
+        usd.push_str("    }\n");
+        emitted += 1;
+    }
+    usd.push_str("}\n");
+
+    let length = usd.len();
+    RpcResponse::ok(id, serde_json::json!({ "content": usd, "length": length, "shapes": emitted }))
+}
+
 fn handle_cad_export_stl_string(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
     let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
         return RpcResponse::err(id, "missing shape_id");
@@ -4668,6 +4733,29 @@ fn handle_physics_apply_manifest(state: &mut ServerState, id: u64, params: &Valu
 // ---------------------------------------------------------------------------
 // Field handlers
 // ---------------------------------------------------------------------------
+
+/// Export a solved scalar field as an OpenVDB grid (via the gfd-vdb writer).
+fn handle_field_export_vdb(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let field_name = params.get("field").and_then(|v| v.as_str()).unwrap_or("pressure");
+    let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing path");
+    };
+    collect_finished_job_fields(state);
+    let Some(values) = state.fields.get(field_name).cloned() else {
+        return RpcResponse::err(
+            id,
+            format!("Field '{}' not found. Available: {:?}", field_name, state.fields.keys().collect::<Vec<_>>()),
+        );
+    };
+    let voxels = values.len();
+    let mut grid = gfd_vdb::VdbGrid::with_data(field_name, values);
+    grid.set_metadata("source", "gfd");
+    grid.set_metadata("field", field_name);
+    match gfd_vdb::write_vdb(path, std::slice::from_ref(&grid)) {
+        Ok(()) => RpcResponse::ok(id, serde_json::json!({ "ok": true, "path": path, "voxels": voxels })),
+        Err(e) => RpcResponse::err(id, format!("VDB write failed: {}", e)),
+    }
+}
 
 fn handle_field_get(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
     let field_name = params
