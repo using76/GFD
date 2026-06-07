@@ -53,7 +53,8 @@ Verification gates: `npx tsc --noEmit` (0 errors), `npm test` (62 passing),
 | Physics models / material / boundaries / solver settings | O | `setup.*` commands |
 | Run / stop solver, residual stream | O | events + status |
 | Results: field list + stats + load field | O | `results.load_field` |
-| Contour / vector / streamline / isosurface render | X | field values fetched; viz layers pending |
+| Contour render (solved field in viewport) | O | `results.contour` + ResultsFieldLayer + ResultsPanel |
+| Vector / streamline / isosurface render | X | contour done; vector/streamline pending |
 
 ### Measure / repair / display
 | Feature | Status | Notes |
