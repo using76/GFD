@@ -598,6 +598,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
 
         // -- Solve --
         "solve.start" => handle_solve_start(state, req.id, &req.params),
+        "solve.lbm" => handle_solve_lbm(state, req.id, &req.params),
         "solve.sensitivity" => handle_solve_sensitivity(state, req.id, &req.params),
         "solve.status" => handle_solve_status(state, req.id, &req.params),
         "solve.stop" => handle_solve_stop(state, req.id, &req.params),
@@ -4222,6 +4223,130 @@ fn handle_solve_start(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
     });
 
     RpcResponse::ok(id, serde_json::json!({ "job_id": job_id }))
+}
+
+/// Lattice Boltzmann D2Q9 (BGK) lid-driven cavity — a self-contained mesoscopic
+/// solver independent of the FVM core (first of the roadmap's "missing solvers").
+/// Stores vx/vy/velocity_magnitude in state.fields so field.get / export work.
+fn handle_solve_lbm(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let nx = params.get("nx").and_then(|v| v.as_u64()).unwrap_or(64).clamp(4, 512) as usize;
+    let ny = params.get("ny").and_then(|v| v.as_u64()).unwrap_or(64).clamp(4, 512) as usize;
+    let steps = params.get("steps").and_then(|v| v.as_u64()).unwrap_or(2000).clamp(1, 100_000) as usize;
+    let nu = params.get("viscosity").and_then(|v| v.as_f64()).unwrap_or(0.02).max(1e-4);
+    let u_lid = params.get("lid_velocity").and_then(|v| v.as_f64()).unwrap_or(0.1);
+
+    const Q: usize = 9;
+    let ex = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0];
+    let ey = [0.0, 0.0, 1.0, 0.0, -1.0, 1.0, 1.0, -1.0, -1.0];
+    let w = [4.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0];
+    let opp = [0usize, 3, 4, 1, 2, 7, 8, 5, 6];
+    let omega = 1.0 / (3.0 * nu + 0.5);
+
+    let cells = nx * ny;
+    let mut f = vec![0.0f64; cells * Q];
+    let mut fpc = vec![0.0f64; cells * Q]; // post-collision
+    for c in 0..cells {
+        for k in 0..Q {
+            f[c * Q + k] = w[k];
+        }
+    }
+
+    for _ in 0..steps {
+        // Collision (BGK), with the top row forced to the lid velocity.
+        for j in 0..ny {
+            for i in 0..nx {
+                let base = (j * nx + i) * Q;
+                let mut rho = 0.0;
+                let mut ux = 0.0;
+                let mut uy = 0.0;
+                for k in 0..Q {
+                    let fk = f[base + k];
+                    rho += fk;
+                    ux += fk * ex[k];
+                    uy += fk * ey[k];
+                }
+                if rho > 0.0 {
+                    ux /= rho;
+                    uy /= rho;
+                }
+                if j == ny - 1 {
+                    ux = u_lid;
+                    uy = 0.0;
+                }
+                let usq = ux * ux + uy * uy;
+                for k in 0..Q {
+                    let eu = ex[k] * ux + ey[k] * uy;
+                    let feq = w[k] * rho * (1.0 + 3.0 * eu + 4.5 * eu * eu - 1.5 * usq);
+                    fpc[base + k] = f[base + k] - omega * (f[base + k] - feq);
+                }
+            }
+        }
+        // Streaming (pull) with bounce-back: f_k(c) ← fpc_k(c - e_k), or, if the
+        // upstream is a wall, the opposite post-collision from this cell.
+        for j in 0..ny {
+            for i in 0..nx {
+                let base = (j * nx + i) * Q;
+                for k in 0..Q {
+                    let si = i as i64 - ex[k] as i64;
+                    let sj = j as i64 - ey[k] as i64;
+                    if si < 0 || si >= nx as i64 || sj < 0 || sj >= ny as i64 {
+                        f[base + k] = fpc[base + opp[k]];
+                    } else {
+                        let sbase = ((sj as usize) * nx + (si as usize)) * Q;
+                        f[base + k] = fpc[sbase + k];
+                    }
+                }
+            }
+        }
+    }
+
+    // Macroscopic fields.
+    let mut vx = vec![0.0; cells];
+    let mut vy = vec![0.0; cells];
+    let mut vmag = vec![0.0; cells];
+    let (mut u_max, mut u_sum) = (0.0f64, 0.0f64);
+    for c in 0..cells {
+        let base = c * Q;
+        let mut rho = 0.0;
+        let mut ux = 0.0;
+        let mut uy = 0.0;
+        for k in 0..Q {
+            let fk = f[base + k];
+            rho += fk;
+            ux += fk * ex[k];
+            uy += fk * ey[k];
+        }
+        if rho > 0.0 {
+            ux /= rho;
+            uy /= rho;
+        }
+        vx[c] = ux;
+        vy[c] = uy;
+        let m = (ux * ux + uy * uy).sqrt();
+        vmag[c] = m;
+        u_max = u_max.max(m);
+        u_sum += m;
+    }
+    let u_mean = u_sum / cells as f64;
+
+    if !u_mean.is_finite() || vmag.iter().any(|v| !v.is_finite()) {
+        return RpcResponse::err(
+            id,
+            "LBM diverged (unstable): reduce lid_velocity or increase viscosity (relaxation tau = 3*nu + 0.5 should stay below ~0.95, i.e. nu >= ~0.015 at this scale).",
+        );
+    }
+
+    state.fields.insert("vx".to_string(), vx);
+    state.fields.insert("vy".to_string(), vy);
+    state.fields.insert("velocity_magnitude".to_string(), vmag);
+
+    RpcResponse::ok(id, serde_json::json!({
+        "solver": "lbm_d2q9",
+        "nx": nx, "ny": ny, "steps": steps,
+        "viscosity": nu, "lid_velocity": u_lid,
+        "u_max": u_max, "u_mean": u_mean,
+        "reynolds": u_lid * (nx as f64) / nu,
+    }))
 }
 
 /// Roadmap #3 — finite-difference sensitivity d(objective)/d(parameter).

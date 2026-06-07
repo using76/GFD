@@ -223,8 +223,71 @@ export const calcSensitivity: CommandDef<CalcSensitivityParams, SensitivityResul
   },
 };
 
+export interface CalcLbmParams {
+  nx?: number;
+  ny?: number;
+  steps?: number;
+  viscosity?: number;
+  lidVelocity?: number;
+}
+
+export interface LbmResult {
+  solver: string;
+  nx: number;
+  ny: number;
+  steps: number;
+  u_max: number;
+  u_mean: number;
+  reynolds: number;
+}
+
+export const calcLbm: CommandDef<CalcLbmParams, LbmResult> = {
+  id: 'calc.lbm',
+  category: 'calc',
+  group: 'Run',
+  title: 'Run LBM (D2Q9)',
+  titleKo: 'LBM 실행 (D2Q9)',
+  description:
+    'Run a Lattice Boltzmann D2Q9 lid-driven cavity (mesoscopic solver, independent of the FVM mesh). Returns u_max/u_mean/Re and stores velocity fields.',
+  capability: 'run-solver',
+  undoable: false,
+  paramsSchema: {
+    type: 'object',
+    properties: {
+      nx: { type: 'integer', minimum: 4, maximum: 512 },
+      ny: { type: 'integer', minimum: 4, maximum: 512 },
+      steps: { type: 'integer', minimum: 1 },
+      viscosity: { type: 'number', minimum: 0 },
+      lidVelocity: { type: 'number' },
+    },
+  },
+  async run(params, ctx) {
+    const r = await ctx.rpc.request<LbmResult>('solve.lbm', {
+      nx: params.nx ?? 64,
+      ny: params.ny ?? 64,
+      steps: params.steps ?? 2000,
+      viscosity: params.viscosity ?? 0.05,
+      lid_velocity: params.lidVelocity ?? 0.1,
+    });
+    const results: ResultsSummary = {
+      availableFields: ['velocity_magnitude', 'vx', 'vy'],
+      activeField: 'velocity_magnitude',
+      fieldStats: { velocity_magnitude: { min: 0, max: r.u_max, mean: r.u_mean } },
+    };
+    return {
+      ok: true,
+      result: r,
+      statePatch: [
+        { op: 'replace', path: ['solver', 'status'], value: 'finished' },
+        { op: 'replace', path: ['results'], value: results as unknown as JsonValue },
+      ],
+    };
+  },
+};
+
 export function registerCalcCommands(registry: CommandRegistry): void {
   registry.register(calcRun);
   registry.register(calcStop);
   registry.register(calcSensitivity);
+  registry.register(calcLbm);
 }
