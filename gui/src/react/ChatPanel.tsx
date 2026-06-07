@@ -95,6 +95,25 @@ const SUGGESTIONS = [
   'List everything currently in the scene',
 ];
 
+function readStore(key: string, fallback: string): string {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return window.localStorage.getItem(key) ?? fallback;
+    }
+  } catch {
+    // ignore
+  }
+  return fallback;
+}
+
+function writeStore(key: string, value: string): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) window.localStorage.setItem(key, value);
+  } catch {
+    // ignore quota / availability
+  }
+}
+
 function summarize(value: unknown): string {
   let s: string;
   try {
@@ -109,8 +128,19 @@ export function ChatPanel() {
   const core = useCore();
   const bridge = useMemo(() => createMcpBridge(core), [core]);
 
-  const [providerId, setProviderId] = useState<ProviderId>('claude');
-  const [apiKey, setApiKey] = useState('');
+  // Persist provider + API key across restarts so the live loop is usable.
+  // (localStorage is plaintext — fine for a local desktop tool; Electron
+  // safeStorage would be the hardened option.)
+  const [providerId, setProviderIdState] = useState<ProviderId>(() => readStore('gfd.llm.provider', 'claude') as ProviderId);
+  const [apiKey, setApiKeyState] = useState(() => readStore('gfd.llm.claudeKey', ''));
+  const setProviderId = useCallback((p: ProviderId) => {
+    setProviderIdState(p);
+    writeStore('gfd.llm.provider', p);
+  }, []);
+  const setApiKey = useCallback((k: string) => {
+    setApiKeyState(k);
+    writeStore('gfd.llm.claudeKey', k);
+  }, []);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
