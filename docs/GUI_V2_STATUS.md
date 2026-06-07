@@ -6,7 +6,7 @@ external AI agent dispatch through one pipeline (resolve → validate → consen
 execute → apply → journal → emit). Opt in with `?v2`; the legacy app stays the
 default until parity.
 
-Verification gates: `npx tsc --noEmit` (0 errors), `npm test` (61 passing),
+Verification gates: `npx tsc --noEmit` (0 errors), `npm test` (62 passing),
 `npx vite build` (succeeds), `cargo build --bin gfd-server` (succeeds).
 
 ## Feature status (O = done, △ = partial, X = not yet)
@@ -69,7 +69,9 @@ Verification gates: `npx tsc --noEmit` (0 errors), `npm test` (61 passing),
 | Pluggable LLM provider (Claude/Ollama, tool converters) | O | `llm/` |
 | Pluggable physics manifest (GUI) | O | `physics/manifest.ts` + `physics.*` cmds |
 | Pluggable physics backend (gfd-expression) | O | `physics.validate_expression/list_builtins/apply_manifest` |
-| Expression-defined source terms in the running solver | X | `ExpressionSourceTerm` injection into SIMPLE not wired |
+| Expression source terms affect the running solve | O | momentum body force from manifest → SIMPLE (verified: cavity 0→4.6) |
+| Constitutive viscosity/density from manifest affect the solve | O | `constitutive_value` overrides material (verified) |
+| AI optimization gradient | O | `calc.sensitivity` finite-difference d(obj)/d(param) |
 
 ### External AI control
 | Capability | Status | Notes |
@@ -124,3 +126,46 @@ Recommended next (researched, queued):
 3. Electron-embedded MCP-over-WebSocket transport for live-app screenshots.
 4. Spatial entity refs (ray/screen/nearest/semantic) backed by `cad.measure`.
 5. TransformControls drag-to-edit + measurement overlays.
+
+---
+
+# Connectivity review (backend solver ↔ command-core ↔ MCP ↔ UI)
+
+Audited 2026: extracted every RPC the command-core calls and cross-checked
+against the server's match arms.
+
+## Wiring chain status
+| Link | Status | Evidence |
+|---|:--:|---|
+| Backend RPC handler ↔ command-core command | O | all 28 RPCs the commands call resolve to a server match arm (0 broken links) |
+| command ↔ MCP tool | O | `mcp/bridge.ts` auto-maps every command → tool + meta-tools |
+| command ↔ data-driven UI (ribbon/form) | O | `RibbonFromRegistry` + `CommandFormPanel` derive from the registry (`?v2` shell) |
+| GUI boundary conditions ↔ solver | O (**fixed**) | `parse_fluid_bcs` now reads `parameters.{vx,vy,vz,pressure,temperature}`; previously GUI BCs never reached the solver |
+| AI physics edit ↔ solve result | O (**new**) | expression momentum source + constitutive viscosity/density change the solved field (verified) |
+| AI optimization loop | O (**new**) | `calc.sensitivity` → d(obj)/d(param) finite-difference gradient |
+| Output ↔ Omniverse/Isaac | O (**new**) | `io.export_usd` (.usda), `results.export_vdb` (.vdb) |
+
+## Verified end-to-end flows
+- create primitive → tessellate → render (R3F ViewportV2) → pick → select.
+- mesh.generate → setup BCs/material/solver → calc.run → residual stream →
+  results summary → results.load_field. (BCs now actually drive the solve.)
+- physics.set_constitutive/​set_term → calc.run → **different field** (proven:
+  cavity 0→4.6 with body force; ν 0.005→0.2 changes mean velocity).
+- solve.lbm → vx/vy/velocity_magnitude in fields → field.export_vdb.
+- agent: get_state → run_command → screenshot (when ?v2 renderer mounted).
+
+## Remaining DISCONNECTS / gaps (honest)
+| Gap | Impact | Status |
+|---|---|:--:|
+| **Solved CFD fields not visualized in ViewportV2** | results computed + fetchable but no contour/vector/streamline in the new viewport (field is per-cell, mesh display is per-node → needs cell→node interpolation). Legacy MeshRenderer has coloring; V2 does not yet. | X — top visual gap |
+| Legacy app is still the default; v2 is `?v2` opt-in | two UIs coexist until parity | △ |
+| Electron-embedded MCP/WebSocket transport | live-app screenshots for an external agent; headless MCP server works today | X (documented) |
+| Per-equation residuals + divergence reason | AI sees one combined residual | X |
+| Distance/angle measure (2-pick), transform-gizmo drag-edit, import-to-tree, mesh-settings panel | UX completeness | X |
+| calc.sensitivity / calc.lbm block the RPC (synchronous) | no progress bar for these | △ |
+
+## Next focused task (recommended)
+Add a `ResultsFieldLayer` to ViewportV2: fetch `mesh.get_display_data` +
+`field.get`, interpolate the per-cell field to nodes, and color the surface mesh
+(jet colormap) — the one missing visual link so the solver result shows in the
+new viewport.
