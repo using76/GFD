@@ -106,6 +106,17 @@ export interface DisplayState {
   sectionPlane: { enabled: boolean; axis: 'x' | 'y' | 'z'; offset: number };
 }
 
+/** Results visualization toggles/parameters (contour / vectors / streamlines). */
+export interface VizState {
+  showContour: boolean;
+  showVectors: boolean;
+  vectorScale: number;
+  vectorStride: number;
+  showStreamlines: boolean;
+  streamlineSeeds: number;
+  streamlineSteps: number;
+}
+
 /** A CFD-prep named face/shape group, used to map geometry to boundary patches. */
 export interface NamedSelection {
   name: string;
@@ -138,6 +149,7 @@ export interface AppState {
   setup: SetupState;
   prepare: PrepareState;
   display: DisplayState;
+  viz: VizState;
   solver: SolverStatus;
   results: ResultsSummary | null;
   ui: UiState;
@@ -166,6 +178,15 @@ export function createInitialState(): AppState {
     },
     prepare: { namedSelections: [] },
     display: { renderMode: 'shaded', sectionPlane: { enabled: false, axis: 'x', offset: 0 } },
+    viz: {
+      showContour: true,
+      showVectors: false,
+      vectorScale: 1,
+      vectorStride: 4,
+      showStreamlines: false,
+      streamlineSeeds: 20,
+      streamlineSteps: 200,
+    },
     solver: { jobId: null, status: 'idle', iteration: 0, residual: null, maxIterations: 200 },
     results: null,
     ui: { activeTab: 'geometry', activeTool: null, units: 'SI' },

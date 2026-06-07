@@ -6,6 +6,7 @@
  * (the renderer, or an AI agent inspecting a probe).
  */
 
+import type { JsonValue } from '../types';
 import type { CommandDef } from '../command';
 import type { CommandRegistry } from '../registry';
 import type { PatchOp } from '../patch';
@@ -87,7 +88,99 @@ export const resultsContour: CommandDef<ContourParams, ContourResult> = {
   },
 };
 
+export interface VectorsResult {
+  origins: number[];
+  vectors: number[];
+  max_magnitude: number;
+  count: number;
+}
+
+export const resultsVectors: CommandDef<{ stride?: number }, VectorsResult> = {
+  id: 'results.vectors',
+  category: 'results',
+  group: 'Visualize',
+  title: 'Vectors',
+  titleKo: '벡터',
+  description: 'Fetch per-cell velocity glyphs (origins + vectors) for vector visualization.',
+  capability: 'read',
+  paramsSchema: { type: 'object', properties: { stride: { type: 'integer', minimum: 1 } } },
+  async run(params, ctx) {
+    const r = await ctx.rpc.request<VectorsResult>('field.vectors', { stride: params.stride ?? 4 });
+    return { ok: true, result: r };
+  },
+};
+
+export interface StreamlinesResult {
+  lines: number[][];
+  count: number;
+}
+
+export const resultsStreamlines: CommandDef<{ n_seeds?: number; max_steps?: number }, StreamlinesResult> = {
+  id: 'results.streamlines',
+  category: 'results',
+  group: 'Visualize',
+  title: 'Streamlines',
+  titleKo: '유선',
+  description: 'Integrate streamlines (RK2) through the solved velocity field and return polylines.',
+  capability: 'read',
+  paramsSchema: {
+    type: 'object',
+    properties: { n_seeds: { type: 'integer', minimum: 1 }, max_steps: { type: 'integer', minimum: 2 } },
+  },
+  async run(params, ctx) {
+    const r = await ctx.rpc.request<StreamlinesResult>('field.streamlines', {
+      n_seeds: params.n_seeds ?? 20,
+      max_steps: params.max_steps ?? 200,
+    });
+    return { ok: true, result: r };
+  },
+};
+
+export interface SetVizParams {
+  showContour?: boolean;
+  showVectors?: boolean;
+  vectorScale?: number;
+  vectorStride?: number;
+  showStreamlines?: boolean;
+  streamlineSeeds?: number;
+  streamlineSteps?: number;
+}
+
+export const resultsSetViz: CommandDef<SetVizParams, Record<string, never>> = {
+  id: 'results.set_viz',
+  category: 'results',
+  group: 'Visualize',
+  title: 'Visualization Options',
+  titleKo: '시각화 옵션',
+  description: 'Toggle/configure results visualization (contour/vectors/streamlines, scale, density, seeds).',
+  capability: 'view-only',
+  undoable: false,
+  paramsSchema: {
+    type: 'object',
+    properties: {
+      showContour: { type: 'boolean' },
+      showVectors: { type: 'boolean' },
+      vectorScale: { type: 'number', minimum: 0 },
+      vectorStride: { type: 'integer', minimum: 1 },
+      showStreamlines: { type: 'boolean' },
+      streamlineSeeds: { type: 'integer', minimum: 1 },
+      streamlineSteps: { type: 'integer', minimum: 2 },
+    },
+  },
+  async run(params) {
+    const patch: PatchOp[] = Object.entries(params).map(([key, value]) => ({
+      op: 'replace',
+      path: ['viz', key],
+      value: value as JsonValue,
+    }));
+    return { ok: true, result: {}, statePatch: patch };
+  },
+};
+
 export function registerResultsCommands(registry: CommandRegistry): void {
   registry.register(resultsLoadField);
   registry.register(resultsContour);
+  registry.register(resultsVectors);
+  registry.register(resultsStreamlines);
+  registry.register(resultsSetViz);
 }

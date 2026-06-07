@@ -607,6 +607,8 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "field.get" => handle_field_get(state, req.id, &req.params),
         "field.contour" => handle_field_contour(state, req.id, &req.params),
         "field.export_vdb" => handle_field_export_vdb(state, req.id, &req.params),
+        "field.vectors" => handle_field_vectors(state, req.id, &req.params),
+        "field.streamlines" => handle_field_streamlines(state, req.id, &req.params),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
     }
@@ -5035,6 +5037,139 @@ fn handle_physics_apply_manifest(state: &mut ServerState, id: u64, params: &Valu
 // ---------------------------------------------------------------------------
 
 /// Export a solved scalar field as an OpenVDB grid (via the gfd-vdb writer).
+/// Per-cell velocity glyph data for vector visualization.
+fn handle_field_vectors(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let stride = params.get("stride").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
+    let mesh = match &state.mesh {
+        Some(m) => m,
+        None => return RpcResponse::err(id, "No mesh (vectors need an FVM solve with a mesh)"),
+    };
+    let vx = match state.fields.get("vx") {
+        Some(v) => v,
+        None => return RpcResponse::err(id, "No 'vx' field; run a fluid solve first"),
+    };
+    let vy = state.fields.get("vy");
+    let vz = state.fields.get("vz");
+    let n = mesh.num_cells();
+
+    let mut origins: Vec<f64> = Vec::new();
+    let mut vectors: Vec<f64> = Vec::new();
+    let mut max_mag = 0.0f64;
+    let mut i = 0;
+    while i < n {
+        if let Ok(c) = mesh.cell(i) {
+            let vxi = vx.get(i).copied().unwrap_or(0.0);
+            let vyi = vy.and_then(|v| v.get(i).copied()).unwrap_or(0.0);
+            let vzi = vz.and_then(|v| v.get(i).copied()).unwrap_or(0.0);
+            origins.extend_from_slice(&c.center);
+            vectors.extend_from_slice(&[vxi, vyi, vzi]);
+            max_mag = max_mag.max((vxi * vxi + vyi * vyi + vzi * vzi).sqrt());
+        }
+        i += stride;
+    }
+    RpcResponse::ok(id, serde_json::json!({
+        "origins": origins, "vectors": vectors,
+        "max_magnitude": max_mag, "count": origins.len() / 3,
+    }))
+}
+
+/// Sample velocity at a point by nearest cell centroid.
+fn sample_velocity(
+    p: [f64; 3],
+    mesh: &UnstructuredMesh,
+    vx: &[f64],
+    vy: Option<&Vec<f64>>,
+    vz: Option<&Vec<f64>>,
+) -> [f64; 3] {
+    let mut best = usize::MAX;
+    let mut best_d = f64::MAX;
+    for i in 0..mesh.num_cells() {
+        if let Ok(c) = mesh.cell(i) {
+            let dx = c.center[0] - p[0];
+            let dy = c.center[1] - p[1];
+            let dz = c.center[2] - p[2];
+            let d = dx * dx + dy * dy + dz * dz;
+            if d < best_d {
+                best_d = d;
+                best = i;
+            }
+        }
+    }
+    if best == usize::MAX {
+        return [0.0, 0.0, 0.0];
+    }
+    [
+        vx.get(best).copied().unwrap_or(0.0),
+        vy.and_then(|v| v.get(best).copied()).unwrap_or(0.0),
+        vz.and_then(|v| v.get(best).copied()).unwrap_or(0.0),
+    ]
+}
+
+/// RK2 streamline integration through the solved velocity field.
+fn handle_field_streamlines(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let n_seeds = params.get("n_seeds").and_then(|v| v.as_u64()).unwrap_or(20).clamp(1, 200) as usize;
+    let max_steps = params.get("max_steps").and_then(|v| v.as_u64()).unwrap_or(200).clamp(2, 5000) as usize;
+    let mesh = match &state.mesh {
+        Some(m) => m,
+        None => return RpcResponse::err(id, "No mesh (streamlines need an FVM solve with a mesh)"),
+    };
+    let vx = match state.fields.get("vx") {
+        Some(v) => v,
+        None => return RpcResponse::err(id, "No 'vx' field; run a fluid solve first"),
+    };
+    let vy = state.fields.get("vy");
+    let vz = state.fields.get("vz");
+
+    // Domain bbox from nodes.
+    let (mut mn, mut mx) = ([f64::MAX; 3], [f64::MIN; 3]);
+    for node in &mesh.nodes {
+        for d in 0..3 {
+            mn[d] = mn[d].min(node.position[d]);
+            mx[d] = mx[d].max(node.position[d]);
+        }
+    }
+    let diag = ((mx[0] - mn[0]).powi(2) + (mx[1] - mn[1]).powi(2) + (mx[2] - mn[2]).powi(2)).sqrt();
+    let dt = params
+        .get("step_size")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(diag / (max_steps as f64) * 1.5)
+        .max(1e-9);
+
+    let zmid = 0.5 * (mn[2] + mx[2]);
+    let mut lines: Vec<Vec<f64>> = Vec::with_capacity(n_seeds);
+    for s in 0..n_seeds {
+        let t = (s as f64 + 0.5) / n_seeds as f64;
+        let mut p = [
+            mn[0] + 0.08 * (mx[0] - mn[0]),
+            mn[1] + t * (mx[1] - mn[1]),
+            zmid,
+        ];
+        let mut poly: Vec<f64> = Vec::new();
+        poly.extend_from_slice(&p);
+        for _ in 0..max_steps {
+            let v0 = sample_velocity(p, mesh, vx, vy, vz);
+            let speed = (v0[0] * v0[0] + v0[1] * v0[1] + v0[2] * v0[2]).sqrt();
+            if speed < 1e-9 {
+                break;
+            }
+            // RK2 midpoint.
+            let pm = [p[0] + 0.5 * dt * v0[0], p[1] + 0.5 * dt * v0[1], p[2] + 0.5 * dt * v0[2]];
+            let vm = sample_velocity(pm, mesh, vx, vy, vz);
+            p = [p[0] + dt * vm[0], p[1] + dt * vm[1], p[2] + dt * vm[2]];
+            if p[0] < mn[0] || p[0] > mx[0] || p[1] < mn[1] || p[1] > mx[1] {
+                break;
+            }
+            poly.extend_from_slice(&p);
+        }
+        if poly.len() >= 6 {
+            lines.push(poly);
+        }
+    }
+    RpcResponse::ok(id, serde_json::json!({ "lines": lines, "count": lines.len() }))
+}
+
 fn handle_field_export_vdb(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
     let field_name = params.get("field").and_then(|v| v.as_str()).unwrap_or("pressure");
     let Some(path) = params.get("path").and_then(|v| v.as_str()) else {

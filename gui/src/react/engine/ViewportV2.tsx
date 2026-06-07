@@ -90,8 +90,9 @@ function ResultsFieldLayer() {
   const solveTag = `${activeField}:${state.solver.iteration}:${state.solver.status}`;
   const [geo, setGeo] = useState<THREE.BufferGeometry | null>(null);
 
+  const showContour = state.viz.showContour;
   useEffect(() => {
-    if (!activeField) {
+    if (!activeField || !showContour) {
       setGeo(null);
       return;
     }
@@ -114,16 +115,98 @@ function ResultsFieldLayer() {
     return () => {
       cancelled = true;
     };
-  }, [activeField, solveTag, dispatch]);
+  }, [activeField, showContour, solveTag, dispatch]);
 
   // Dispose superseded geometry.
   useEffect(() => () => geo?.dispose(), [geo]);
 
-  if (!activeField || !geo) return null;
+  if (!activeField || !geo || !showContour) return null;
   return (
     <mesh geometry={geo}>
       <meshBasicMaterial vertexColors side={THREE.DoubleSide} />
     </mesh>
+  );
+}
+
+/** Velocity glyphs (line segments origin → origin + v·scale). */
+function VectorGlyphLayer() {
+  const state = useAppState();
+  const dispatch = useDispatch();
+  const viz = state.viz;
+  const tag = `${state.solver.iteration}:${state.solver.status}:${viz.vectorStride}:${viz.vectorScale}`;
+  const [geo, setGeo] = useState<THREE.BufferGeometry | null>(null);
+
+  useEffect(() => {
+    if (!viz.showVectors) {
+      setGeo(null);
+      return;
+    }
+    let cancelled = false;
+    void dispatch('results.vectors', { stride: viz.vectorStride }).then((o) => {
+      if (cancelled || !o.ok || !o.result) return;
+      const r = o.result as { origins: number[]; vectors: number[] };
+      const pos: number[] = [];
+      for (let i = 0; i + 2 < r.origins.length; i += 3) {
+        const ox = r.origins[i], oy = r.origins[i + 1], oz = r.origins[i + 2];
+        const vx = r.vectors[i], vy = r.vectors[i + 1], vz = r.vectors[i + 2];
+        pos.push(ox, oy, oz, ox + vx * viz.vectorScale, oy + vy * viz.vectorScale, oz + vz * viz.vectorScale);
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      setGeo(g);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [viz.showVectors, tag, dispatch]);
+  useEffect(() => () => geo?.dispose(), [geo]);
+
+  if (!viz.showVectors || !geo) return null;
+  return (
+    <lineSegments geometry={geo}>
+      <lineBasicMaterial color="#ffd54a" />
+    </lineSegments>
+  );
+}
+
+/** Streamline polylines integrated through the velocity field. */
+function StreamlineLayer() {
+  const state = useAppState();
+  const dispatch = useDispatch();
+  const viz = state.viz;
+  const tag = `${state.solver.iteration}:${state.solver.status}:${viz.streamlineSeeds}:${viz.streamlineSteps}`;
+  const [geo, setGeo] = useState<THREE.BufferGeometry | null>(null);
+
+  useEffect(() => {
+    if (!viz.showStreamlines) {
+      setGeo(null);
+      return;
+    }
+    let cancelled = false;
+    void dispatch('results.streamlines', { n_seeds: viz.streamlineSeeds, max_steps: viz.streamlineSteps }).then((o) => {
+      if (cancelled || !o.ok || !o.result) return;
+      const r = o.result as { lines: number[][] };
+      const pos: number[] = [];
+      for (const line of r.lines) {
+        for (let i = 0; i + 5 < line.length; i += 3) {
+          pos.push(line[i], line[i + 1], line[i + 2], line[i + 3], line[i + 4], line[i + 5]);
+        }
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      setGeo(g);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [viz.showStreamlines, tag, dispatch]);
+  useEffect(() => () => geo?.dispose(), [geo]);
+
+  if (!viz.showStreamlines || !geo) return null;
+  return (
+    <lineSegments geometry={geo}>
+      <lineBasicMaterial color="#19d3ff" />
+    </lineSegments>
   );
 }
 
@@ -205,6 +288,8 @@ export function ViewportV2() {
       <ScreenshotRegistrar />
       <GeometryLayer />
       <ResultsFieldLayer />
+      <VectorGlyphLayer />
+      <StreamlineLayer />
       <GizmoHelper alignment="bottom-right" margin={[70, 70]}>
         <GizmoViewcube />
       </GizmoHelper>

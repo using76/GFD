@@ -122,3 +122,22 @@ describe('Solver→UI field contour', () => {
     expect(c.colors).toHaveLength(9);
   });
 });
+
+describe('Vector / streamline viz commands', () => {
+  it('fetches vectors, streamlines, and toggles viz state', async () => {
+    const rpc = createMockRpcClient((method: string) => {
+      if (method === 'field.vectors') return { origins: [0, 0, 0], vectors: [1, 0, 0], max_magnitude: 1, count: 1 };
+      if (method === 'field.streamlines') return { lines: [[0, 0, 0, 1, 0, 0]], count: 1 };
+      return {};
+    });
+    const core = createCore({ rpc });
+    const v = await core.dispatcher.dispatch({ commandId: 'results.vectors', params: { stride: 2 }, source: 'agent' });
+    expect((v.result as { count: number }).count).toBe(1);
+    const s = await core.dispatcher.dispatch({ commandId: 'results.streamlines', params: {}, source: 'agent' });
+    expect((s.result as { count: number }).count).toBe(1);
+
+    await core.dispatcher.dispatch({ commandId: 'results.set_viz', params: { showVectors: true, vectorScale: 2 }, source: 'agent' });
+    expect(core.store.getState().viz.showVectors).toBe(true);
+    expect(core.store.getState().viz.vectorScale).toBe(2);
+  });
+});
