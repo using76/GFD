@@ -102,6 +102,8 @@ struct ServerState {
     cad_shape_map: HashMap<String, ShapeId>,
     /// Counter for cad shape string ids.
     next_cad_shape_id: u64,
+    /// Applied pluggable physics manifest (Phase 7), as received from the GUI.
+    physics_manifest: Option<Value>,
 }
 
 struct PrimitiveBody {
@@ -139,6 +141,7 @@ impl ServerState {
             cad_doc: Document::new(),
             cad_shape_map: HashMap::new(),
             next_cad_shape_id: 0,
+            physics_manifest: None,
         }
     }
 }
@@ -581,6 +584,11 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.sketch.delete"        => handle_cad_sketch_delete(state, req.id, &req.params),
         "cad.sketch.add_polyline"  => handle_cad_sketch_add_polyline(state, req.id, &req.params),
         "cad.sketch.add_profile"   => handle_cad_sketch_add_profile(state, req.id, &req.params),
+
+        // -- Pluggable physics (Phase 7) --
+        "physics.validate_expression" => handle_physics_validate_expression(req.id, &req.params),
+        "physics.list_builtins"       => handle_physics_list_builtins(req.id),
+        "physics.apply_manifest"      => handle_physics_apply_manifest(state, req.id, &req.params),
 
         // -- Mesh --
         "mesh.generate" => handle_mesh_generate(state, req.id, &req.params),
@@ -4421,6 +4429,122 @@ fn handle_solve_stop(state: &mut ServerState, id: u64, params: &Value) -> RpcRes
         }
         None => RpcResponse::err(id, format!("Unknown job: {}", job_id)),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pluggable physics handlers (Phase 7)
+// ---------------------------------------------------------------------------
+
+/// Parse + validate one GMN/gfd-expression string, appending any diagnostics.
+/// Returns false if the expression has a parse or validation error.
+fn validate_expr_collect(
+    expr: &str,
+    ctx: &gfd_expression::validate::ValidationContext,
+    out: &mut Vec<Value>,
+) -> bool {
+    match gfd_expression::parse(expr) {
+        Err(e) => {
+            out.push(serde_json::json!({
+                "level": "Error",
+                "message": format!("parse error in `{}`: {}", expr, e),
+                "span": Value::Null,
+            }));
+            false
+        }
+        Ok(ast) => {
+            let diags = gfd_expression::validate(&ast, ctx);
+            let mut ok = true;
+            for d in &diags {
+                if matches!(d.level, gfd_expression::validate::DiagnosticLevel::Error) {
+                    ok = false;
+                }
+                out.push(serde_json::to_value(d).unwrap_or(Value::Null));
+            }
+            ok
+        }
+    }
+}
+
+fn handle_physics_validate_expression(id: u64, params: &Value) -> RpcResponse {
+    let expr_str = match params.get("expr").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return RpcResponse::err(id, "missing expr"),
+    };
+    let ast = match gfd_expression::parse(expr_str) {
+        Ok(a) => a,
+        Err(e) => {
+            return RpcResponse::ok(id, serde_json::json!({
+                "valid": false,
+                "diagnostics": [{ "level": "Error", "message": format!("parse error: {}", e), "span": Value::Null }],
+                "latex": Value::Null,
+            }));
+        }
+    };
+    let mut ctx = gfd_expression::validate::ValidationContext::new();
+    if let Some(fields) = params.get("fields").and_then(|v| v.as_array()) {
+        for f in fields {
+            if let Some(name) = f.as_str() {
+                ctx.add_field(name);
+            }
+        }
+    }
+    let diags = gfd_expression::validate(&ast, &ctx);
+    let has_error = diags
+        .iter()
+        .any(|d| matches!(d.level, gfd_expression::validate::DiagnosticLevel::Error));
+    let latex = gfd_expression::to_latex(&ast);
+    RpcResponse::ok(id, serde_json::json!({
+        "valid": !has_error,
+        "diagnostics": diags,
+        "latex": latex,
+    }))
+}
+
+fn handle_physics_list_builtins(id: u64) -> RpcResponse {
+    RpcResponse::ok(id, serde_json::json!({
+        "terms": ["ddt", "div_uu", "laplacian_mu", "grad_p", "pressure_correction"],
+        "constitutive": ["constant", "sutherland_viscosity", "power_law_viscosity"],
+        "operators": ["ddt", "grad", "div", "laplacian", "curl"],
+    }))
+}
+
+fn handle_physics_apply_manifest(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let manifest = match params.get("manifest") {
+        Some(m) => m.clone(),
+        None => return RpcResponse::err(id, "missing manifest"),
+    };
+    let ctx = gfd_expression::validate::ValidationContext::new();
+    let mut diagnostics: Vec<Value> = Vec::new();
+    let mut terms_validated = 0usize;
+
+    if let Some(eqs) = manifest.get("equations").and_then(|v| v.as_array()) {
+        for eq in eqs {
+            if let Some(terms) = eq.get("terms").and_then(|v| v.as_array()) {
+                for t in terms {
+                    if let Some(expr) = t.get("impl").and_then(|i| i.get("expr")).and_then(|e| e.as_str()) {
+                        terms_validated += 1;
+                        validate_expr_collect(expr, &ctx, &mut diagnostics);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(cons) = manifest.get("constitutive").and_then(|v| v.as_array()) {
+        for c in cons {
+            if let Some(expr) = c.get("impl").and_then(|i| i.get("expr")).and_then(|e| e.as_str()) {
+                terms_validated += 1;
+                validate_expr_collect(expr, &ctx, &mut diagnostics);
+            }
+        }
+    }
+
+    let ok = diagnostics.is_empty();
+    state.physics_manifest = Some(manifest);
+    RpcResponse::ok(id, serde_json::json!({
+        "ok": ok,
+        "terms_validated": terms_validated,
+        "diagnostics": diagnostics,
+    }))
 }
 
 // ---------------------------------------------------------------------------
