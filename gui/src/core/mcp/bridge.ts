@@ -133,10 +133,23 @@ export function createMcpBridge(core: Core): McpBridge {
     screenshot: {
       schema: {
         name: 'screenshot',
-        description: 'Capture an annotated viewport image. Requires the renderer (wired in Phase 6).',
+        description: 'Capture an annotated viewport PNG (data URL) plus a legend of entity ids → screen positions.',
         inputSchema: { type: 'object', properties: { width: { type: 'integer' }, height: { type: 'integer' } } },
       },
-      handler: async () => fail('screenshot is not available until the renderer is wired (Phase 6)'),
+      handler: async (args) => {
+        if (!core.screenshot.isAvailable()) {
+          return fail('screenshot requires the renderer to be mounted (open the ?v2 workbench)');
+        }
+        try {
+          const shot = await core.screenshot.capture({
+            width: typeof args.width === 'number' ? args.width : undefined,
+            height: typeof args.height === 'number' ? args.height : undefined,
+          });
+          return ok(shot as unknown as JsonValue);
+        } catch (e) {
+          return fail(e instanceof Error ? e.message : String(e));
+        }
+      },
     },
     undo: {
       schema: { name: 'undo', description: 'Undo the last undoable command.', inputSchema: EMPTY_SCHEMA },

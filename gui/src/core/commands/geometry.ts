@@ -315,12 +315,87 @@ export const tessellateShape: CommandDef<TessellateParams, TessellateResult> = {
   },
 };
 
+export interface BooleanParams {
+  shape_ids: string[];
+  name?: string;
+}
+
+export const booleanUnion: CommandDef<BooleanParams, PrimitiveResponse> = {
+  id: 'geometry.boolean',
+  category: 'geometry',
+  group: 'Boolean',
+  title: 'Boolean Union',
+  titleKo: '불리언 합집합',
+  description: 'Merge multiple shapes into one compound shape (B-Rep compound_merge).',
+  capability: 'mutate-scene',
+  paramsSchema: {
+    type: 'object',
+    properties: { shape_ids: { type: 'array', items: { type: 'string' }, minItems: 2 }, name: { type: 'string' } },
+    required: ['shape_ids'],
+  },
+  async run(params, ctx) {
+    const tree = ctx.getState().doc.geometry;
+    for (const id of params.shape_ids) {
+      if (!tree.nodes[id]) return { ok: false, error: { code: 'UNKNOWN_SHAPE', message: `No shape "${id}"` } };
+    }
+    const resp = await ctx.rpc.request<PrimitiveResponse>('cad.boolean.union', { shape_ids: params.shape_ids });
+    const node = makeNode(resp, params.name ?? `union_${resp.shape_id}`, { inputs: params.shape_ids.length }, tree.nodes[params.shape_ids[0]].bbox, null);
+    const patch: PatchOp[] = [
+      ...addNodePatch(ctx, node),
+      ...params.shape_ids.map<PatchOp>((id) => ({ op: 'replace', path: ['doc', 'geometry', 'nodes', id, 'visible'], value: false })),
+    ];
+    return { ok: true, result: resp, statePatch: patch };
+  },
+};
+
+export interface LinearArrayParams {
+  shape_id: string;
+  count: number;
+  dx?: number;
+  dy?: number;
+  dz?: number;
+}
+
+export const linearArray: CommandDef<LinearArrayParams, PrimitiveResponse> = {
+  id: 'geometry.linear_array',
+  category: 'geometry',
+  group: 'Pattern',
+  title: 'Linear Array',
+  titleKo: '선형 배열',
+  description: 'Repeat a shape `count` times along a (dx,dy,dz) step, producing a new array shape.',
+  capability: 'mutate-scene',
+  paramsSchema: {
+    type: 'object',
+    properties: {
+      shape_id: { type: 'string' },
+      count: { type: 'integer', minimum: 2 },
+      dx: { type: 'number' }, dy: { type: 'number' }, dz: { type: 'number' },
+    },
+    required: ['shape_id', 'count'],
+  },
+  async run(params, ctx) {
+    const source = ctx.getState().doc.geometry.nodes[params.shape_id];
+    if (!source) return { ok: false, error: { code: 'UNKNOWN_SHAPE', message: `No shape "${params.shape_id}"` } };
+    const resp = await ctx.rpc.request<PrimitiveResponse>('cad.feature.linear_array', {
+      shape_id: params.shape_id,
+      count: params.count,
+      dx: params.dx ?? 2,
+      dy: params.dy ?? 0,
+      dz: params.dz ?? 0,
+    });
+    const node = makeNode(resp, `array_${resp.shape_id}`, { source: params.shape_id, count: params.count }, source.bbox, params.shape_id);
+    return { ok: true, result: resp, statePatch: addNodePatch(ctx, node) };
+  },
+};
+
 export function registerGeometryCommands(registry: CommandRegistry): void {
   registry.register(createPrimitive);
   registry.register(translateShape);
   registry.register(rotateShape);
   registry.register(scaleShape);
   registry.register(mirrorShape);
+  registry.register(booleanUnion);
+  registry.register(linearArray);
   registry.register(deleteShape);
   registry.register(renameShape);
   registry.register(tessellateShape);

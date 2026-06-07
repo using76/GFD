@@ -24,6 +24,7 @@ import { registerSetupCommands } from './setup';
 import { registerCalcCommands } from './calc';
 import { registerResultsCommands } from './results';
 import { registerPhysicsCommands } from './physics';
+import { registerIoCommands } from './io';
 
 export * from './system';
 export * from './geometry';
@@ -39,6 +40,7 @@ export * from './setup';
 export * from './calc';
 export * from './results';
 export * from './physics';
+export * from './io';
 
 export function registerCoreCommands(registry: CommandRegistry): void {
   registerSystemCommands(registry);
@@ -55,4 +57,5 @@ export function registerCoreCommands(registry: CommandRegistry): void {
   registerCalcCommands(registry);
   registerResultsCommands(registry);
   registerPhysicsCommands(registry);
+  registerIoCommands(registry);
 }

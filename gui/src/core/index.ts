@@ -19,6 +19,7 @@ export * from './consent';
 export * from './dispatcher';
 export * from './transport/rpcClient';
 export * from './solver/realSolver';
+export * from './screenshot';
 export * from './mcp';
 export * from './llm';
 export * from './ui';
@@ -30,6 +31,7 @@ import { ConsentController, type ConsentPolicy } from './consent';
 import { createEntityResolver } from './entity';
 import { createElectronRpcClient, type RpcClient } from './transport/rpcClient';
 import { registerCoreCommands } from './commands';
+import { ScreenshotService } from './screenshot';
 import type { CoreEvent } from './command';
 
 export * from './commands';
@@ -39,6 +41,7 @@ export interface Core {
   store: StateStore;
   dispatcher: Dispatcher;
   rpc: RpcClient;
+  screenshot: ScreenshotService;
 }
 
 export interface CreateCoreOptions {
@@ -61,5 +64,6 @@ export function createCore(options: CreateCoreOptions = {}): Core {
   const resolver = createEntityResolver(() => store.getState(), rpc);
   const consent = new ConsentController(options.consentPolicy);
   const dispatcher = new Dispatcher({ registry, store, rpc, resolver, consent, onEvent: options.onEvent });
-  return { registry, store, dispatcher, rpc };
+  const screenshot = new ScreenshotService();
+  return { registry, store, dispatcher, rpc, screenshot };
 }
