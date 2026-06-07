@@ -4140,6 +4140,18 @@ fn handle_solve_start(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
         .and_then(|v| v.as_str())
         .unwrap_or(if flow == "none" { "thermal" } else { "fluid" });
 
+    // Roadmap #1: a pluggable physics manifest's constitutive relations override
+    // the material density/viscosity — so AI editing physics.set_constitutive
+    // changes the solve. (Constant → exact; expression → cell-averaged scalar.)
+    let (density, viscosity) = if let Some(m) = &state.physics_manifest {
+        (
+            constitutive_value(m, &mesh, "density").unwrap_or(density),
+            constitutive_value(m, &mesh, "viscosity").unwrap_or(viscosity),
+        )
+    } else {
+        (density, viscosity)
+    };
+
     // Parse boundary conditions from params
     let bcs = params.get("boundary_conditions");
 
@@ -4343,7 +4355,12 @@ fn run_thermal_solve(
             let patch = bc.get("patch").and_then(|v| v.as_str()).unwrap_or("");
             let bc_type = bc.get("type").and_then(|v| v.as_str()).unwrap_or("wall");
             if bc_type == "fixed_temperature" || bc_type == "wall" {
-                if let Some(t) = bc.get("temperature").and_then(|v| v.as_f64()) {
+                let t = bc
+                    .get("parameters")
+                    .and_then(|p| p.get("temperature"))
+                    .and_then(|v| v.as_f64())
+                    .or_else(|| bc.get("temperature").and_then(|v| v.as_f64()));
+                if let Some(t) = t {
                     boundary_temps.insert(patch.to_string(), t);
                 }
             }
@@ -4409,21 +4426,31 @@ fn parse_fluid_bcs(
                 .and_then(|v| v.as_str())
                 .unwrap_or("wall");
 
+            // GUI sends values nested under "parameters"; older callers put them
+            // at the top level. Read parameters.{key} first, then fall back.
+            let params = bc.get("parameters");
+            let getf = |key: &str| -> Option<f64> {
+                params
+                    .and_then(|p| p.get(key))
+                    .and_then(|v| v.as_f64())
+                    .or_else(|| bc.get(key).and_then(|v| v.as_f64()))
+            };
+
             match bc_type {
                 "inlet" | "velocity_inlet" => {
-                    let vx = bc.get("vx").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let vy = bc.get("vy").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let vz = bc.get("vz").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let vx = getf("vx").unwrap_or(0.0);
+                    let vy = getf("vy").unwrap_or(0.0);
+                    let vz = getf("vz").unwrap_or(0.0);
                     boundary_velocities.insert(patch, [vx, vy, vz]);
                 }
                 "outlet" | "pressure_outlet" => {
-                    let p = bc.get("pressure").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let p = getf("pressure").unwrap_or(0.0);
                     boundary_pressure.insert(patch, p);
                 }
                 "wall" | "no_slip" => {
-                    let vx = bc.get("vx").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let vy = bc.get("vy").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let vz = bc.get("vz").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let vx = getf("vx").unwrap_or(0.0);
+                    let vy = getf("vy").unwrap_or(0.0);
+                    let vz = getf("vz").unwrap_or(0.0);
                     if vx.abs() > 1e-15 || vy.abs() > 1e-15 || vz.abs() > 1e-15 {
                         boundary_velocities.insert(patch, [vx, vy, vz]);
                     } else {
@@ -4681,6 +4708,41 @@ fn build_momentum_source(
     }
 
     if any { Some(force) } else { None }
+}
+
+/// Resolve a constitutive property (e.g. "viscosity", "density") from the
+/// applied physics manifest: constant → its value; expression → evaluated at
+/// cell centroids and averaged (a representative scalar for the SIMPLE diffusion
+/// term — per-cell variable properties in the assembled system are future work).
+fn constitutive_value(manifest: &Value, mesh: &UnstructuredMesh, property: &str) -> Option<f64> {
+    let cons = manifest.get("constitutive")?.as_array()?;
+    for c in cons {
+        if c.get("property").and_then(|v| v.as_str()) != Some(property) {
+            continue;
+        }
+        let im = c.get("impl")?;
+        match im.get("kind").and_then(|v| v.as_str()) {
+            Some("constant") => return im.get("value").and_then(|v| v.as_f64()),
+            Some("expression") => {
+                let expr = im.get("expr").and_then(|v| v.as_str())?;
+                let ast = gfd_expression::parse(expr).ok()?;
+                let n = mesh.num_cells();
+                if n == 0 {
+                    return None;
+                }
+                let mut sum = 0.0;
+                for i in 0..n {
+                    if let Ok(cell) = mesh.cell(i) {
+                        let [x, y, z] = cell.center;
+                        sum += eval_expr_at(&ast, x, y, z);
+                    }
+                }
+                return Some(sum / n as f64);
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn handle_physics_list_builtins(id: u64) -> RpcResponse {
