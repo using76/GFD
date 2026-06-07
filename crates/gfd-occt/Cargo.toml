@@ -1,0 +1,16 @@
+[package]
+name = "gfd-occt"
+version = "0.1.0"
+edition = "2021"
+description = "OpenCASCADE (OCCT) C++ FFI backend for GFD — professional B-Rep CAD (shape healing, boolean, enclosure, STEP/STL I/O, BRepMesh tessellation). Feature-gated; without `occt` it compiles as a stub that returns NotBuilt."
+
+[features]
+default = []
+# When enabled, build.rs links OpenCASCADE (via OCCT_DIR / vcpkg) and the cxx
+# bridge is compiled. Added in the OCCT integration phase; until then this only
+# flips `is_available()`.
+occt = []
+
+[dependencies]
+gfd-core = { path = "../gfd-core" }
+thiserror = { workspace = true }

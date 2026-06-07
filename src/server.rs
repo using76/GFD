@@ -104,6 +104,12 @@ struct ServerState {
     next_cad_shape_id: u64,
     /// Applied pluggable physics manifest (Phase 7), as received from the GUI.
     physics_manifest: Option<Value>,
+    /// Persistent Gmsh session (professional OCC CAD + meshing), feature-gated.
+    #[cfg(feature = "gmsh")]
+    gmsh: Option<gfd_gmsh::GmshSession>,
+    /// Map from GUI shape string id ("shape_N") to a Gmsh OCC solid tag.
+    #[cfg(feature = "gmsh")]
+    gmsh_shapes: HashMap<String, i32>,
 }
 
 struct PrimitiveBody {
@@ -142,6 +148,10 @@ impl ServerState {
             cad_shape_map: HashMap::new(),
             next_cad_shape_id: 0,
             physics_manifest: None,
+            #[cfg(feature = "gmsh")]
+            gmsh: None,
+            #[cfg(feature = "gmsh")]
+            gmsh_shapes: HashMap::new(),
         }
     }
 }
@@ -447,6 +457,14 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.document.to_string" => handle_cad_document_to_string(state, req.id),
         "cad.document.from_string" => handle_cad_document_from_string(state, req.id, &req.params),
         "cad.feature.primitive" => handle_cad_feature_primitive(state, req.id, &req.params),
+        // --- Gmsh (OCC) backend: professional CAD + enclosure + meshing (feature-gated) ---
+        "gmsh.primitive"      => handle_gmsh_primitive(state, req.id, &req.params),
+        "gmsh.boolean"        => handle_gmsh_boolean(state, req.id, &req.params),
+        "gmsh.heal"           => handle_gmsh_heal(state, req.id, &req.params),
+        "gmsh.tessellate"     => handle_gmsh_tessellate(state, req.id, &req.params),
+        "gmsh.enclosure"      => handle_gmsh_enclosure(state, req.id, &req.params),
+        "gmsh.extract_fluid"  => handle_gmsh_extract_fluid(state, req.id, &req.params),
+        "gmsh.mesh"           => handle_gmsh_mesh(state, req.id, &req.params),
         "cad.feature.pad"       => handle_cad_feature_pad(state, req.id, &req.params),
         "cad.feature.pad_profile" => handle_cad_feature_pad_profile(state, req.id, &req.params),
         "cad.feature.pocket_profile" => handle_cad_feature_pocket_profile(state, req.id, &req.params),
@@ -896,6 +914,218 @@ fn handle_cad_document_stats(state: &ServerState, id: u64) -> RpcResponse {
         "sketch_count": state.cad_doc.sketches.len(),
         "next_shape_id": state.next_cad_shape_id,
     }))
+}
+
+// ===========================================================================
+// Gmsh (OpenCASCADE) backend — professional CAD + enclosure + meshing.
+// Feature-gated: with `--features gmsh` these call gfd-gmsh; otherwise they
+// return a clear error so the no-feature build still links and runs.
+// ===========================================================================
+
+#[cfg(not(feature = "gmsh"))]
+macro_rules! gmsh_stub {
+    ($name:ident) => {
+        fn $name(_state: &mut ServerState, id: u64, _params: &Value) -> RpcResponse {
+            RpcResponse::err(id, "gfd-server was built without `--features gmsh` (Gmsh backend unavailable)")
+        }
+    };
+}
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_primitive);
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_boolean);
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_heal);
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_tessellate);
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_enclosure);
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_extract_fluid);
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_mesh);
+
+#[cfg(feature = "gmsh")]
+fn ensure_gmsh(state: &mut ServerState) -> Result<(), String> {
+    if state.gmsh.is_none() {
+        state.gmsh = Some(gfd_gmsh::GmshSession::new().map_err(|e| e.to_string())?);
+    }
+    Ok(())
+}
+#[cfg(feature = "gmsh")]
+fn gmsh_tag(state: &ServerState, sid: &str) -> Result<i32, String> {
+    state.gmsh_shapes.get(sid).copied().ok_or_else(|| format!("unknown gmsh shape_id: {sid}"))
+}
+#[cfg(feature = "gmsh")]
+fn register_gmsh_shape(state: &mut ServerState, tag: i32) -> String {
+    state.next_cad_shape_id += 1;
+    let sid = format!("shape_{}", state.next_cad_shape_id);
+    state.gmsh_shapes.insert(sid.clone(), tag);
+    sid
+}
+#[cfg(feature = "gmsh")]
+fn gmsh_str_array(params: &Value, key: &str) -> Vec<String> {
+    params.get(key).and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+#[cfg(feature = "gmsh")]
+fn gmsh_auto_size(state: &ServerState, divisor: f64) -> f64 {
+    match state.gmsh.as_ref().and_then(|s| s.model_bbox().ok()) {
+        Some(b) => {
+            let d = ((b[3] - b[0]).powi(2) + (b[4] - b[1]).powi(2) + (b[5] - b[2]).powi(2)).sqrt();
+            (d / divisor).max(1e-3)
+        }
+        None => 0.5,
+    }
+}
+
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_primitive(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("box").to_string();
+    let p = |k: &str, d: f64| params.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+    let (x, y, z) = (p("x", 0.0), p("y", 0.0), p("z", 0.0));
+    let s = state.gmsh.as_ref().unwrap();
+    let tag = match kind.as_str() {
+        "box" => s.add_box(x, y, z, p("lx", 1.0), p("ly", 1.0), p("lz", 1.0)),
+        "sphere" => s.add_sphere(x, y, z, p("radius", 0.5)),
+        "cylinder" => s.add_cylinder(x, y, z, 0.0, 0.0, p("height", 1.0), p("radius", 0.5)),
+        "cone" => s.add_cone(x, y, z, 0.0, 0.0, p("height", 1.0), p("r1", 0.5), p("r2", 0.0)),
+        other => return RpcResponse::err(id, format!("unknown gmsh primitive kind: {other}")),
+    };
+    let tag = match tag { Ok(t) => t, Err(e) => return RpcResponse::err(id, e.to_string()) };
+    let _ = s.synchronize();
+    let bbox = s.bounding_box(tag).ok();
+    let sid = register_gmsh_shape(state, tag);
+    RpcResponse::ok(id, serde_json::json!({ "shape_id": sid, "tag": tag, "kind": kind, "bbox": bbox }))
+}
+
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_boolean(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let op = params.get("op").and_then(|v| v.as_str()).unwrap_or("cut").to_string();
+    let objects = gmsh_str_array(params, "objects");
+    let tools = gmsh_str_array(params, "tools");
+    let remove = params.get("remove").and_then(|v| v.as_bool()).unwrap_or(true);
+    let obj_tags = match objects.iter().map(|s| gmsh_tag(state, s)).collect::<Result<Vec<_>, _>>() {
+        Ok(v) => v, Err(e) => return RpcResponse::err(id, e),
+    };
+    let tool_tags = match tools.iter().map(|s| gmsh_tag(state, s)).collect::<Result<Vec<_>, _>>() {
+        Ok(v) => v, Err(e) => return RpcResponse::err(id, e),
+    };
+    let res = {
+        let s = state.gmsh.as_ref().unwrap();
+        let r = if op == "fuse" { s.fuse(&obj_tags, &tool_tags, remove) } else { s.cut(&obj_tags, &tool_tags, remove) };
+        let _ = s.synchronize();
+        r
+    };
+    let out_tags = match res { Ok(v) => v, Err(e) => return RpcResponse::err(id, e.to_string()) };
+    if remove {
+        for s in objects.iter().chain(tools.iter()) { state.gmsh_shapes.remove(s); }
+    }
+    let ids: Vec<String> = out_tags.iter().map(|&t| register_gmsh_shape(state, t)).collect();
+    RpcResponse::ok(id, serde_json::json!({ "op": op, "shape_ids": ids }))
+}
+
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_heal(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let tags = match params.get("shape_id").and_then(|v| v.as_str()) {
+        Some(sid) => match gmsh_tag(state, sid) { Ok(t) => vec![t], Err(e) => return RpcResponse::err(id, e) },
+        None => vec![],
+    };
+    let bget = |k: &str, d: bool| params.get(k).and_then(|v| v.as_bool()).unwrap_or(d);
+    let opts = gfd_gmsh::HealOptions {
+        tolerance: params.get("tolerance").and_then(|v| v.as_f64()).unwrap_or(1e-6),
+        fix_degenerated: bget("fix_degenerated", true),
+        fix_small_edges: bget("fix_small_edges", true),
+        fix_small_faces: bget("fix_small_faces", true),
+        sew_faces: bget("sew_faces", true),
+        make_solids: bget("make_solids", true),
+    };
+    let res = {
+        let s = state.gmsh.as_ref().unwrap();
+        let r = s.heal(&tags, opts);
+        let _ = s.synchronize();
+        r
+    };
+    let out_tags = match res { Ok(v) => v, Err(e) => return RpcResponse::err(id, e.to_string()) };
+    let ids: Vec<String> = out_tags.iter().map(|&t| register_gmsh_shape(state, t)).collect();
+    RpcResponse::ok(id, serde_json::json!({ "healed": out_tags.len(), "shape_ids": ids }))
+}
+
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_tessellate(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let size = params.get("size").and_then(|v| v.as_f64()).filter(|v| *v > 0.0);
+    let max = size.unwrap_or_else(|| gmsh_auto_size(state, 20.0));
+    let s = state.gmsh.as_ref().unwrap();
+    match s.tessellate(max) {
+        Ok(tri) => RpcResponse::ok(id, serde_json::json!({
+            "positions": tri.positions, "indices": tri.indices, "triangle_count": tri.triangle_count
+        })),
+        Err(e) => RpcResponse::err(id, e.to_string()),
+    }
+}
+
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_enclosure(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let pad = params.get("padding").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let made = {
+        let s = state.gmsh.as_ref().unwrap();
+        let _ = s.synchronize();
+        match s.model_bbox() {
+            Ok(b) => match s.add_box(b[0] - pad, b[1] - pad, b[2] - pad,
+                                     (b[3] - b[0]) + 2.0 * pad, (b[4] - b[1]) + 2.0 * pad, (b[5] - b[2]) + 2.0 * pad) {
+                Ok(t) => { let _ = s.synchronize(); Ok((t, b)) }
+                Err(e) => Err(e.to_string()),
+            },
+            Err(e) => Err(e.to_string()),
+        }
+    };
+    let (tag, bbox) = match made { Ok(v) => v, Err(e) => return RpcResponse::err(id, e) };
+    let sid = register_gmsh_shape(state, tag);
+    RpcResponse::ok(id, serde_json::json!({ "shape_id": sid, "tag": tag, "padding": pad, "model_bbox": bbox }))
+}
+
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_extract_fluid(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let Some(enc_id) = params.get("enclosure").and_then(|v| v.as_str()).map(String::from) else {
+        return RpcResponse::err(id, "missing enclosure shape_id");
+    };
+    let solids = gmsh_str_array(params, "solids");
+    let enc_tag = match gmsh_tag(state, &enc_id) { Ok(t) => t, Err(e) => return RpcResponse::err(id, e) };
+    let solid_tags = match solids.iter().map(|s| gmsh_tag(state, s)).collect::<Result<Vec<_>, _>>() {
+        Ok(v) => v, Err(e) => return RpcResponse::err(id, e),
+    };
+    let res = {
+        let s = state.gmsh.as_ref().unwrap();
+        let r = s.cut(&[enc_tag], &solid_tags, true);
+        let _ = s.synchronize();
+        r
+    };
+    let out_tags = match res { Ok(v) => v, Err(e) => return RpcResponse::err(id, e.to_string()) };
+    state.gmsh_shapes.remove(&enc_id);
+    for s in &solids { state.gmsh_shapes.remove(s); }
+    let ids: Vec<String> = out_tags.iter().map(|&t| register_gmsh_shape(state, t)).collect();
+    RpcResponse::ok(id, serde_json::json!({ "fluid_shape_ids": ids }))
+}
+
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_mesh(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let size = params.get("size").and_then(|v| v.as_f64()).filter(|v| *v > 0.0);
+    let max = size.unwrap_or_else(|| gmsh_auto_size(state, 15.0));
+    let s = state.gmsh.as_ref().unwrap();
+    match s.volume_mesh(max) {
+        Ok(vm) => RpcResponse::ok(id, serde_json::json!({
+            "nodes": vm.node_count, "tets": vm.tet_count, "mesh_size": max
+        })),
+        Err(e) => RpcResponse::err(id, e.to_string()),
+    }
 }
 
 fn handle_cad_feature_primitive(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {

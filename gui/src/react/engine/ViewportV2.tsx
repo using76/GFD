@@ -15,6 +15,7 @@ import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls, Grid, GizmoHelper, GizmoViewcube, Outlines } from '@react-three/drei';
 import * as THREE from 'three';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import type { GeometryNode, ScreenshotLabel, ScreenshotResult, TessellateResult, Vec3 } from '../../core';
 import { useAppState, useCore, useDispatch } from '../CoreContext';
 
@@ -210,14 +211,64 @@ function StreamlineLayer() {
   );
 }
 
-function CameraSync() {
+/** Renders the whole-model triangulation from the Gmsh (OCC) backend as one mesh. */
+function GmshSceneLayer() {
+  const gm = useAppState().gmsh.mesh;
+  const [geo, setGeo] = useState<THREE.BufferGeometry | null>(null);
+  const tri = gm?.triangleCount ?? 0;
+  const plen = gm?.positions.length ?? 0;
+  useEffect(() => {
+    if (!gm || gm.positions.length === 0) {
+      setGeo(null);
+      return;
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(gm.positions, 3));
+    if (gm.indices.length) g.setIndex(gm.indices);
+    g.computeVertexNormals();
+    g.computeBoundsTree?.();
+    setGeo(g);
+    // Rebuild only when the mesh actually changes (tri/plen), not on every clone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tri, plen]);
+  useEffect(() => () => geo?.dispose(), [geo]);
+  if (!geo) return null;
+  return (
+    <mesh geometry={geo}>
+      <meshStandardMaterial color="#7fb3d5" metalness={0.1} roughness={0.55} side={THREE.DoubleSide} />
+    </mesh>
+  );
+}
+
+function CameraSync({ controls }: { controls: React.RefObject<OrbitControlsImpl | null> }) {
   const { camera } = useThree();
   const cam = useAppState().camera;
+  const lastApplied = useRef<string>('');
   useEffect(() => {
+    // The store deep-clones state on every mutation, so `cam` gets a fresh
+    // reference on ANY change (e.g. tessellation/selection). Only re-apply when
+    // the camera VALUES actually change (a view.set_camera command); otherwise we
+    // would fight OrbitControls and snap the user's mouse orbit/pan/zoom back on
+    // every unrelated update — which made manual control feel "stuck".
+    const key = JSON.stringify([cam.position, cam.target, cam.fov, cam.projection]);
+    if (key === lastApplied.current) return;
+    lastApplied.current = key;
     camera.position.set(cam.position[0], cam.position[1], cam.position[2]);
-    camera.lookAt(cam.target[0], cam.target[1], cam.target[2]);
-    camera.updateProjectionMatrix();
-  }, [camera, cam.position, cam.target]);
+    if (camera instanceof THREE.PerspectiveCamera) {
+      camera.fov = cam.fov;
+      camera.updateProjectionMatrix();
+    }
+    // Drive OrbitControls' own target so the mouse keeps orbiting around the
+    // right point after an AI camera move (don't call camera.lookAt — that fights
+    // OrbitControls, which owns orientation each frame).
+    const ctl = controls.current;
+    if (ctl) {
+      ctl.target.set(cam.target[0], cam.target[1], cam.target[2]);
+      ctl.update();
+    } else {
+      camera.lookAt(cam.target[0], cam.target[1], cam.target[2]);
+    }
+  }, [camera, cam.position, cam.target, cam.fov, cam.projection, controls]);
   return null;
 }
 
@@ -270,6 +321,7 @@ function ScreenshotRegistrar() {
 
 export function ViewportV2() {
   const dispatch = useDispatch();
+  const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const clearSelection = useMemo(() => () => void dispatch('selection.set', { ids: [] }), [dispatch]);
 
   return (
@@ -283,17 +335,19 @@ export function ViewportV2() {
       <directionalLight position={[5, 10, 7]} intensity={0.8} />
       <directionalLight position={[-5, -3, -7]} intensity={0.3} />
       <Grid args={[20, 20]} cellColor="#2a2f38" sectionColor="#3a4250" infiniteGrid fadeDistance={40} />
-      <CameraSync />
+      <CameraSync controls={controlsRef} />
       <SectionClip />
       <ScreenshotRegistrar />
       <GeometryLayer />
+      <GmshSceneLayer />
       <ResultsFieldLayer />
       <VectorGlyphLayer />
       <StreamlineLayer />
       <GizmoHelper alignment="bottom-right" margin={[70, 70]}>
         <GizmoViewcube />
       </GizmoHelper>
-      <OrbitControls makeDefault dampingFactor={0.1} />
+      {/* makeDefault → mouse orbit(left)/pan(right)/zoom(wheel) are always free. */}
+      <OrbitControls ref={controlsRef} makeDefault enableDamping dampingFactor={0.1} />
     </Canvas>
   );
 }

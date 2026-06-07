@@ -2,11 +2,21 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import { AppV2 } from './react/AppV2';
+import { AssistantShell } from './react/AssistantShell';
 
-// The legacy App remains the default. Opt into the new command-core workbench
-// (Phases 3/4) with ?v2 until it reaches feature parity.
-const useV2 = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('v2');
+// Entry routing (opt-in via query string):
+//   ?ai  → AssistantShell — the AI-only workbench (talk to the AI; it drives the
+//          commands; the viewport shows only the result + process). The target
+//          direction for the GUI.
+//   ?v2  → AppV2 — data-driven ribbon workbench on the command-core.
+//   else → the legacy App (default until the AI shell reaches parity).
+const params = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : new URLSearchParams();
+const root = ReactDOM.createRoot(document.getElementById('root')!);
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>{useV2 ? <AppV2 /> : <App />}</React.StrictMode>
-);
+function pickApp() {
+  if (params.has('ai')) return <AssistantShell />;
+  if (params.has('v2')) return <AppV2 />;
+  return <App />;
+}
+
+root.render(<React.StrictMode>{pickApp()}</React.StrictMode>);

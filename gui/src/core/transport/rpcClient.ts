@@ -38,7 +38,14 @@ export function createElectronRpcClient(): RpcClient {
       if (typeof window === 'undefined' || !window.gfdAPI) {
         throw new NoBackendError(method);
       }
-      return (await window.gfdAPI.sendRequest(method, params)) as T;
+      const res = await window.gfdAPI.sendRequest(method, params);
+      // The Electron main process resolves backend failures (and timeouts) as
+      // `{ error }`. Surface those as a thrown error so the command fails cleanly
+      // instead of building corrupt state (e.g. a node with an undefined id).
+      if (res && typeof res === 'object' && 'error' in res && (res as { error?: unknown }).error) {
+        throw new Error(`RPC "${method}" failed: ${String((res as { error?: unknown }).error)}`);
+      }
+      return res as T;
     },
   };
 }

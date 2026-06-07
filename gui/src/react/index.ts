@@ -1,5 +1,7 @@
 export * from './CoreContext';
 export * from './AppV2';
+export * from './AssistantShell';
+export * from './ChatPanel';
 export * from './RibbonFromRegistry';
 export * from './CommandFormPanel';
 export * from './FeatureTreePanel';
