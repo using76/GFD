@@ -598,6 +598,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
 
         // -- Solve --
         "solve.start" => handle_solve_start(state, req.id, &req.params),
+        "solve.sensitivity" => handle_solve_sensitivity(state, req.id, &req.params),
         "solve.status" => handle_solve_status(state, req.id, &req.params),
         "solve.stop" => handle_solve_stop(state, req.id, &req.params),
 
@@ -4221,6 +4222,118 @@ fn handle_solve_start(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
     });
 
     RpcResponse::ok(id, serde_json::json!({ "job_id": job_id }))
+}
+
+/// Roadmap #3 — finite-difference sensitivity d(objective)/d(parameter).
+/// Runs two synchronous solves (base, base+delta) and returns the gradient,
+/// enabling an AI gradient-based optimization loop. (FD, not a full discrete
+/// adjoint — honest and runnable; true adjoint is on the roadmap.)
+fn handle_solve_sensitivity(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let mesh = match &state.mesh {
+        Some(m) => m,
+        None => return RpcResponse::err(id, "No mesh generated yet. Call mesh.generate first."),
+    };
+    let parameter = params.get("parameter").and_then(|v| v.as_str()).unwrap_or("viscosity");
+    let objective = params.get("objective").and_then(|v| v.as_str()).unwrap_or("kinetic_energy");
+    let max_iter = params.get("max_iterations").and_then(|v| v.as_u64()).unwrap_or(150) as usize;
+    let tol = params.get("tolerance").and_then(|v| v.as_f64()).unwrap_or(1e-5);
+    let base_density = params.get("density").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let base_visc = params.get("viscosity").and_then(|v| v.as_f64()).unwrap_or(0.01);
+    let bcs = params.get("boundary_conditions").cloned().unwrap_or(Value::Array(vec![]));
+
+    let base_param = if parameter == "density" { base_density } else { base_visc };
+    let delta = params
+        .get("delta")
+        .and_then(|v| v.as_f64())
+        .unwrap_or((base_param.abs().max(1e-6)) * 0.05);
+
+    let f0 = fluid_solve_fields(mesh, base_density, base_visc, 0.5, 0.3, max_iter, tol, &bcs, None);
+    let obj0 = objective_value(objective, &f0);
+
+    let (d1, v1) = if parameter == "density" {
+        (base_density + delta, base_visc)
+    } else {
+        (base_density, base_visc + delta)
+    };
+    let f1 = fluid_solve_fields(mesh, d1, v1, 0.5, 0.3, max_iter, tol, &bcs, None);
+    let obj1 = objective_value(objective, &f1);
+
+    let gradient = (obj1 - obj0) / delta;
+    RpcResponse::ok(id, serde_json::json!({
+        "parameter": parameter,
+        "objective": objective,
+        "delta": delta,
+        "objective_base": obj0,
+        "objective_perturbed": obj1,
+        "gradient": gradient,
+        "method": "finite_difference",
+    }))
+}
+
+/// Run a fluid solve synchronously and return the result fields. Shared by the
+/// background job runner and the finite-difference sensitivity (roadmap #3).
+fn fluid_solve_fields(
+    mesh: &UnstructuredMesh,
+    density: f64,
+    viscosity: f64,
+    alpha_u: f64,
+    alpha_p: f64,
+    max_iter: usize,
+    tolerance: f64,
+    bcs_val: &Value,
+    momentum_source: Option<Vec<[f64; 3]>>,
+) -> HashMap<String, Vec<f64>> {
+    let n = mesh.num_cells();
+    let mut state = FluidState {
+        velocity: VectorField::zeros("velocity", n),
+        pressure: ScalarField::zeros("pressure", n),
+        density: ScalarField::from_vec("density", vec![density; n]),
+        viscosity: ScalarField::from_vec("viscosity", vec![viscosity; n]),
+        turb_kinetic_energy: None,
+        turb_dissipation: None,
+        turb_specific_dissipation: None,
+        eddy_viscosity: None,
+    };
+    let mut solver = SimpleSolver::new(density, viscosity);
+    solver.alpha_u = alpha_u;
+    solver.alpha_p = alpha_p;
+    if let Some(src) = momentum_source {
+        solver.set_external_momentum_source(src);
+    }
+    let (bv, bp, wp) = parse_fluid_bcs(bcs_val, mesh);
+    solver.set_boundary_conditions(bv.clone(), bp.clone(), wp.clone());
+    for _ in 0..max_iter {
+        match solver.solve_step_with_bcs(&mut state, mesh, &bv, &bp, &wp) {
+            Ok(r) => {
+                if r < tolerance {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let mut fields: HashMap<String, Vec<f64>> = HashMap::new();
+    fields.insert("pressure".to_string(), state.pressure.values().to_vec());
+    let vel = state.velocity.values();
+    fields.insert(
+        "velocity_magnitude".to_string(),
+        vel.iter().map(|v| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()).collect(),
+    );
+    fields
+}
+
+/// Scalar objective for sensitivity analysis.
+fn objective_value(name: &str, fields: &HashMap<String, Vec<f64>>) -> f64 {
+    let vmag = fields.get("velocity_magnitude");
+    let p = fields.get("pressure");
+    match name {
+        "max_velocity" => vmag.map(|v| v.iter().copied().fold(0.0_f64, f64::max)).unwrap_or(0.0),
+        "mean_pressure" => p
+            .map(|v| if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 })
+            .unwrap_or(0.0),
+        // default: total kinetic energy proxy 0.5 * sum(|U|^2)
+        _ => vmag.map(|v| 0.5 * v.iter().map(|x| x * x).sum::<f64>()).unwrap_or(0.0),
+    }
 }
 
 fn run_fluid_solve(

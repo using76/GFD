@@ -170,7 +170,61 @@ export function activeSolverSessions(): ReadonlyMap<string, SolverHandle> {
   return sessions;
 }
 
+export interface CalcSensitivityParams {
+  parameter?: 'viscosity' | 'density';
+  objective?: 'kinetic_energy' | 'max_velocity' | 'mean_pressure';
+  delta?: number;
+  maxIterations?: number;
+  boundaryConditions?: JsonValue[];
+}
+
+export interface SensitivityResult {
+  parameter: string;
+  objective: string;
+  delta: number;
+  objective_base: number;
+  objective_perturbed: number;
+  gradient: number;
+  method: string;
+}
+
+export const calcSensitivity: CommandDef<CalcSensitivityParams, SensitivityResult> = {
+  id: 'calc.sensitivity',
+  category: 'calc',
+  group: 'Optimize',
+  title: 'Sensitivity (∂obj/∂param)',
+  titleKo: '민감도 (∂목적/∂파라미터)',
+  description:
+    'Finite-difference gradient of an objective (kinetic_energy/max_velocity/mean_pressure) w.r.t. a parameter (viscosity/density). Enables AI gradient-based optimization. Requires a mesh.',
+  capability: 'run-solver',
+  undoable: false,
+  paramsSchema: {
+    type: 'object',
+    properties: {
+      parameter: { type: 'string', enum: ['viscosity', 'density'] },
+      objective: { type: 'string', enum: ['kinetic_energy', 'max_velocity', 'mean_pressure'] },
+      delta: { type: 'number', minimum: 0 },
+      maxIterations: { type: 'integer', minimum: 1 },
+      boundaryConditions: { type: 'array', items: { type: 'object' } },
+    },
+  },
+  async run(params, ctx) {
+    const s = ctx.getState();
+    const r = await ctx.rpc.request<SensitivityResult>('solve.sensitivity', {
+      parameter: params.parameter ?? 'viscosity',
+      objective: params.objective ?? 'kinetic_energy',
+      viscosity: s.physics.material.viscosity,
+      density: s.physics.material.density,
+      max_iterations: params.maxIterations ?? 150,
+      ...(params.delta !== undefined ? { delta: params.delta } : {}),
+      boundary_conditions: params.boundaryConditions ?? (s.setup.boundaries as unknown as JsonValue[]),
+    });
+    return { ok: true, result: r };
+  },
+};
+
 export function registerCalcCommands(registry: CommandRegistry): void {
   registry.register(calcRun);
   registry.register(calcStop);
+  registry.register(calcSensitivity);
 }
