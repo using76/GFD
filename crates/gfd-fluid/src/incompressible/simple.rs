@@ -95,6 +95,9 @@ pub struct SimpleSolver {
     /// External momentum damping coefficient per cell [N*s/m^4].
     /// Used by solidification (Carman-Kozeny damping) and other couplings.
     external_momentum_damping: Option<Vec<f64>>,
+    /// External per-cell momentum body force [N/m^3], (fx,fy,fz) per cell.
+    /// Used by pluggable expression source terms (Phase 7): S_i += f[i][comp] * V.
+    external_momentum_source: Option<Vec<[f64; 3]>>,
 }
 
 /// Parameters for the Boussinesq buoyancy approximation.
@@ -147,6 +150,7 @@ impl SimpleSolver {
             pc_diag_csr_idx: Vec::new(),
             boussinesq: None,
             external_momentum_damping: None,
+            external_momentum_source: None,
         }
     }
 
@@ -180,6 +184,16 @@ impl SimpleSolver {
     /// Clears external momentum damping.
     pub fn clear_external_momentum_damping(&mut self) {
         self.external_momentum_damping = None;
+    }
+
+    /// Set a per-cell momentum body force [N/m^3] (fx,fy,fz), e.g. from a
+    /// pluggable expression source term. Added to the momentum RHS as f*V.
+    pub fn set_external_momentum_source(&mut self, source: Vec<[f64; 3]>) {
+        self.external_momentum_source = Some(source);
+    }
+
+    pub fn clear_external_momentum_source(&mut self) {
+        self.external_momentum_source = None;
     }
 
     /// Ensure the face-to-patch cache is built for this mesh.
@@ -509,6 +523,7 @@ impl SimpleSolver {
         // Check if Boussinesq is active
         let has_boussinesq = self.boussinesq.is_some() && temperature.is_some();
         let has_ext_damping = self.external_momentum_damping.is_some();
+        let has_ext_source = self.external_momentum_source.is_some();
 
         // --- Solve each velocity component using the shared matrix ---
         for comp in 0..3 {
@@ -520,6 +535,7 @@ impl SimpleSolver {
                 && !transient
                 && !has_boussinesq
                 && !has_ext_damping
+                && !has_ext_source
             {
                 continue;
             }
@@ -540,6 +556,10 @@ impl SimpleSolver {
                 // Gravity body force: rho * g[comp] * V
                 if gravity_comp != 0.0 {
                     sources[i] += self.density * gravity_comp * vol_i;
+                }
+                // Pluggable expression body force: f[comp] * V
+                if let Some(ref ext_src) = self.external_momentum_source {
+                    sources[i] += ext_src[i][comp] * vol_i;
                 }
                 // Transient source: (rho * V / dt) * u_old
                 if transient {

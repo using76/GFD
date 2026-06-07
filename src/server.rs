@@ -4103,6 +4103,10 @@ fn handle_solve_start(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
     let result_t = Arc::clone(&result_holder);
     let bcs_val = bcs.cloned().unwrap_or(Value::Array(Vec::new()));
     let physics = physics.to_string();
+    // Build a per-cell momentum body force from the applied pluggable physics
+    // manifest's expression source terms. Changing the expression (e.g. via the
+    // AI physics.set_term command) changes this force → changes the solved field.
+    let momentum_source = build_momentum_source(&state.physics_manifest, &mesh);
 
     thread::spawn(move || {
         if physics == "thermal" {
@@ -4133,6 +4137,7 @@ fn handle_solve_start(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
                 &iteration_t,
                 &residual_t,
                 &result_t,
+                momentum_source,
             );
         }
         running_t.store(false, Ordering::SeqCst);
@@ -4154,6 +4159,7 @@ fn run_fluid_solve(
     iteration: &AtomicU64,
     residual: &Mutex<f64>,
     result_holder: &Mutex<Option<JobResult>>,
+    momentum_source: Option<Vec<[f64; 3]>>,
 ) {
     let n = mesh.num_cells();
 
@@ -4171,6 +4177,9 @@ fn run_fluid_solve(
     let mut solver = SimpleSolver::new(density, viscosity);
     solver.alpha_u = alpha_u;
     solver.alpha_p = alpha_p;
+    if let Some(src) = momentum_source {
+        solver.set_external_momentum_source(src);
+    }
 
     // Parse boundary conditions
     let (boundary_velocities, boundary_pressure, wall_patches) =
@@ -4498,6 +4507,115 @@ fn handle_physics_validate_expression(id: u64, params: &Value) -> RpcResponse {
         "diagnostics": diags,
         "latex": latex,
     }))
+}
+
+/// Evaluate a gfd-expression AST at a spatial point (x,y,z). Field refs ($..)
+/// evaluate to 0 here (no field binding in the source-term preview); spatial
+/// source terms like "100*sin(x)" or a constant body force evaluate exactly.
+fn eval_expr_at(expr: &gfd_expression::ast::Expr, x: f64, y: f64, z: f64) -> f64 {
+    use gfd_expression::ast::{BinOp, Expr, UnOp};
+    match expr {
+        Expr::Number(v) => *v,
+        Expr::Constant(name) => match name.as_str() {
+            "pi" => std::f64::consts::PI,
+            "e" => std::f64::consts::E,
+            _ => 0.0,
+        },
+        Expr::Variable(name) => match name.as_str() {
+            "x" => x,
+            "y" => y,
+            "z" => z,
+            _ => 0.0,
+        },
+        Expr::FieldRef(_) => 0.0,
+        Expr::BinaryOp { op, left, right } => {
+            let l = eval_expr_at(left, x, y, z);
+            let r = eval_expr_at(right, x, y, z);
+            match op {
+                BinOp::Add => l + r,
+                BinOp::Sub => l - r,
+                BinOp::Mul => l * r,
+                BinOp::Div => if r != 0.0 { l / r } else { 0.0 },
+                BinOp::Pow => l.powf(r),
+            }
+        }
+        Expr::UnaryOp { op, operand } => {
+            let v = eval_expr_at(operand, x, y, z);
+            match op {
+                UnOp::Neg => -v,
+                UnOp::Abs => v.abs(),
+                UnOp::Sqrt => v.max(0.0).sqrt(),
+                UnOp::Sin => v.sin(),
+                UnOp::Cos => v.cos(),
+                UnOp::Exp => v.exp(),
+                UnOp::Log => if v > 0.0 { v.ln() } else { 0.0 },
+            }
+        }
+        Expr::FunctionCall { name, args } => {
+            let a: Vec<f64> = args.iter().map(|e| eval_expr_at(e, x, y, z)).collect();
+            match (name.as_str(), a.as_slice()) {
+                ("max", [p, q]) => p.max(*q),
+                ("min", [p, q]) => p.min(*q),
+                ("pow", [p, q]) => p.powf(*q),
+                ("sqrt", [p]) => p.max(0.0).sqrt(),
+                ("abs", [p]) => p.abs(),
+                _ => 0.0,
+            }
+        }
+        Expr::Conditional { condition, true_val, false_val } => {
+            if eval_expr_at(condition, x, y, z) != 0.0 {
+                eval_expr_at(true_val, x, y, z)
+            } else {
+                eval_expr_at(false_val, x, y, z)
+            }
+        }
+        Expr::DiffOp { .. } | Expr::TensorOp { .. } => 0.0,
+    }
+}
+
+/// Build a per-cell momentum body force [N/m^3] from the manifest's expression
+/// source terms targeting MomentumX/Y/Z. Returns None if there are none.
+fn build_momentum_source(
+    manifest: &Option<Value>,
+    mesh: &UnstructuredMesh,
+) -> Option<Vec<[f64; 3]>> {
+    let eqs = manifest.as_ref()?.get("equations")?.as_array()?;
+    let n = mesh.num_cells();
+    let mut force = vec![[0.0f64; 3]; n];
+    let mut any = false;
+
+    for eq in eqs {
+        let comp = match eq.get("equationId").and_then(|v| v.as_str()) {
+            Some("MomentumX") => 0,
+            Some("MomentumY") => 1,
+            Some("MomentumZ") => 2,
+            _ => continue,
+        };
+        let Some(terms) = eq.get("terms").and_then(|v| v.as_array()) else { continue };
+        for t in terms {
+            if t.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
+                continue;
+            }
+            if t.get("role").and_then(|v| v.as_str()) != Some("source") {
+                continue;
+            }
+            let Some(im) = t.get("impl") else { continue };
+            if im.get("kind").and_then(|v| v.as_str()) != Some("expression") {
+                continue;
+            }
+            let Some(expr_str) = im.get("expr").and_then(|v| v.as_str()) else { continue };
+            let Ok(ast) = gfd_expression::parse(expr_str) else { continue };
+            any = true;
+            for i in 0..n {
+                if let Ok(c) = mesh.cell(i) {
+                    let [cx, cy, cz] = c.center;
+                    force[i][comp] += eval_expr_at(&ast, cx, cy, cz);
+                }
+            }
+        }
+    }
+
+    if any { Some(force) } else { None }
 }
 
 fn handle_physics_list_builtins(id: u64) -> RpcResponse {
