@@ -10,7 +10,7 @@
  * everything is driven by the command-core AppState and dispatches commands.
  */
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls, Grid, GizmoHelper, GizmoViewcube, Outlines } from '@react-three/drei';
 import * as THREE from 'three';
@@ -78,6 +78,52 @@ function GeometryLayer() {
         <ShapeMesh key={n.id} node={n} selected={selected.has(n.id)} />
       ))}
     </group>
+  );
+}
+
+/** Solver→UI link: render the solved field as a colored boundary contour. */
+function ResultsFieldLayer() {
+  const state = useAppState();
+  const dispatch = useDispatch();
+  const activeField = state.results?.activeField ?? null;
+  // Re-fetch when the field changes or a solve advances.
+  const solveTag = `${activeField}:${state.solver.iteration}:${state.solver.status}`;
+  const [geo, setGeo] = useState<THREE.BufferGeometry | null>(null);
+
+  useEffect(() => {
+    if (!activeField) {
+      setGeo(null);
+      return;
+    }
+    let cancelled = false;
+    void dispatch('results.contour', { field: activeField }).then((o) => {
+      if (cancelled || !o.ok || !o.result) return;
+      const r = o.result as { vertices: number[]; colors: number[] };
+      if (!r.vertices || r.vertices.length < 9) {
+        setGeo(null);
+        return;
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(r.vertices, 3));
+      if (r.colors && r.colors.length === r.vertices.length) {
+        g.setAttribute('color', new THREE.Float32BufferAttribute(r.colors, 3));
+      }
+      g.computeVertexNormals();
+      setGeo(g);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeField, solveTag, dispatch]);
+
+  // Dispose superseded geometry.
+  useEffect(() => () => geo?.dispose(), [geo]);
+
+  if (!activeField || !geo) return null;
+  return (
+    <mesh geometry={geo}>
+      <meshBasicMaterial vertexColors side={THREE.DoubleSide} />
+    </mesh>
   );
 }
 
@@ -158,6 +204,7 @@ export function ViewportV2() {
       <SectionClip />
       <ScreenshotRegistrar />
       <GeometryLayer />
+      <ResultsFieldLayer />
       <GizmoHelper alignment="bottom-right" margin={[70, 70]}>
         <GizmoViewcube />
       </GizmoHelper>

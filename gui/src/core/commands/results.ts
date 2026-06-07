@@ -48,6 +48,46 @@ export const resultsLoadField: CommandDef<FieldGetParams, FieldGetResult> = {
   },
 };
 
+export interface ContourParams {
+  field?: string;
+  colormap?: 'jet' | 'rainbow' | 'grayscale' | 'coolwarm';
+}
+
+export interface ContourResult {
+  vertices: number[];
+  colors: number[];
+}
+
+export const resultsContour: CommandDef<ContourParams, ContourResult> = {
+  id: 'results.contour',
+  category: 'results',
+  group: 'Visualize',
+  title: 'Contour',
+  titleKo: '컨투어',
+  description:
+    'Build a colored boundary-surface contour of a solved field (vertices + per-vertex RGB) for the viewport. Sets the active field.',
+  capability: 'read',
+  paramsSchema: {
+    type: 'object',
+    properties: {
+      field: { type: 'string' },
+      colormap: { type: 'string', enum: ['jet', 'rainbow', 'grayscale', 'coolwarm'] },
+    },
+  },
+  async run(params, ctx) {
+    const field = params.field ?? ctx.getState().results?.activeField ?? 'velocity_magnitude';
+    const r = await ctx.rpc.request<ContourResult>('field.contour', {
+      field,
+      colormap: params.colormap ?? 'jet',
+    });
+    const patch: PatchOp[] = ctx.getState().results
+      ? [{ op: 'replace', path: ['results', 'activeField'], value: field }]
+      : [];
+    return { ok: true, result: r, statePatch: patch };
+  },
+};
+
 export function registerResultsCommands(registry: CommandRegistry): void {
   registry.register(resultsLoadField);
+  registry.register(resultsContour);
 }

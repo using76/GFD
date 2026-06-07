@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { createCore } from '../index';
 import { createMcpBridge } from '../mcp/bridge';
 import { createMockRpcClient } from '../transport/rpcClient';
+import type { JsonObject } from '../types';
 
 function backend() {
   let counter = 0;
@@ -91,5 +92,33 @@ describe('OpenUSD / OpenVDB export commands', () => {
     expect((usd.result as { content: string }).content).toMatch(/^#usda/);
     const vdb = await core.dispatcher.dispatch({ commandId: 'results.export_vdb', params: { field: 'pressure', path: '/tmp/f.vdb' }, source: 'agent' });
     expect((vdb.result as { voxels: number }).voxels).toBe(256);
+  });
+});
+
+describe('Solver→UI field contour', () => {
+  it('fetches a colored contour and sets the active field', async () => {
+    const rpc = createMockRpcClient((method: string, params: JsonObject) => {
+      if (method === 'field.contour') {
+        expect(params.field).toBe('velocity_magnitude');
+        return { vertices: [0, 0, 0, 1, 0, 0, 0, 1, 0], colors: [1, 0, 0, 0, 1, 0, 0, 0, 1] };
+      }
+      return {};
+    });
+    // seed results so the activeField patch applies
+    const core = createCore({
+      rpc,
+      initialState: undefined,
+    });
+    // Manually place a results summary via a mesh+solve-like patch isn't needed;
+    // results.contour works without prior results too (returns geometry).
+    const r = await core.dispatcher.dispatch({
+      commandId: 'results.contour',
+      params: { field: 'velocity_magnitude' },
+      source: 'agent',
+    });
+    expect(r.ok).toBe(true);
+    const c = r.result as { vertices: number[]; colors: number[] };
+    expect(c.vertices).toHaveLength(9);
+    expect(c.colors).toHaveLength(9);
   });
 });

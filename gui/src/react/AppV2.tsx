@@ -13,6 +13,7 @@ import { CoreProvider, useAppState, useUndoRedo } from './CoreContext';
 import { RibbonFromRegistry } from './RibbonFromRegistry';
 import { CommandFormPanel } from './CommandFormPanel';
 import { FeatureTreePanel } from './FeatureTreePanel';
+import { ResultsPanel } from './ResultsPanel';
 import { ViewportV2 } from './engine/ViewportV2';
 
 function StatusBar() {
@@ -53,6 +54,9 @@ function Shell() {
             ) : (
               <div style={{ padding: 10, color: '#888', fontSize: 12 }}>Pick a ribbon command to edit its parameters.</div>
             )}
+          </div>
+          <div style={{ borderTop: '1px solid #333' }}>
+            <ResultsPanel />
           </div>
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
