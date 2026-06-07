@@ -102,6 +102,8 @@ struct ServerState {
     cad_shape_map: HashMap<String, ShapeId>,
     /// Counter for cad shape string ids.
     next_cad_shape_id: u64,
+    /// Applied pluggable physics manifest (Phase 7), as received from the GUI.
+    physics_manifest: Option<Value>,
 }
 
 struct PrimitiveBody {
@@ -139,6 +141,7 @@ impl ServerState {
             cad_doc: Document::new(),
             cad_shape_map: HashMap::new(),
             next_cad_shape_id: 0,
+            physics_manifest: None,
         }
     }
 }
@@ -553,6 +556,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.export.vtk"           => handle_cad_export_vtk(state, req.id, &req.params),
         "cad.export.dxf"           => handle_cad_export_dxf(state, req.id, &req.params),
         "cad.export.stl_string"    => handle_cad_export_stl_string(state, req.id, &req.params),
+        "cad.export.usd_string"    => handle_cad_export_usd_string(state, req.id, &req.params),
         "cad.export.obj_string"    => handle_cad_export_obj_string(state, req.id, &req.params),
         "cad.export.ply_string"    => handle_cad_export_ply_string(state, req.id, &req.params),
         "cad.export.step_string"   => handle_cad_export_step_string(state, req.id, &req.params),
@@ -582,6 +586,11 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.sketch.add_polyline"  => handle_cad_sketch_add_polyline(state, req.id, &req.params),
         "cad.sketch.add_profile"   => handle_cad_sketch_add_profile(state, req.id, &req.params),
 
+        // -- Pluggable physics (Phase 7) --
+        "physics.validate_expression" => handle_physics_validate_expression(req.id, &req.params),
+        "physics.list_builtins"       => handle_physics_list_builtins(req.id),
+        "physics.apply_manifest"      => handle_physics_apply_manifest(state, req.id, &req.params),
+
         // -- Mesh --
         "mesh.generate" => handle_mesh_generate(state, req.id, &req.params),
         "mesh.get_display_data" => handle_mesh_get_display_data(state, req.id),
@@ -589,12 +598,17 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
 
         // -- Solve --
         "solve.start" => handle_solve_start(state, req.id, &req.params),
+        "solve.lbm" => handle_solve_lbm(state, req.id, &req.params),
+        "solve.sensitivity" => handle_solve_sensitivity(state, req.id, &req.params),
         "solve.status" => handle_solve_status(state, req.id, &req.params),
         "solve.stop" => handle_solve_stop(state, req.id, &req.params),
 
         // -- Field / Results --
         "field.get" => handle_field_get(state, req.id, &req.params),
         "field.contour" => handle_field_contour(state, req.id, &req.params),
+        "field.export_vdb" => handle_field_export_vdb(state, req.id, &req.params),
+        "field.vectors" => handle_field_vectors(state, req.id, &req.params),
+        "field.streamlines" => handle_field_streamlines(state, req.id, &req.params),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
     }
@@ -3526,6 +3540,69 @@ fn handle_cad_export_ply_string(state: &ServerState, id: u64, params: &Value) ->
 
 /// In-memory STL ASCII export. Returns the file content as a string
 /// (no disk write). Useful for browser-side downloads, preview, etc.
+/// Sanitize a string into a valid USD prim identifier (alphanumeric + '_').
+fn sanitize_usd_name(name: &str) -> String {
+    let mut s: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    if s.is_empty() || s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true) {
+        s = format!("_{}", s);
+    }
+    s
+}
+
+/// Export the document (or one shape) as OpenUSD ASCII (.usda) — UsdGeomMesh
+/// prims, Z-up, metersPerUnit=1 — compatible with NVIDIA Omniverse / Isaac Sim.
+fn handle_cad_export_usd_string(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    let u_steps = params.get("u_steps").and_then(|v| v.as_u64()).unwrap_or(32) as usize;
+    let v_steps = params.get("v_steps").and_then(|v| v.as_u64()).unwrap_or(16) as usize;
+
+    let mut entries: Vec<(String, ShapeId)> = match params.get("shape_id").and_then(|v| v.as_str()) {
+        Some(sid) => match state.cad_shape_map.get(sid) {
+            Some(a) => vec![(sid.to_string(), *a)],
+            None => return RpcResponse::err(id, format!("unknown shape_id: {}", sid)),
+        },
+        None => state.cad_shape_map.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+    };
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut usd = String::new();
+    usd.push_str("#usda 1.0\n(\n    defaultPrim = \"World\"\n    metersPerUnit = 1\n    upAxis = \"Z\"\n)\n\n");
+    usd.push_str("def Xform \"World\"\n{\n");
+    let mut emitted = 0usize;
+    for (name, aid) in &entries {
+        let opts = TessellationOptions { u_steps, v_steps, ..Default::default() };
+        let tri = match tessellate(&state.cad_doc.arena, *aid, opts) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if tri.indices.len() < 3 {
+            continue;
+        }
+        let ntri = tri.indices.len() / 3;
+        let counts = vec!["3"; ntri].join(", ");
+        let idx = tri.indices.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+        let pts = tri
+            .positions
+            .iter()
+            .map(|p| format!("({}, {}, {})", p[0], p[1], p[2]))
+            .collect::<Vec<_>>()
+            .join(", ");
+        usd.push_str(&format!("    def Mesh \"{}\"\n    {{\n", sanitize_usd_name(name)));
+        usd.push_str(&format!("        int[] faceVertexCounts = [{}]\n", counts));
+        usd.push_str(&format!("        int[] faceVertexIndices = [{}]\n", idx));
+        usd.push_str(&format!("        point3f[] points = [{}]\n", pts));
+        usd.push_str("        uniform token subdivisionScheme = \"none\"\n");
+        usd.push_str("    }\n");
+        emitted += 1;
+    }
+    usd.push_str("}\n");
+
+    let length = usd.len();
+    RpcResponse::ok(id, serde_json::json!({ "content": usd, "length": length, "shapes": emitted }))
+}
+
 fn handle_cad_export_stl_string(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
     let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
         return RpcResponse::err(id, "missing shape_id");
@@ -4067,6 +4144,18 @@ fn handle_solve_start(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
         .and_then(|v| v.as_str())
         .unwrap_or(if flow == "none" { "thermal" } else { "fluid" });
 
+    // Roadmap #1: a pluggable physics manifest's constitutive relations override
+    // the material density/viscosity — so AI editing physics.set_constitutive
+    // changes the solve. (Constant → exact; expression → cell-averaged scalar.)
+    let (density, viscosity) = if let Some(m) = &state.physics_manifest {
+        (
+            constitutive_value(m, &mesh, "density").unwrap_or(density),
+            constitutive_value(m, &mesh, "viscosity").unwrap_or(viscosity),
+        )
+    } else {
+        (density, viscosity)
+    };
+
     // Parse boundary conditions from params
     let bcs = params.get("boundary_conditions");
 
@@ -4095,6 +4184,10 @@ fn handle_solve_start(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
     let result_t = Arc::clone(&result_holder);
     let bcs_val = bcs.cloned().unwrap_or(Value::Array(Vec::new()));
     let physics = physics.to_string();
+    // Build a per-cell momentum body force from the applied pluggable physics
+    // manifest's expression source terms. Changing the expression (e.g. via the
+    // AI physics.set_term command) changes this force → changes the solved field.
+    let momentum_source = build_momentum_source(&state.physics_manifest, &mesh);
 
     thread::spawn(move || {
         if physics == "thermal" {
@@ -4125,12 +4218,249 @@ fn handle_solve_start(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
                 &iteration_t,
                 &residual_t,
                 &result_t,
+                momentum_source,
             );
         }
         running_t.store(false, Ordering::SeqCst);
     });
 
     RpcResponse::ok(id, serde_json::json!({ "job_id": job_id }))
+}
+
+/// Lattice Boltzmann D2Q9 (BGK) lid-driven cavity — a self-contained mesoscopic
+/// solver independent of the FVM core (first of the roadmap's "missing solvers").
+/// Stores vx/vy/velocity_magnitude in state.fields so field.get / export work.
+fn handle_solve_lbm(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let nx = params.get("nx").and_then(|v| v.as_u64()).unwrap_or(64).clamp(4, 512) as usize;
+    let ny = params.get("ny").and_then(|v| v.as_u64()).unwrap_or(64).clamp(4, 512) as usize;
+    let steps = params.get("steps").and_then(|v| v.as_u64()).unwrap_or(2000).clamp(1, 100_000) as usize;
+    let nu = params.get("viscosity").and_then(|v| v.as_f64()).unwrap_or(0.02).max(1e-4);
+    let u_lid = params.get("lid_velocity").and_then(|v| v.as_f64()).unwrap_or(0.1);
+
+    const Q: usize = 9;
+    let ex = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0];
+    let ey = [0.0, 0.0, 1.0, 0.0, -1.0, 1.0, 1.0, -1.0, -1.0];
+    let w = [4.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0];
+    let opp = [0usize, 3, 4, 1, 2, 7, 8, 5, 6];
+    let omega = 1.0 / (3.0 * nu + 0.5);
+
+    let cells = nx * ny;
+    let mut f = vec![0.0f64; cells * Q];
+    let mut fpc = vec![0.0f64; cells * Q]; // post-collision
+    for c in 0..cells {
+        for k in 0..Q {
+            f[c * Q + k] = w[k];
+        }
+    }
+
+    for _ in 0..steps {
+        // Collision (BGK), with the top row forced to the lid velocity.
+        for j in 0..ny {
+            for i in 0..nx {
+                let base = (j * nx + i) * Q;
+                let mut rho = 0.0;
+                let mut ux = 0.0;
+                let mut uy = 0.0;
+                for k in 0..Q {
+                    let fk = f[base + k];
+                    rho += fk;
+                    ux += fk * ex[k];
+                    uy += fk * ey[k];
+                }
+                if rho > 0.0 {
+                    ux /= rho;
+                    uy /= rho;
+                }
+                if j == ny - 1 {
+                    ux = u_lid;
+                    uy = 0.0;
+                }
+                let usq = ux * ux + uy * uy;
+                for k in 0..Q {
+                    let eu = ex[k] * ux + ey[k] * uy;
+                    let feq = w[k] * rho * (1.0 + 3.0 * eu + 4.5 * eu * eu - 1.5 * usq);
+                    fpc[base + k] = f[base + k] - omega * (f[base + k] - feq);
+                }
+            }
+        }
+        // Streaming (pull) with bounce-back: f_k(c) ← fpc_k(c - e_k), or, if the
+        // upstream is a wall, the opposite post-collision from this cell.
+        for j in 0..ny {
+            for i in 0..nx {
+                let base = (j * nx + i) * Q;
+                for k in 0..Q {
+                    let si = i as i64 - ex[k] as i64;
+                    let sj = j as i64 - ey[k] as i64;
+                    if si < 0 || si >= nx as i64 || sj < 0 || sj >= ny as i64 {
+                        f[base + k] = fpc[base + opp[k]];
+                    } else {
+                        let sbase = ((sj as usize) * nx + (si as usize)) * Q;
+                        f[base + k] = fpc[sbase + k];
+                    }
+                }
+            }
+        }
+    }
+
+    // Macroscopic fields.
+    let mut vx = vec![0.0; cells];
+    let mut vy = vec![0.0; cells];
+    let mut vmag = vec![0.0; cells];
+    let (mut u_max, mut u_sum) = (0.0f64, 0.0f64);
+    for c in 0..cells {
+        let base = c * Q;
+        let mut rho = 0.0;
+        let mut ux = 0.0;
+        let mut uy = 0.0;
+        for k in 0..Q {
+            let fk = f[base + k];
+            rho += fk;
+            ux += fk * ex[k];
+            uy += fk * ey[k];
+        }
+        if rho > 0.0 {
+            ux /= rho;
+            uy /= rho;
+        }
+        vx[c] = ux;
+        vy[c] = uy;
+        let m = (ux * ux + uy * uy).sqrt();
+        vmag[c] = m;
+        u_max = u_max.max(m);
+        u_sum += m;
+    }
+    let u_mean = u_sum / cells as f64;
+
+    if !u_mean.is_finite() || vmag.iter().any(|v| !v.is_finite()) {
+        return RpcResponse::err(
+            id,
+            "LBM diverged (unstable): reduce lid_velocity or increase viscosity (relaxation tau = 3*nu + 0.5 should stay below ~0.95, i.e. nu >= ~0.015 at this scale).",
+        );
+    }
+
+    state.fields.insert("vx".to_string(), vx);
+    state.fields.insert("vy".to_string(), vy);
+    state.fields.insert("velocity_magnitude".to_string(), vmag);
+
+    RpcResponse::ok(id, serde_json::json!({
+        "solver": "lbm_d2q9",
+        "nx": nx, "ny": ny, "steps": steps,
+        "viscosity": nu, "lid_velocity": u_lid,
+        "u_max": u_max, "u_mean": u_mean,
+        "reynolds": u_lid * (nx as f64) / nu,
+    }))
+}
+
+/// Roadmap #3 — finite-difference sensitivity d(objective)/d(parameter).
+/// Runs two synchronous solves (base, base+delta) and returns the gradient,
+/// enabling an AI gradient-based optimization loop. (FD, not a full discrete
+/// adjoint — honest and runnable; true adjoint is on the roadmap.)
+fn handle_solve_sensitivity(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let mesh = match &state.mesh {
+        Some(m) => m,
+        None => return RpcResponse::err(id, "No mesh generated yet. Call mesh.generate first."),
+    };
+    let parameter = params.get("parameter").and_then(|v| v.as_str()).unwrap_or("viscosity");
+    let objective = params.get("objective").and_then(|v| v.as_str()).unwrap_or("kinetic_energy");
+    let max_iter = params.get("max_iterations").and_then(|v| v.as_u64()).unwrap_or(150) as usize;
+    let tol = params.get("tolerance").and_then(|v| v.as_f64()).unwrap_or(1e-5);
+    let base_density = params.get("density").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let base_visc = params.get("viscosity").and_then(|v| v.as_f64()).unwrap_or(0.01);
+    let bcs = params.get("boundary_conditions").cloned().unwrap_or(Value::Array(vec![]));
+
+    let base_param = if parameter == "density" { base_density } else { base_visc };
+    let delta = params
+        .get("delta")
+        .and_then(|v| v.as_f64())
+        .unwrap_or((base_param.abs().max(1e-6)) * 0.05);
+
+    let f0 = fluid_solve_fields(mesh, base_density, base_visc, 0.5, 0.3, max_iter, tol, &bcs, None);
+    let obj0 = objective_value(objective, &f0);
+
+    let (d1, v1) = if parameter == "density" {
+        (base_density + delta, base_visc)
+    } else {
+        (base_density, base_visc + delta)
+    };
+    let f1 = fluid_solve_fields(mesh, d1, v1, 0.5, 0.3, max_iter, tol, &bcs, None);
+    let obj1 = objective_value(objective, &f1);
+
+    let gradient = (obj1 - obj0) / delta;
+    RpcResponse::ok(id, serde_json::json!({
+        "parameter": parameter,
+        "objective": objective,
+        "delta": delta,
+        "objective_base": obj0,
+        "objective_perturbed": obj1,
+        "gradient": gradient,
+        "method": "finite_difference",
+    }))
+}
+
+/// Run a fluid solve synchronously and return the result fields. Shared by the
+/// background job runner and the finite-difference sensitivity (roadmap #3).
+fn fluid_solve_fields(
+    mesh: &UnstructuredMesh,
+    density: f64,
+    viscosity: f64,
+    alpha_u: f64,
+    alpha_p: f64,
+    max_iter: usize,
+    tolerance: f64,
+    bcs_val: &Value,
+    momentum_source: Option<Vec<[f64; 3]>>,
+) -> HashMap<String, Vec<f64>> {
+    let n = mesh.num_cells();
+    let mut state = FluidState {
+        velocity: VectorField::zeros("velocity", n),
+        pressure: ScalarField::zeros("pressure", n),
+        density: ScalarField::from_vec("density", vec![density; n]),
+        viscosity: ScalarField::from_vec("viscosity", vec![viscosity; n]),
+        turb_kinetic_energy: None,
+        turb_dissipation: None,
+        turb_specific_dissipation: None,
+        eddy_viscosity: None,
+    };
+    let mut solver = SimpleSolver::new(density, viscosity);
+    solver.alpha_u = alpha_u;
+    solver.alpha_p = alpha_p;
+    if let Some(src) = momentum_source {
+        solver.set_external_momentum_source(src);
+    }
+    let (bv, bp, wp) = parse_fluid_bcs(bcs_val, mesh);
+    solver.set_boundary_conditions(bv.clone(), bp.clone(), wp.clone());
+    for _ in 0..max_iter {
+        match solver.solve_step_with_bcs(&mut state, mesh, &bv, &bp, &wp) {
+            Ok(r) => {
+                if r < tolerance {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let mut fields: HashMap<String, Vec<f64>> = HashMap::new();
+    fields.insert("pressure".to_string(), state.pressure.values().to_vec());
+    let vel = state.velocity.values();
+    fields.insert(
+        "velocity_magnitude".to_string(),
+        vel.iter().map(|v| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()).collect(),
+    );
+    fields
+}
+
+/// Scalar objective for sensitivity analysis.
+fn objective_value(name: &str, fields: &HashMap<String, Vec<f64>>) -> f64 {
+    let vmag = fields.get("velocity_magnitude");
+    let p = fields.get("pressure");
+    match name {
+        "max_velocity" => vmag.map(|v| v.iter().copied().fold(0.0_f64, f64::max)).unwrap_or(0.0),
+        "mean_pressure" => p
+            .map(|v| if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 })
+            .unwrap_or(0.0),
+        // default: total kinetic energy proxy 0.5 * sum(|U|^2)
+        _ => vmag.map(|v| 0.5 * v.iter().map(|x| x * x).sum::<f64>()).unwrap_or(0.0),
+    }
 }
 
 fn run_fluid_solve(
@@ -4146,6 +4476,7 @@ fn run_fluid_solve(
     iteration: &AtomicU64,
     residual: &Mutex<f64>,
     result_holder: &Mutex<Option<JobResult>>,
+    momentum_source: Option<Vec<[f64; 3]>>,
 ) {
     let n = mesh.num_cells();
 
@@ -4163,6 +4494,9 @@ fn run_fluid_solve(
     let mut solver = SimpleSolver::new(density, viscosity);
     solver.alpha_u = alpha_u;
     solver.alpha_p = alpha_p;
+    if let Some(src) = momentum_source {
+        solver.set_external_momentum_source(src);
+    }
 
     // Parse boundary conditions
     let (boundary_velocities, boundary_pressure, wall_patches) =
@@ -4261,7 +4595,12 @@ fn run_thermal_solve(
             let patch = bc.get("patch").and_then(|v| v.as_str()).unwrap_or("");
             let bc_type = bc.get("type").and_then(|v| v.as_str()).unwrap_or("wall");
             if bc_type == "fixed_temperature" || bc_type == "wall" {
-                if let Some(t) = bc.get("temperature").and_then(|v| v.as_f64()) {
+                let t = bc
+                    .get("parameters")
+                    .and_then(|p| p.get("temperature"))
+                    .and_then(|v| v.as_f64())
+                    .or_else(|| bc.get("temperature").and_then(|v| v.as_f64()));
+                if let Some(t) = t {
                     boundary_temps.insert(patch.to_string(), t);
                 }
             }
@@ -4327,21 +4666,31 @@ fn parse_fluid_bcs(
                 .and_then(|v| v.as_str())
                 .unwrap_or("wall");
 
+            // GUI sends values nested under "parameters"; older callers put them
+            // at the top level. Read parameters.{key} first, then fall back.
+            let params = bc.get("parameters");
+            let getf = |key: &str| -> Option<f64> {
+                params
+                    .and_then(|p| p.get(key))
+                    .and_then(|v| v.as_f64())
+                    .or_else(|| bc.get(key).and_then(|v| v.as_f64()))
+            };
+
             match bc_type {
                 "inlet" | "velocity_inlet" => {
-                    let vx = bc.get("vx").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let vy = bc.get("vy").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let vz = bc.get("vz").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let vx = getf("vx").unwrap_or(0.0);
+                    let vy = getf("vy").unwrap_or(0.0);
+                    let vz = getf("vz").unwrap_or(0.0);
                     boundary_velocities.insert(patch, [vx, vy, vz]);
                 }
                 "outlet" | "pressure_outlet" => {
-                    let p = bc.get("pressure").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let p = getf("pressure").unwrap_or(0.0);
                     boundary_pressure.insert(patch, p);
                 }
                 "wall" | "no_slip" => {
-                    let vx = bc.get("vx").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let vy = bc.get("vy").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let vz = bc.get("vz").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let vx = getf("vx").unwrap_or(0.0);
+                    let vy = getf("vy").unwrap_or(0.0);
+                    let vz = getf("vz").unwrap_or(0.0);
                     if vx.abs() > 1e-15 || vy.abs() > 1e-15 || vz.abs() > 1e-15 {
                         boundary_velocities.insert(patch, [vx, vy, vz]);
                     } else {
@@ -4424,8 +4773,424 @@ fn handle_solve_stop(state: &mut ServerState, id: u64, params: &Value) -> RpcRes
 }
 
 // ---------------------------------------------------------------------------
+// Pluggable physics handlers (Phase 7)
+// ---------------------------------------------------------------------------
+
+/// Parse + validate one GMN/gfd-expression string, appending any diagnostics.
+/// Returns false if the expression has a parse or validation error.
+fn validate_expr_collect(
+    expr: &str,
+    ctx: &gfd_expression::validate::ValidationContext,
+    out: &mut Vec<Value>,
+) -> bool {
+    match gfd_expression::parse(expr) {
+        Err(e) => {
+            out.push(serde_json::json!({
+                "level": "Error",
+                "message": format!("parse error in `{}`: {}", expr, e),
+                "span": Value::Null,
+            }));
+            false
+        }
+        Ok(ast) => {
+            let diags = gfd_expression::validate(&ast, ctx);
+            let mut ok = true;
+            for d in &diags {
+                if matches!(d.level, gfd_expression::validate::DiagnosticLevel::Error) {
+                    ok = false;
+                }
+                out.push(serde_json::to_value(d).unwrap_or(Value::Null));
+            }
+            ok
+        }
+    }
+}
+
+fn handle_physics_validate_expression(id: u64, params: &Value) -> RpcResponse {
+    let expr_str = match params.get("expr").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return RpcResponse::err(id, "missing expr"),
+    };
+    let ast = match gfd_expression::parse(expr_str) {
+        Ok(a) => a,
+        Err(e) => {
+            return RpcResponse::ok(id, serde_json::json!({
+                "valid": false,
+                "diagnostics": [{ "level": "Error", "message": format!("parse error: {}", e), "span": Value::Null }],
+                "latex": Value::Null,
+            }));
+        }
+    };
+    let mut ctx = gfd_expression::validate::ValidationContext::new();
+    if let Some(fields) = params.get("fields").and_then(|v| v.as_array()) {
+        for f in fields {
+            if let Some(name) = f.as_str() {
+                ctx.add_field(name);
+            }
+        }
+    }
+    let diags = gfd_expression::validate(&ast, &ctx);
+    let has_error = diags
+        .iter()
+        .any(|d| matches!(d.level, gfd_expression::validate::DiagnosticLevel::Error));
+    let latex = gfd_expression::to_latex(&ast);
+    RpcResponse::ok(id, serde_json::json!({
+        "valid": !has_error,
+        "diagnostics": diags,
+        "latex": latex,
+    }))
+}
+
+/// Evaluate a gfd-expression AST at a spatial point (x,y,z). Field refs ($..)
+/// evaluate to 0 here (no field binding in the source-term preview); spatial
+/// source terms like "100*sin(x)" or a constant body force evaluate exactly.
+fn eval_expr_at(expr: &gfd_expression::ast::Expr, x: f64, y: f64, z: f64) -> f64 {
+    use gfd_expression::ast::{BinOp, Expr, UnOp};
+    match expr {
+        Expr::Number(v) => *v,
+        Expr::Constant(name) => match name.as_str() {
+            "pi" => std::f64::consts::PI,
+            "e" => std::f64::consts::E,
+            _ => 0.0,
+        },
+        Expr::Variable(name) => match name.as_str() {
+            "x" => x,
+            "y" => y,
+            "z" => z,
+            _ => 0.0,
+        },
+        Expr::FieldRef(_) => 0.0,
+        Expr::BinaryOp { op, left, right } => {
+            let l = eval_expr_at(left, x, y, z);
+            let r = eval_expr_at(right, x, y, z);
+            match op {
+                BinOp::Add => l + r,
+                BinOp::Sub => l - r,
+                BinOp::Mul => l * r,
+                BinOp::Div => if r != 0.0 { l / r } else { 0.0 },
+                BinOp::Pow => l.powf(r),
+            }
+        }
+        Expr::UnaryOp { op, operand } => {
+            let v = eval_expr_at(operand, x, y, z);
+            match op {
+                UnOp::Neg => -v,
+                UnOp::Abs => v.abs(),
+                UnOp::Sqrt => v.max(0.0).sqrt(),
+                UnOp::Sin => v.sin(),
+                UnOp::Cos => v.cos(),
+                UnOp::Exp => v.exp(),
+                UnOp::Log => if v > 0.0 { v.ln() } else { 0.0 },
+            }
+        }
+        Expr::FunctionCall { name, args } => {
+            let a: Vec<f64> = args.iter().map(|e| eval_expr_at(e, x, y, z)).collect();
+            match (name.as_str(), a.as_slice()) {
+                ("max", [p, q]) => p.max(*q),
+                ("min", [p, q]) => p.min(*q),
+                ("pow", [p, q]) => p.powf(*q),
+                ("sqrt", [p]) => p.max(0.0).sqrt(),
+                ("abs", [p]) => p.abs(),
+                _ => 0.0,
+            }
+        }
+        Expr::Conditional { condition, true_val, false_val } => {
+            if eval_expr_at(condition, x, y, z) != 0.0 {
+                eval_expr_at(true_val, x, y, z)
+            } else {
+                eval_expr_at(false_val, x, y, z)
+            }
+        }
+        Expr::DiffOp { .. } | Expr::TensorOp { .. } => 0.0,
+    }
+}
+
+/// Build a per-cell momentum body force [N/m^3] from the manifest's expression
+/// source terms targeting MomentumX/Y/Z. Returns None if there are none.
+fn build_momentum_source(
+    manifest: &Option<Value>,
+    mesh: &UnstructuredMesh,
+) -> Option<Vec<[f64; 3]>> {
+    let eqs = manifest.as_ref()?.get("equations")?.as_array()?;
+    let n = mesh.num_cells();
+    let mut force = vec![[0.0f64; 3]; n];
+    let mut any = false;
+
+    for eq in eqs {
+        let comp = match eq.get("equationId").and_then(|v| v.as_str()) {
+            Some("MomentumX") => 0,
+            Some("MomentumY") => 1,
+            Some("MomentumZ") => 2,
+            _ => continue,
+        };
+        let Some(terms) = eq.get("terms").and_then(|v| v.as_array()) else { continue };
+        for t in terms {
+            if t.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
+                continue;
+            }
+            if t.get("role").and_then(|v| v.as_str()) != Some("source") {
+                continue;
+            }
+            let Some(im) = t.get("impl") else { continue };
+            if im.get("kind").and_then(|v| v.as_str()) != Some("expression") {
+                continue;
+            }
+            let Some(expr_str) = im.get("expr").and_then(|v| v.as_str()) else { continue };
+            let Ok(ast) = gfd_expression::parse(expr_str) else { continue };
+            any = true;
+            for i in 0..n {
+                if let Ok(c) = mesh.cell(i) {
+                    let [cx, cy, cz] = c.center;
+                    force[i][comp] += eval_expr_at(&ast, cx, cy, cz);
+                }
+            }
+        }
+    }
+
+    if any { Some(force) } else { None }
+}
+
+/// Resolve a constitutive property (e.g. "viscosity", "density") from the
+/// applied physics manifest: constant → its value; expression → evaluated at
+/// cell centroids and averaged (a representative scalar for the SIMPLE diffusion
+/// term — per-cell variable properties in the assembled system are future work).
+fn constitutive_value(manifest: &Value, mesh: &UnstructuredMesh, property: &str) -> Option<f64> {
+    let cons = manifest.get("constitutive")?.as_array()?;
+    for c in cons {
+        if c.get("property").and_then(|v| v.as_str()) != Some(property) {
+            continue;
+        }
+        let im = c.get("impl")?;
+        match im.get("kind").and_then(|v| v.as_str()) {
+            Some("constant") => return im.get("value").and_then(|v| v.as_f64()),
+            Some("expression") => {
+                let expr = im.get("expr").and_then(|v| v.as_str())?;
+                let ast = gfd_expression::parse(expr).ok()?;
+                let n = mesh.num_cells();
+                if n == 0 {
+                    return None;
+                }
+                let mut sum = 0.0;
+                for i in 0..n {
+                    if let Ok(cell) = mesh.cell(i) {
+                        let [x, y, z] = cell.center;
+                        sum += eval_expr_at(&ast, x, y, z);
+                    }
+                }
+                return Some(sum / n as f64);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn handle_physics_list_builtins(id: u64) -> RpcResponse {
+    RpcResponse::ok(id, serde_json::json!({
+        "terms": ["ddt", "div_uu", "laplacian_mu", "grad_p", "pressure_correction"],
+        "constitutive": ["constant", "sutherland_viscosity", "power_law_viscosity"],
+        "operators": ["ddt", "grad", "div", "laplacian", "curl"],
+    }))
+}
+
+fn handle_physics_apply_manifest(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let manifest = match params.get("manifest") {
+        Some(m) => m.clone(),
+        None => return RpcResponse::err(id, "missing manifest"),
+    };
+    let ctx = gfd_expression::validate::ValidationContext::new();
+    let mut diagnostics: Vec<Value> = Vec::new();
+    let mut terms_validated = 0usize;
+
+    if let Some(eqs) = manifest.get("equations").and_then(|v| v.as_array()) {
+        for eq in eqs {
+            if let Some(terms) = eq.get("terms").and_then(|v| v.as_array()) {
+                for t in terms {
+                    if let Some(expr) = t.get("impl").and_then(|i| i.get("expr")).and_then(|e| e.as_str()) {
+                        terms_validated += 1;
+                        validate_expr_collect(expr, &ctx, &mut diagnostics);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(cons) = manifest.get("constitutive").and_then(|v| v.as_array()) {
+        for c in cons {
+            if let Some(expr) = c.get("impl").and_then(|i| i.get("expr")).and_then(|e| e.as_str()) {
+                terms_validated += 1;
+                validate_expr_collect(expr, &ctx, &mut diagnostics);
+            }
+        }
+    }
+
+    let ok = diagnostics.is_empty();
+    state.physics_manifest = Some(manifest);
+    RpcResponse::ok(id, serde_json::json!({
+        "ok": ok,
+        "terms_validated": terms_validated,
+        "diagnostics": diagnostics,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Field handlers
 // ---------------------------------------------------------------------------
+
+/// Export a solved scalar field as an OpenVDB grid (via the gfd-vdb writer).
+/// Per-cell velocity glyph data for vector visualization.
+fn handle_field_vectors(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let stride = params.get("stride").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
+    let mesh = match &state.mesh {
+        Some(m) => m,
+        None => return RpcResponse::err(id, "No mesh (vectors need an FVM solve with a mesh)"),
+    };
+    let vx = match state.fields.get("vx") {
+        Some(v) => v,
+        None => return RpcResponse::err(id, "No 'vx' field; run a fluid solve first"),
+    };
+    let vy = state.fields.get("vy");
+    let vz = state.fields.get("vz");
+    let n = mesh.num_cells();
+
+    let mut origins: Vec<f64> = Vec::new();
+    let mut vectors: Vec<f64> = Vec::new();
+    let mut max_mag = 0.0f64;
+    let mut i = 0;
+    while i < n {
+        if let Ok(c) = mesh.cell(i) {
+            let vxi = vx.get(i).copied().unwrap_or(0.0);
+            let vyi = vy.and_then(|v| v.get(i).copied()).unwrap_or(0.0);
+            let vzi = vz.and_then(|v| v.get(i).copied()).unwrap_or(0.0);
+            origins.extend_from_slice(&c.center);
+            vectors.extend_from_slice(&[vxi, vyi, vzi]);
+            max_mag = max_mag.max((vxi * vxi + vyi * vyi + vzi * vzi).sqrt());
+        }
+        i += stride;
+    }
+    RpcResponse::ok(id, serde_json::json!({
+        "origins": origins, "vectors": vectors,
+        "max_magnitude": max_mag, "count": origins.len() / 3,
+    }))
+}
+
+/// Sample velocity at a point by nearest cell centroid.
+fn sample_velocity(
+    p: [f64; 3],
+    mesh: &UnstructuredMesh,
+    vx: &[f64],
+    vy: Option<&Vec<f64>>,
+    vz: Option<&Vec<f64>>,
+) -> [f64; 3] {
+    let mut best = usize::MAX;
+    let mut best_d = f64::MAX;
+    for i in 0..mesh.num_cells() {
+        if let Ok(c) = mesh.cell(i) {
+            let dx = c.center[0] - p[0];
+            let dy = c.center[1] - p[1];
+            let dz = c.center[2] - p[2];
+            let d = dx * dx + dy * dy + dz * dz;
+            if d < best_d {
+                best_d = d;
+                best = i;
+            }
+        }
+    }
+    if best == usize::MAX {
+        return [0.0, 0.0, 0.0];
+    }
+    [
+        vx.get(best).copied().unwrap_or(0.0),
+        vy.and_then(|v| v.get(best).copied()).unwrap_or(0.0),
+        vz.and_then(|v| v.get(best).copied()).unwrap_or(0.0),
+    ]
+}
+
+/// RK2 streamline integration through the solved velocity field.
+fn handle_field_streamlines(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let n_seeds = params.get("n_seeds").and_then(|v| v.as_u64()).unwrap_or(20).clamp(1, 200) as usize;
+    let max_steps = params.get("max_steps").and_then(|v| v.as_u64()).unwrap_or(200).clamp(2, 5000) as usize;
+    let mesh = match &state.mesh {
+        Some(m) => m,
+        None => return RpcResponse::err(id, "No mesh (streamlines need an FVM solve with a mesh)"),
+    };
+    let vx = match state.fields.get("vx") {
+        Some(v) => v,
+        None => return RpcResponse::err(id, "No 'vx' field; run a fluid solve first"),
+    };
+    let vy = state.fields.get("vy");
+    let vz = state.fields.get("vz");
+
+    // Domain bbox from nodes.
+    let (mut mn, mut mx) = ([f64::MAX; 3], [f64::MIN; 3]);
+    for node in &mesh.nodes {
+        for d in 0..3 {
+            mn[d] = mn[d].min(node.position[d]);
+            mx[d] = mx[d].max(node.position[d]);
+        }
+    }
+    let diag = ((mx[0] - mn[0]).powi(2) + (mx[1] - mn[1]).powi(2) + (mx[2] - mn[2]).powi(2)).sqrt();
+    let dt = params
+        .get("step_size")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(diag / (max_steps as f64) * 1.5)
+        .max(1e-9);
+
+    let zmid = 0.5 * (mn[2] + mx[2]);
+    let mut lines: Vec<Vec<f64>> = Vec::with_capacity(n_seeds);
+    for s in 0..n_seeds {
+        let t = (s as f64 + 0.5) / n_seeds as f64;
+        let mut p = [
+            mn[0] + 0.08 * (mx[0] - mn[0]),
+            mn[1] + t * (mx[1] - mn[1]),
+            zmid,
+        ];
+        let mut poly: Vec<f64> = Vec::new();
+        poly.extend_from_slice(&p);
+        for _ in 0..max_steps {
+            let v0 = sample_velocity(p, mesh, vx, vy, vz);
+            let speed = (v0[0] * v0[0] + v0[1] * v0[1] + v0[2] * v0[2]).sqrt();
+            if speed < 1e-9 {
+                break;
+            }
+            // RK2 midpoint.
+            let pm = [p[0] + 0.5 * dt * v0[0], p[1] + 0.5 * dt * v0[1], p[2] + 0.5 * dt * v0[2]];
+            let vm = sample_velocity(pm, mesh, vx, vy, vz);
+            p = [p[0] + dt * vm[0], p[1] + dt * vm[1], p[2] + dt * vm[2]];
+            if p[0] < mn[0] || p[0] > mx[0] || p[1] < mn[1] || p[1] > mx[1] {
+                break;
+            }
+            poly.extend_from_slice(&p);
+        }
+        if poly.len() >= 6 {
+            lines.push(poly);
+        }
+    }
+    RpcResponse::ok(id, serde_json::json!({ "lines": lines, "count": lines.len() }))
+}
+
+fn handle_field_export_vdb(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let field_name = params.get("field").and_then(|v| v.as_str()).unwrap_or("pressure");
+    let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing path");
+    };
+    collect_finished_job_fields(state);
+    let Some(values) = state.fields.get(field_name).cloned() else {
+        return RpcResponse::err(
+            id,
+            format!("Field '{}' not found. Available: {:?}", field_name, state.fields.keys().collect::<Vec<_>>()),
+        );
+    };
+    let voxels = values.len();
+    let mut grid = gfd_vdb::VdbGrid::with_data(field_name, values);
+    grid.set_metadata("source", "gfd");
+    grid.set_metadata("field", field_name);
+    match gfd_vdb::write_vdb(path, std::slice::from_ref(&grid)) {
+        Ok(()) => RpcResponse::ok(id, serde_json::json!({ "ok": true, "path": path, "voxels": voxels })),
+        Err(e) => RpcResponse::err(id, format!("VDB write failed: {}", e)),
+    }
+}
 
 fn handle_field_get(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
     let field_name = params

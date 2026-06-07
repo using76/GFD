@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "electron": "electron .",
-    "start": "vite build && electron ."
+    "start": "vite build && electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "keywords": [],
   "author": "",
@@ -15,14 +17,18 @@
   "type": "commonjs",
   "dependencies": {
     "@ant-design/icons": "^6.1.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.5.0",
+    "@types/ws": "^8.18.1",
     "antd": "^6.3.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "recharts": "^3.8.1",
     "rhino3dm": "^8.17.0",
     "three": "^0.183.2",
+    "three-mesh-bvh": "^0.9.10",
+    "ws": "^8.21.0",
     "zustand": "^5.0.12"
   },
   "devDependencies": {
@@ -33,6 +39,7 @@
     "electron": "^41.0.4",
     "electron-builder": "^26.8.1",
     "typescript": "^6.0.2",
-    "vite": "^8.0.3"
+    "vite": "^8.0.3",
+    "vitest": "^3.2.4"
   }
 }
