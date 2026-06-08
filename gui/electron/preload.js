@@ -1,6 +1,20 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('gfdAPI', {
+  /**
+   * Resolve the absolute filesystem path of a File (from an <input>/drop).
+   * Electron 32+ removed File.path; webUtils.getPathForFile is the replacement.
+   * @param {File} file
+   * @returns {string} absolute path ('' if unavailable)
+   */
+  getPathForFile: (file) => {
+    try {
+      return webUtils ? webUtils.getPathForFile(file) : '';
+    } catch {
+      return '';
+    }
+  },
+
   /**
    * Send a JSON-RPC request to the GFD Rust backend.
    * @param {string} method - RPC method name

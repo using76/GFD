@@ -292,9 +292,13 @@ export function ChatPanel() {
           style={{ display: 'none' }}
           onChange={(e) => {
             const f = e.target.files?.[0];
-            const path = (f as (File & { path?: string }) | undefined)?.path;
+            // Electron 32+ removed File.path → use webUtils via the preload bridge,
+            // with a fallback to the legacy property for older runtimes.
+            const path = f
+              ? (typeof window !== 'undefined' && window.gfdAPI?.getPathForFile?.(f)) || (f as File & { path?: string }).path || ''
+              : '';
             if (f && path) void importFile(path, f.name);
-            else if (f) setItems((prev) => [...prev, { kind: 'error', id: nextId(), text: 'Could not read the file path (desktop app only).' }]);
+            else if (f) setItems((prev) => [...prev, { kind: 'error', id: nextId(), text: 'Could not read the file path (run the desktop app, not a browser).' }]);
             e.target.value = '';
           }}
         />
