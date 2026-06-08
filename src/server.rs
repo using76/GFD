@@ -462,6 +462,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "gmsh.boolean"        => handle_gmsh_boolean(state, req.id, &req.params),
         "gmsh.heal"           => handle_gmsh_heal(state, req.id, &req.params),
         "gmsh.tessellate"     => handle_gmsh_tessellate(state, req.id, &req.params),
+        "gmsh.import"         => handle_gmsh_import(state, req.id, &req.params),
         "gmsh.enclosure"      => handle_gmsh_enclosure(state, req.id, &req.params),
         "gmsh.extract_fluid"  => handle_gmsh_extract_fluid(state, req.id, &req.params),
         "gmsh.mesh"           => handle_gmsh_mesh(state, req.id, &req.params),
@@ -944,6 +945,8 @@ gmsh_stub!(handle_gmsh_enclosure);
 gmsh_stub!(handle_gmsh_extract_fluid);
 #[cfg(not(feature = "gmsh"))]
 gmsh_stub!(handle_gmsh_mesh);
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_import);
 
 #[cfg(feature = "gmsh")]
 fn ensure_gmsh(state: &mut ServerState) -> Result<(), String> {
@@ -1112,6 +1115,35 @@ fn handle_gmsh_extract_fluid(state: &mut ServerState, id: u64, params: &Value) -
     for s in &solids { state.gmsh_shapes.remove(s); }
     let ids: Vec<String> = out_tags.iter().map(|&t| register_gmsh_shape(state, t)).collect();
     RpcResponse::ok(id, serde_json::json!({ "fluid_shape_ids": ids }))
+}
+
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_import(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let Some(path) = params.get("path").and_then(|v| v.as_str()).map(String::from) else {
+        return RpcResponse::err(id, "missing path");
+    };
+    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    let is_stl = kind.eq_ignore_ascii_case("stl") || path.to_lowercase().ends_with(".stl");
+    if is_stl {
+        // STL is a discrete mesh, not OCC geometry: merge it so it can be shown.
+        // (Volume-meshing raw STL needs surface classification — tracked in the backlog.)
+        let s = state.gmsh.as_ref().unwrap();
+        if let Err(e) = s.merge_file(&path) {
+            return RpcResponse::err(id, e.to_string());
+        }
+        return RpcResponse::ok(id, serde_json::json!({ "imported": "stl", "shape_ids": [] }));
+    }
+    let tags = {
+        let s = state.gmsh.as_ref().unwrap();
+        match s.import_step(&path) { Ok(t) => t, Err(e) => return RpcResponse::err(id, e.to_string()) }
+    };
+    if tags.is_empty() {
+        return RpcResponse::err(id, "no solids imported (file may contain only surfaces)");
+    }
+    let bbox = state.gmsh.as_ref().and_then(|s| s.model_bbox().ok());
+    let ids: Vec<String> = tags.iter().map(|&t| register_gmsh_shape(state, t)).collect();
+    RpcResponse::ok(id, serde_json::json!({ "imported": "step", "count": ids.len(), "shape_ids": ids, "bbox": bbox }))
 }
 
 /// Convert a Gmsh tetrahedral volume mesh (flat coords + tet indices) into a

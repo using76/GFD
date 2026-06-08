@@ -28,3 +28,6 @@ gui/dist
 
 # External snapshots (not part of this project)
 /claude-code-main/
+
+# Local CAD test assets (large binaries)
+Mesh_test/
