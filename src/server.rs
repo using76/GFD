@@ -462,6 +462,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "gmsh.boolean"        => handle_gmsh_boolean(state, req.id, &req.params),
         "gmsh.heal"           => handle_gmsh_heal(state, req.id, &req.params),
         "gmsh.tessellate"     => handle_gmsh_tessellate(state, req.id, &req.params),
+        "gmsh.import"         => handle_gmsh_import(state, req.id, &req.params),
         "gmsh.enclosure"      => handle_gmsh_enclosure(state, req.id, &req.params),
         "gmsh.extract_fluid"  => handle_gmsh_extract_fluid(state, req.id, &req.params),
         "gmsh.mesh"           => handle_gmsh_mesh(state, req.id, &req.params),
@@ -944,6 +945,8 @@ gmsh_stub!(handle_gmsh_enclosure);
 gmsh_stub!(handle_gmsh_extract_fluid);
 #[cfg(not(feature = "gmsh"))]
 gmsh_stub!(handle_gmsh_mesh);
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_import);
 
 #[cfg(feature = "gmsh")]
 fn ensure_gmsh(state: &mut ServerState) -> Result<(), String> {
@@ -1115,16 +1118,135 @@ fn handle_gmsh_extract_fluid(state: &mut ServerState, id: u64, params: &Value) -
 }
 
 #[cfg(feature = "gmsh")]
+fn handle_gmsh_import(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let Some(path) = params.get("path").and_then(|v| v.as_str()).map(String::from) else {
+        return RpcResponse::err(id, "missing path");
+    };
+    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    let is_stl = kind.eq_ignore_ascii_case("stl") || path.to_lowercase().ends_with(".stl");
+    if is_stl {
+        // STL is a discrete mesh, not OCC geometry: merge it so it can be shown.
+        // (Volume-meshing raw STL needs surface classification — tracked in the backlog.)
+        let s = state.gmsh.as_ref().unwrap();
+        if let Err(e) = s.merge_file(&path) {
+            return RpcResponse::err(id, e.to_string());
+        }
+        return RpcResponse::ok(id, serde_json::json!({ "imported": "stl", "shape_ids": [] }));
+    }
+    let tags = {
+        let s = state.gmsh.as_ref().unwrap();
+        match s.import_step(&path) { Ok(t) => t, Err(e) => return RpcResponse::err(id, e.to_string()) }
+    };
+    if tags.is_empty() {
+        return RpcResponse::err(id, "no solids imported (file may contain only surfaces)");
+    }
+    let bbox = state.gmsh.as_ref().and_then(|s| s.model_bbox().ok());
+    let ids: Vec<String> = tags.iter().map(|&t| register_gmsh_shape(state, t)).collect();
+    RpcResponse::ok(id, serde_json::json!({ "imported": "step", "count": ids.len(), "shape_ids": ids, "bbox": bbox }))
+}
+
+/// Convert a Gmsh tetrahedral volume mesh (flat coords + tet indices) into a
+/// solver-ready `UnstructuredMesh` by emitting a Gmsh v2.2 `.msh` and reusing the
+/// tested `gfd-io` reader (it derives faces, volumes, areas, normals, and a
+/// "default" boundary patch). Named inlet/outlet/wall patches come later (BC tagging).
+#[cfg(feature = "gmsh")]
+fn volume_to_unstructured(vm: &gfd_gmsh::VolumeMesh) -> Result<UnstructuredMesh, String> {
+    use std::fmt::Write as _;
+    let n = vm.coords.len() / 3;
+    let m = vm.tets.len() / 4;
+    if n == 0 || m == 0 {
+        return Err("empty volume mesh (no nodes/tets)".to_string());
+    }
+    let mut s = String::with_capacity(n * 32 + m * 28 + 128);
+    s.push_str("$MeshFormat\n2.2 0 8\n$EndMeshFormat\n");
+    let _ = write!(s, "$Nodes\n{n}\n");
+    for i in 0..n {
+        let _ = writeln!(s, "{} {} {} {}", i + 1, vm.coords[3 * i], vm.coords[3 * i + 1], vm.coords[3 * i + 2]);
+    }
+    s.push_str("$EndNodes\n");
+    let _ = write!(s, "$Elements\n{m}\n");
+    for e in 0..m {
+        // elem-type 4 = 4-node tetrahedron; 2 tags (physical, geometric); 1-based node ids.
+        let (a, b, c, d) = (vm.tets[4 * e] + 1, vm.tets[4 * e + 1] + 1, vm.tets[4 * e + 2] + 1, vm.tets[4 * e + 3] + 1);
+        let _ = writeln!(s, "{} 4 2 1 1 {a} {b} {c} {d}", e + 1);
+    }
+    s.push_str("$EndElements\n");
+    gfd_io::mesh_reader::gmsh::parse_gmsh_content(&s).map_err(|e| e.to_string())
+}
+
+/// Split the single auto-derived boundary patch into named inlet/outlet/wall
+/// patches so the solver's name-based BCs bind. Default heuristic: the axis-min
+/// outer face → "inlet", axis-max outer face → "outlet", everything else (other
+/// outer faces + wetted part surface) → "wall". `axis`: 0=x, 1=y, 2=z.
+#[cfg(feature = "gmsh")]
+fn classify_boundary_patches(mesh: &mut UnstructuredMesh, axis: usize) {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for nd in &mesh.nodes {
+        for k in 0..3 {
+            lo[k] = lo[k].min(nd.position[k]);
+            hi[k] = hi[k].max(nd.position[k]);
+        }
+    }
+    let tol = ((hi[axis] - lo[axis]).abs() * 1e-4).max(1e-6);
+    let (mut inlet, mut outlet, mut wall) = (Vec::new(), Vec::new(), Vec::new());
+    for (fid, f) in mesh.faces.iter().enumerate() {
+        if f.neighbor_cell.is_some() {
+            continue; // internal face
+        }
+        let axis_aligned = f.normal[axis].abs() > 0.9;
+        if axis_aligned && (f.center[axis] - lo[axis]).abs() < tol && f.normal[axis] < 0.0 {
+            inlet.push(fid);
+        } else if axis_aligned && (f.center[axis] - hi[axis]).abs() < tol && f.normal[axis] > 0.0 {
+            outlet.push(fid);
+        } else {
+            wall.push(fid);
+        }
+    }
+    let mut patches = Vec::new();
+    if !inlet.is_empty() {
+        patches.push(gfd_core::mesh::unstructured::BoundaryPatch::new("inlet".to_string(), inlet));
+    }
+    if !outlet.is_empty() {
+        patches.push(gfd_core::mesh::unstructured::BoundaryPatch::new("outlet".to_string(), outlet));
+    }
+    if !wall.is_empty() {
+        patches.push(gfd_core::mesh::unstructured::BoundaryPatch::new("wall".to_string(), wall));
+    }
+    if !patches.is_empty() {
+        mesh.boundary_patches = patches;
+    }
+}
+
+#[cfg(feature = "gmsh")]
 fn handle_gmsh_mesh(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
     if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
     let size = params.get("size").and_then(|v| v.as_f64()).filter(|v| *v > 0.0);
     let max = size.unwrap_or_else(|| gmsh_auto_size(state, 15.0));
-    let s = state.gmsh.as_ref().unwrap();
-    match s.volume_mesh(max) {
-        Ok(vm) => RpcResponse::ok(id, serde_json::json!({
-            "nodes": vm.node_count, "tets": vm.tet_count, "mesh_size": max
-        })),
-        Err(e) => RpcResponse::err(id, e.to_string()),
+    let vm = {
+        let s = state.gmsh.as_ref().unwrap();
+        match s.volume_mesh(max) { Ok(v) => v, Err(e) => return RpcResponse::err(id, e.to_string()) }
+    };
+    // Install the mesh so solve.start runs the physics on the fluid domain.
+    match volume_to_unstructured(&vm) {
+        Ok(mut mesh) => {
+            let axis = match params.get("flow_axis").and_then(|v| v.as_str()) {
+                Some("y") => 1,
+                Some("z") => 2,
+                _ => 0,
+            };
+            classify_boundary_patches(&mut mesh, axis);
+            let (cells, faces, nodes) = (mesh.cells.len(), mesh.faces.len(), mesh.nodes.len());
+            let patches: Vec<String> = mesh.boundary_patches.iter().map(|p| p.name.clone()).collect();
+            state.mesh = Some(mesh);
+            state.mesh_params = None;
+            RpcResponse::ok(id, serde_json::json!({
+                "nodes": nodes, "tets": vm.tet_count, "cells": cells, "faces": faces,
+                "mesh_size": max, "installed": true, "boundary_patches": patches
+            }))
+        }
+        Err(e) => RpcResponse::err(id, format!("meshed {} tets but install failed: {e}", vm.tet_count)),
     }
 }
 

@@ -68,6 +68,27 @@ const gmshPrimitive: CommandDef<JsonObject, { shape_id: string; tag: number }> =
   },
 };
 
+const gmshImport: CommandDef<JsonObject, { imported: string; shape_ids: string[]; count?: number }> = {
+  id: 'gmsh.import',
+  category: 'geometry',
+  group: 'OCC (Gmsh)',
+  title: 'Import CAD (OCC)',
+  titleKo: 'CAD 임포트 (OCC)',
+  description:
+    'Import a STEP/IGES/BREP (or STL) file BY PATH into the OCC model. Dirty CAD is auto-healed and huge-unit models are auto-normalized. Returns imported solid ids; the viewport updates. Then enclose / mesh as usual. (In the chat use the 📎 Import button to pick a file.)',
+  capability: 'mutate-scene',
+  paramsSchema: {
+    type: 'object',
+    properties: { path: { type: 'string' }, kind: { type: 'string', enum: ['step', 'stl'] } },
+    required: ['path'],
+  },
+  async run(params, ctx) {
+    const resp = await ctx.rpc.request<{ imported: string; shape_ids: string[]; count?: number }>('gmsh.import', params);
+    const ids = [...ctx.getState().gmsh.shapeIds, ...(resp.shape_ids ?? [])];
+    return { ok: true, result: resp, statePatch: await refreshScene(ctx, ids) };
+  },
+};
+
 const gmshBoolean: CommandDef<JsonObject, { shape_ids: string[] }> = {
   id: 'gmsh.boolean',
   category: 'geometry',
@@ -173,19 +194,35 @@ const gmshMesh: CommandDef<JsonObject, { nodes: number; tets: number }> = {
   title: 'Mesh (Gmsh)',
   titleKo: '메시 생성 (Gmsh)',
   description:
-    'Generate a tetrahedral volume mesh of the current model (the fluid domain) with Gmsh. Optional size = target element size (omit for auto from the bounding box). Returns node/tet counts.',
+    'Generate a tetrahedral volume mesh of the current model (the fluid domain) with Gmsh and install it for the solver. size = target element size (omit for auto). flow_axis (x/y/z, default x) names the boundary patches: axis-min face → inlet, axis-max → outlet, the rest → wall. Then calc.run solves on it.',
   capability: 'mutate-scene',
-  paramsSchema: { type: 'object', properties: { size: { type: 'number', minimum: 0 } } },
+  paramsSchema: {
+    type: 'object',
+    properties: { size: { type: 'number', minimum: 0 }, flow_axis: { type: 'string', enum: ['x', 'y', 'z'] } },
+  },
   async run(params, ctx) {
-    const resp = await ctx.rpc.request<{ nodes: number; tets: number }>('gmsh.mesh', params);
+    const resp = await ctx.rpc.request<{ nodes: number; tets: number; cells: number; faces: number; boundary_patches: string[] }>('gmsh.mesh', params);
     const patch = await refreshScene(ctx, ctx.getState().gmsh.shapeIds);
     patch.push({ op: 'replace', path: ['gmsh', 'meshStats'], value: { nodes: resp.nodes, tets: resp.tets } as unknown as JsonValue });
+    // Install in AppState.mesh too so the calc flow (solve.start) is enabled and
+    // the status bar reflects the fluid-domain mesh.
+    patch.push({
+      op: 'replace',
+      path: ['mesh'],
+      value: {
+        generated: true,
+        cellCount: resp.cells ?? resp.tets,
+        nodeCount: resp.nodes,
+        quality: { minOrthogonality: 1, maxSkewness: 0, maxAspectRatio: 1 },
+      } as unknown as JsonValue,
+    });
     return { ok: true, result: resp, statePatch: patch };
   },
 };
 
 export function registerGmshCommands(registry: CommandRegistry): void {
   registry.register(gmshPrimitive);
+  registry.register(gmshImport);
   registry.register(gmshBoolean);
   registry.register(gmshHeal);
   registry.register(gmshEnclosure);

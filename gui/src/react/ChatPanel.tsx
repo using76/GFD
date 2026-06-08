@@ -8,7 +8,7 @@
  * No ribbon, no forms — this is the "operate by talking to the AI" workbench.
  */
 
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createClaudeProvider,
   createMcpBridge,
@@ -27,7 +27,7 @@ type ProviderId = 'claude' | 'ollama' | 'mock';
 type ChatItem =
   | { kind: 'user'; id: number; text: string }
   | { kind: 'assistant'; id: number; text: string }
-  | { kind: 'action'; id: number; callId: string; name: string; input: string; status: 'running' | 'ok' | 'fail'; detail?: string }
+  | { kind: 'action'; id: number; callId: string; name: string; input: string; status: 'running' | 'ok' | 'fail'; detail?: string; startedAt?: number }
   | { kind: 'error'; id: number; text: string };
 
 const SYSTEM_PROMPT = `You are the GFD workbench assistant. GFD is a multiphysics CFD/thermal/solid
@@ -95,6 +95,25 @@ const SUGGESTIONS = [
   'List everything currently in the scene',
 ];
 
+function readStore(key: string, fallback: string): string {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return window.localStorage.getItem(key) ?? fallback;
+    }
+  } catch {
+    // ignore
+  }
+  return fallback;
+}
+
+function writeStore(key: string, value: string): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) window.localStorage.setItem(key, value);
+  } catch {
+    // ignore quota / availability
+  }
+}
+
 function summarize(value: unknown): string {
   let s: string;
   try {
@@ -109,8 +128,19 @@ export function ChatPanel() {
   const core = useCore();
   const bridge = useMemo(() => createMcpBridge(core), [core]);
 
-  const [providerId, setProviderId] = useState<ProviderId>('claude');
-  const [apiKey, setApiKey] = useState('');
+  // Persist provider + API key across restarts so the live loop is usable.
+  // (localStorage is plaintext — fine for a local desktop tool; Electron
+  // safeStorage would be the hardened option.)
+  const [providerId, setProviderIdState] = useState<ProviderId>(() => readStore('gfd.llm.provider', 'claude') as ProviderId);
+  const [apiKey, setApiKeyState] = useState(() => readStore('gfd.llm.claudeKey', ''));
+  const setProviderId = useCallback((p: ProviderId) => {
+    setProviderIdState(p);
+    writeStore('gfd.llm.provider', p);
+  }, []);
+  const setApiKey = useCallback((k: string) => {
+    setApiKeyState(k);
+    writeStore('gfd.llm.claudeKey', k);
+  }, []);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -154,7 +184,7 @@ export function ChatPanel() {
           return [...prev, { kind: 'assistant', id: nextId(), text: e.text }];
         }
         if (e.type === 'tool_call') {
-          return [...prev, { kind: 'action', id: nextId(), callId: e.id, name: e.name, input: summarize(e.input), status: 'running' }];
+          return [...prev, { kind: 'action', id: nextId(), callId: e.id, name: e.name, input: summarize(e.input), status: 'running', startedAt: performance.now() }];
         }
         if (e.type === 'tool_result') {
           return prev.map((it) =>
@@ -199,6 +229,37 @@ export function ChatPanel() {
     [core]
   );
 
+  // Upload a CAD file (STEP/IGES/BREP/STL) straight from the chat → OCC import →
+  // the viewport updates. Shows a running action chip with elapsed time.
+  const fileRef = useRef<HTMLInputElement>(null);
+  const importFile = useCallback(
+    async (path: string, label: string) => {
+      const aid = nextId();
+      const callId = `import-${aid}`;
+      setItems((prev) => [...prev, { kind: 'action', id: aid, callId, name: 'gmsh.import', input: label, status: 'running', startedAt: performance.now() }]);
+      const finish = (status: 'ok' | 'fail', detail: string) =>
+        setItems((prev) => prev.map((it) => (it.kind === 'action' && it.callId === callId ? { ...it, status, detail } : it)));
+      try {
+        const outcome = await core.dispatcher.dispatch({ commandId: 'gmsh.import', params: { path }, source: 'human' });
+        if (outcome.ok) finish('ok', summarize(outcome.result));
+        else finish('fail', outcome.error?.message ?? 'import failed');
+      } catch (err) {
+        finish('fail', err instanceof Error ? err.message : String(err));
+      }
+    },
+    [core]
+  );
+
+  // Re-render every 0.5s while something is running so elapsed-time tickers update.
+  const hasRunning = items.some((it) => it.kind === 'action' && it.status === 'running');
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!hasRunning && !busy) return;
+    const h = setInterval(() => setTick((t) => t + 1), 500);
+    return () => clearInterval(h);
+  }, [hasRunning, busy]);
+  const now = performance.now();
+
   return (
     <div style={S.panel}>
       <div style={S.header}>
@@ -222,6 +283,21 @@ export function ChatPanel() {
         <span style={{ width: 1, alignSelf: 'stretch', background: '#2a2a2a', margin: '0 2px' }} />
         <button onClick={() => runControl('view.reset')} style={S.ctlBtn} title="Reset camera / render / viz to saved defaults">⤺ Reset view</button>
         <button onClick={() => runControl('view.save_defaults')} style={S.ctlBtn} title="Save the current view as the defaults">★ Save defaults</button>
+        <div style={{ flex: 1 }} />
+        <button onClick={() => fileRef.current?.click()} style={S.ctlBtn} title="Import a CAD file (STEP/IGES/BREP/STL)">📎 Import CAD</button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".step,.stp,.iges,.igs,.brep,.stl"
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            const path = (f as (File & { path?: string }) | undefined)?.path;
+            if (f && path) void importFile(path, f.name);
+            else if (f) setItems((prev) => [...prev, { kind: 'error', id: nextId(), text: 'Could not read the file path (desktop app only).' }]);
+            e.target.value = '';
+          }}
+        />
       </div>
 
       {providerId === 'claude' && (
@@ -244,7 +320,7 @@ export function ChatPanel() {
           </div>
         )}
         {items.map((it) => (
-          <ChatRow key={it.id} item={it} />
+          <ChatRow key={it.id} item={it} now={now} />
         ))}
       </div>
 
@@ -273,7 +349,7 @@ export function ChatPanel() {
   );
 }
 
-function ChatRow({ item }: { item: ChatItem }) {
+function ChatRow({ item, now }: { item: ChatItem; now: number }) {
   if (item.kind === 'user') {
     return <div style={{ ...S.bubble, ...S.user }}>{item.text}</div>;
   }
@@ -285,12 +361,16 @@ function ChatRow({ item }: { item: ChatItem }) {
   }
   const color = item.status === 'ok' ? '#3fb950' : item.status === 'fail' ? '#f85149' : '#d29922';
   const icon = item.status === 'ok' ? '✓' : item.status === 'fail' ? '✗' : '⋯';
+  const elapsed = item.status === 'running' && typeof item.startedAt === 'number'
+    ? ` ${((now - item.startedAt) / 1000).toFixed(1)}s`
+    : '';
   return (
     <div style={S.action}>
       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
         <span style={{ color }}>{icon}</span>
         <code style={{ color: '#9cdcfe', fontSize: 11 }}>{item.name}</code>
         <span style={{ color: '#666', fontSize: 11 }}>{item.input}</span>
+        {elapsed && <span style={{ color: '#d29922', fontSize: 11, marginLeft: 'auto' }}>{elapsed}</span>}
       </div>
       {item.detail && <div style={{ color: '#888', fontSize: 11, marginLeft: 18, marginTop: 2 }}>{item.detail}</div>}
     </div>

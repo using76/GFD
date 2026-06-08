@@ -87,6 +87,10 @@ mod backend {
         fn gmshModelOccFuse(obj: *const c_int, obj_n: usize, tool: *const c_int, tool_n: usize, out: *mut *mut c_int, out_n: *mut usize, out_map: *mut *mut *mut c_int, out_map_n: *mut *mut usize, out_map_nn: *mut usize, tag: c_int, remove_object: c_int, remove_tool: c_int, ierr: *mut c_int);
         #[allow(clippy::too_many_arguments)]
         fn gmshModelOccHealShapes(out: *mut *mut c_int, out_n: *mut usize, dim_tags: *const c_int, dim_tags_n: usize, tolerance: c_double, fix_degenerated: c_int, fix_small_edges: c_int, fix_small_faces: c_int, sew_faces: c_int, make_solids: c_int, ierr: *mut c_int);
+        fn gmshModelOccImportShapes(file_name: *const c_char, out_dim_tags: *mut *mut c_int, out_dim_tags_n: *mut usize, highest_dim_only: c_int, format: *const c_char, ierr: *mut c_int);
+        fn gmshModelOccRemoveAllDuplicates(ierr: *mut c_int);
+        fn gmshModelOccDilate(dim_tags: *const c_int, dim_tags_n: usize, x: c_double, y: c_double, z: c_double, a: c_double, b: c_double, c: c_double, ierr: *mut c_int);
+        fn gmshMerge(file_name: *const c_char, ierr: *mut c_int);
         fn gmshModelOccSynchronize(ierr: *mut c_int);
         fn gmshModelMeshGenerate(dim: c_int, ierr: *mut c_int);
         #[allow(clippy::too_many_arguments)]
@@ -193,7 +197,25 @@ mod backend {
                 gmshInitialize(0, ptr::null_mut(), 0, 0, &mut ierr);
             }
             check(ierr, "initialize")?;
-            unsafe { set_option("General.Terminal", 0.0) }; // silence console
+            // Silence Gmsh's stdout chatter (it would corrupt the JSON-RPC channel);
+            // set GMSH_VERBOSE to surface its messages when debugging.
+            let verbose = std::env::var_os("GMSH_VERBOSE").is_some();
+            unsafe {
+                set_option("General.Terminal", if verbose { 1.0 } else { 0.0 });
+                // Auto-heal imported CAD (dirty STEP/IGES is the norm) at import time.
+                set_option("Geometry.OCCFixDegenerated", 1.0);
+                set_option("Geometry.OCCFixSmallEdges", 1.0);
+                set_option("Geometry.OCCFixSmallFaces", 1.0);
+                set_option("Geometry.OCCSewFaces", 1.0);
+                set_option("Geometry.OCCMakeSolids", 1.0);
+                // Perturb to avoid "identical points in triangulation" on dense CAD.
+                set_option("Mesh.RandomFactor", 1.0e-6);
+                // Robust/faster defaults for imported CAD: Delaunay 2D, no
+                // curvature-driven refinement (keeps element counts sane).
+                set_option("Mesh.Algorithm", 5.0);
+                set_option("Mesh.MeshSizeFromCurvature", 0.0);
+                set_option("Mesh.MeshSizeExtendFromBoundary", 0.0);
+            }
             Ok(Self { _guard: guard })
         }
 
@@ -231,6 +253,52 @@ mod backend {
             let t = unsafe { gmshModelOccAddCone(x, y, z, dx, dy, dz, r1, r2, -1, TAU, &mut e) };
             check(e, "occ.addCone")?;
             Ok(t)
+        }
+
+        /// Import a STEP/IGES/BREP file via the OCC kernel. Returns imported solid
+        /// tags (highest-dim only). Synchronizes the model.
+        pub fn import_step(&self, path: &str) -> Result<Vec<i32>, GmshError> {
+            let c = CString::new(path).map_err(|_| GmshError::Failed("path has interior NUL".into()))?;
+            let fmt = CString::new("").unwrap(); // infer from extension (.stp/.step/.iges/.brep)
+            let mut out: *mut c_int = ptr::null_mut();
+            let mut out_n: usize = 0;
+            let mut e = 0;
+            unsafe {
+                gmshModelOccImportShapes(c.as_ptr(), &mut out, &mut out_n, 1, fmt.as_ptr(), &mut e);
+            }
+            check(e, "occ.importShapes")?;
+            let flat = unsafe { take_int(out, out_n) };
+            // Remove coincident points/edges/faces that dense imported CAD carries.
+            let mut e2 = 0;
+            unsafe { gmshModelOccRemoveAllDuplicates(&mut e2) };
+            self.synchronize()?;
+            let tags: Vec<i32> = flat.chunks_exact(2).filter(|p| p[0] == 3).map(|p| p[1]).collect();
+            // Auto-normalize huge-unit CAD: at coordinate scales ~1e6 the 2D mesher's
+            // tolerances break (it stalls on simple surfaces). Scale about the bbox
+            // center so the diagonal is ~1e3, keeping the geometry well-conditioned.
+            if let Ok(bb) = self.model_bbox() {
+                let diag = ((bb[3] - bb[0]).powi(2) + (bb[4] - bb[1]).powi(2) + (bb[5] - bb[2]).powi(2)).sqrt();
+                if diag > 1.0e4 && !tags.is_empty() {
+                    let scale = 1.0e3 / diag;
+                    let center = [(bb[0] + bb[3]) * 0.5, (bb[1] + bb[4]) * 0.5, (bb[2] + bb[5]) * 0.5];
+                    let dt: Vec<c_int> = tags.iter().flat_map(|&t| [3, t]).collect();
+                    let mut e3 = 0;
+                    unsafe {
+                        gmshModelOccDilate(dt.as_ptr(), dt.len(), center[0], center[1], center[2], scale, scale, scale, &mut e3);
+                    }
+                    check(e3, "occ.dilate (auto-normalize)")?;
+                    self.synchronize()?;
+                }
+            }
+            Ok(tags)
+        }
+
+        /// Merge a mesh-like file (e.g. STL) as discrete entities into the model.
+        pub fn merge_file(&self, path: &str) -> Result<(), GmshError> {
+            let c = CString::new(path).map_err(|_| GmshError::Failed("path has interior NUL".into()))?;
+            let mut e = 0;
+            unsafe { gmshMerge(c.as_ptr(), &mut e) };
+            check(e, "merge")
         }
 
         /// Boolean cut: `objects − tools`. Returns the resulting solid tags.
