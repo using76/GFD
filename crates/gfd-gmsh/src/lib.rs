@@ -92,6 +92,13 @@ mod backend {
         fn gmshModelOccDilate(dim_tags: *const c_int, dim_tags_n: usize, x: c_double, y: c_double, z: c_double, a: c_double, b: c_double, c: c_double, ierr: *mut c_int);
         fn gmshMerge(file_name: *const c_char, ierr: *mut c_int);
         fn gmshModelOccSynchronize(ierr: *mut c_int);
+        fn gmshModelGetEntities(dim_tags: *mut *mut c_int, dim_tags_n: *mut usize, dim: c_int, ierr: *mut c_int);
+        fn gmshModelMeshFieldAdd(field_type: *const c_char, tag: c_int, ierr: *mut c_int) -> c_int;
+        fn gmshModelMeshFieldSetNumber(tag: c_int, option: *const c_char, value: c_double, ierr: *mut c_int);
+        fn gmshModelMeshFieldSetNumbers(tag: c_int, option: *const c_char, values: *const c_double, values_n: usize, ierr: *mut c_int);
+        fn gmshModelMeshFieldSetAsBoundaryLayer(tag: c_int, ierr: *mut c_int);
+        fn gmshModelMeshFieldRemove(tag: c_int, ierr: *mut c_int);
+        fn gmshModelMeshClear(dim_tags: *const c_int, dim_tags_n: usize, ierr: *mut c_int);
         fn gmshModelMeshGenerate(dim: c_int, ierr: *mut c_int);
         #[allow(clippy::too_many_arguments)]
         fn gmshModelMeshGetNodes(node_tags: *mut *mut usize, node_tags_n: *mut usize, coord: *mut *mut c_double, coord_n: *mut usize, parametric_coord: *mut *mut c_double, parametric_coord_n: *mut usize, dim: c_int, tag: c_int, include_boundary: c_int, return_parametric: c_int, ierr: *mut c_int);
@@ -173,6 +180,17 @@ mod backend {
         pub triangle_count: usize,
     }
 
+    /// Inflation/boundary-layer spec for [`GmshSession::volume_mesh`].
+    #[derive(Clone, Copy, Debug)]
+    pub struct BoundaryLayer {
+        /// First layer thickness normal to the wall.
+        pub first_height: f64,
+        /// Geometric growth ratio between successive layers.
+        pub ratio: f64,
+        /// Total boundary-layer thickness.
+        pub thickness: f64,
+    }
+
     /// A tetrahedral volume mesh for the solver.
     #[derive(Debug, Clone)]
     pub struct VolumeMesh {
@@ -180,6 +198,9 @@ mod backend {
         pub tets: Vec<u32>,
         pub node_count: usize,
         pub tet_count: usize,
+        /// Whether a boundary layer was actually generated (false if it was
+        /// requested but Gmsh could not build it and we fell back to plain tets).
+        pub bl_applied: bool,
     }
 
     /// An exclusive Gmsh session. Holds a process-global lock + initialized Gmsh
@@ -394,15 +415,80 @@ mod backend {
             Ok(TriMesh { positions: coords, indices: conn, triangle_count })
         }
 
-        /// Tetrahedral volume mesh for the solver (meshes 3D at `max_size`).
-        pub fn volume_mesh(&self, max_size: f64) -> Result<VolumeMesh, GmshError> {
+        /// Tetrahedral volume mesh for the solver (meshes 3D at `max_size`). With
+        /// `bl`, attempts a boundary layer; if Gmsh can't build it for this volume
+        /// (3D boundary layers are limited), it removes the field and falls back to
+        /// a plain tet mesh so the caller always gets a usable mesh.
+        pub fn volume_mesh(&self, max_size: f64, bl: Option<BoundaryLayer>) -> Result<VolumeMesh, GmshError> {
             self.synchronize()?;
             unsafe { set_option("Mesh.MeshSizeMax", max_size) };
-            self.generate(3)?;
+            let mut bl_applied = false;
+            let mut field_tag: Option<i32> = None;
+            if let Some(b) = bl {
+                if let Ok(ft) = self.apply_boundary_layer(b) {
+                    field_tag = Some(ft);
+                    bl_applied = true;
+                }
+            }
+            if self.generate(3).is_err() {
+                // Boundary layer (or its interaction) broke 3D meshing — drop it and retry.
+                if let Some(ft) = field_tag {
+                    let mut e = 0;
+                    unsafe { gmshModelMeshFieldRemove(ft, &mut e) };
+                }
+                let mut e = 0;
+                unsafe { gmshModelMeshClear(ptr::null(), 0, &mut e) };
+                bl_applied = false;
+                self.generate(3)?;
+            }
             let (coords, conn) = self.build_mesh(ELEM_TET)?;
             let node_count = coords.len() / 3;
             let tet_count = conn.len() / 4;
-            Ok(VolumeMesh { coords, tets: conn, node_count, tet_count })
+            Ok(VolumeMesh { coords, tets: conn, node_count, tet_count, bl_applied })
+        }
+
+        /// Entity tags of a given dimension in the synchronized model.
+        fn entities_of_dim(&self, dim: c_int) -> Result<Vec<i32>, GmshError> {
+            let mut dt: *mut c_int = ptr::null_mut();
+            let mut n: usize = 0;
+            let mut e = 0;
+            unsafe { gmshModelGetEntities(&mut dt, &mut n, dim, &mut e) };
+            check(e, "model.getEntities")?;
+            let flat = unsafe { take_int(dt, n) };
+            Ok(flat.chunks_exact(2).filter(|c| c[0] == dim).map(|c| c[1]).collect())
+        }
+
+        /// Configure a Gmsh BoundaryLayer field grown from the model's boundary
+        /// curves and return its field tag. (Gmsh's boundary-layer field is
+        /// curve-driven; full 3D surface-grown prism layers are limited.)
+        fn apply_boundary_layer(&self, bl: BoundaryLayer) -> Result<i32, GmshError> {
+            let curves = self.entities_of_dim(1)?;
+            if curves.is_empty() {
+                return Err(GmshError::Failed("no boundary curves for boundary layer".into()));
+            }
+            let mut e = 0;
+            let ft = CString::new("BoundaryLayer").unwrap();
+            let field = unsafe { gmshModelMeshFieldAdd(ft.as_ptr(), -1, &mut e) };
+            check(e, "field.add(BoundaryLayer)")?;
+            let set_num = |opt: &str, v: f64| -> Result<(), GmshError> {
+                let mut e = 0;
+                let o = CString::new(opt).unwrap();
+                unsafe { gmshModelMeshFieldSetNumber(field, o.as_ptr(), v, &mut e) };
+                check(e, opt)
+            };
+            set_num("Size", bl.first_height)?;
+            set_num("Ratio", bl.ratio)?;
+            set_num("Thickness", bl.thickness)?;
+            set_num("Quads", 0.0)?;
+            let vals: Vec<c_double> = curves.iter().map(|&t| t as c_double).collect();
+            let o = CString::new("CurvesList").unwrap();
+            let mut e2 = 0;
+            unsafe { gmshModelMeshFieldSetNumbers(field, o.as_ptr(), vals.as_ptr(), vals.len(), &mut e2) };
+            check(e2, "field.CurvesList")?;
+            let mut e3 = 0;
+            unsafe { gmshModelMeshFieldSetAsBoundaryLayer(field, &mut e3) };
+            check(e3, "field.setAsBoundaryLayer")?;
+            Ok(field)
         }
 
         fn generate(&self, dim: c_int) -> Result<(), GmshError> {
@@ -473,14 +559,14 @@ mod backend {
     pub fn mesh_box(dx: f64, dy: f64, dz: f64, mesh_size: f64) -> Result<MeshStats, GmshError> {
         let s = GmshSession::new()?;
         s.add_box(0.0, 0.0, 0.0, dx, dy, dz)?;
-        let vm = s.volume_mesh(mesh_size)?;
+        let vm = s.volume_mesh(mesh_size, None)?;
         Ok(MeshStats { nodes: vm.node_count, coord_len: vm.coords.len() })
     }
 }
 
 pub use backend::mesh_box;
 #[cfg(feature = "gmsh")]
-pub use backend::{GmshSession, HealOptions, TriMesh, VolumeMesh};
+pub use backend::{BoundaryLayer, GmshSession, HealOptions, TriMesh, VolumeMesh};
 
 #[cfg(test)]
 mod tests {
@@ -515,7 +601,7 @@ mod tests {
         assert!(!fluid.is_empty(), "cut should yield a fluid solid");
         let healed = s.heal(&fluid, HealOptions::default()).expect("heal");
         assert!(!healed.is_empty(), "heal should keep the fluid solid");
-        let vm = s.volume_mesh(0.5).expect("volume mesh");
+        let vm = s.volume_mesh(0.5, None).expect("volume mesh");
         assert!(vm.tet_count > 0 && vm.node_count > 0, "fluid mesh: {} nodes {} tets", vm.node_count, vm.tet_count);
     }
 

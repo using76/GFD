@@ -194,11 +194,17 @@ const gmshMesh: CommandDef<JsonObject, { nodes: number; tets: number }> = {
   title: 'Mesh (Gmsh)',
   titleKo: '메시 생성 (Gmsh)',
   description:
-    'Generate a tetrahedral volume mesh of the current model (the fluid domain) with Gmsh and install it for the solver. size = target element size (omit for auto). flow_axis (x/y/z, default x) names the boundary patches: axis-min face → inlet, axis-max → outlet, the rest → wall. Then calc.run solves on it.',
+    'Generate a tetrahedral volume mesh of the current model (the fluid domain) with Gmsh and install it for the solver. size = target element size (omit for auto). flow_axis (x/y/z, default x) names the boundary patches (axis-min→inlet, axis-max→outlet, rest→wall). For a near-wall boundary layer, set bl_first (first layer height); bl_ratio (growth, default 1.2) and bl_thickness (total, default 8×first) tune it. Then calc.run solves on it.',
   capability: 'mutate-scene',
   paramsSchema: {
     type: 'object',
-    properties: { size: { type: 'number', minimum: 0 }, flow_axis: { type: 'string', enum: ['x', 'y', 'z'] } },
+    properties: {
+      size: { type: 'number', minimum: 0 },
+      flow_axis: { type: 'string', enum: ['x', 'y', 'z'] },
+      bl_first: { type: 'number', minimum: 0 },
+      bl_ratio: { type: 'number', minimum: 1 },
+      bl_thickness: { type: 'number', minimum: 0 },
+    },
   },
   async run(params, ctx) {
     const resp = await ctx.rpc.request<{ nodes: number; tets: number; cells: number; faces: number; boundary_patches: string[] }>('gmsh.mesh', params);

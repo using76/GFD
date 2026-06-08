@@ -1224,9 +1224,15 @@ fn handle_gmsh_mesh(state: &mut ServerState, id: u64, params: &Value) -> RpcResp
     if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
     let size = params.get("size").and_then(|v| v.as_f64()).filter(|v| *v > 0.0);
     let max = size.unwrap_or_else(|| gmsh_auto_size(state, 15.0));
+    // Optional boundary layer: pass bl_first (first layer height) to enable.
+    let bl = params.get("bl_first").and_then(|v| v.as_f64()).map(|first| gfd_gmsh::BoundaryLayer {
+        first_height: first,
+        ratio: params.get("bl_ratio").and_then(|v| v.as_f64()).unwrap_or(1.2),
+        thickness: params.get("bl_thickness").and_then(|v| v.as_f64()).unwrap_or(first * 8.0),
+    });
     let vm = {
         let s = state.gmsh.as_ref().unwrap();
-        match s.volume_mesh(max) { Ok(v) => v, Err(e) => return RpcResponse::err(id, e.to_string()) }
+        match s.volume_mesh(max, bl) { Ok(v) => v, Err(e) => return RpcResponse::err(id, e.to_string()) }
     };
     // Install the mesh so solve.start runs the physics on the fluid domain.
     match volume_to_unstructured(&vm) {
@@ -1243,7 +1249,8 @@ fn handle_gmsh_mesh(state: &mut ServerState, id: u64, params: &Value) -> RpcResp
             state.mesh_params = None;
             RpcResponse::ok(id, serde_json::json!({
                 "nodes": nodes, "tets": vm.tet_count, "cells": cells, "faces": faces,
-                "mesh_size": max, "installed": true, "boundary_patches": patches
+                "mesh_size": max, "installed": true, "boundary_patches": patches,
+                "boundary_layer": if bl.is_some() { if vm.bl_applied { "applied" } else { "requested but not generated (Gmsh 3D BL limitation) — meshed without it" } } else { "none" }
             }))
         }
         Err(e) => RpcResponse::err(id, format!("meshed {} tets but install failed: {e}", vm.tet_count)),
