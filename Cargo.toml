@@ -30,6 +30,8 @@ members = [
     "crates/gfd-cad-measure",
     "crates/gfd-cad-tessel",
     "crates/gfd-cad",
+    "crates/gfd-occt",
+    "crates/gfd-gmsh",
 ]
 
 [package]
@@ -54,6 +56,11 @@ path = "src/server.rs"
 default = []
 gpu = ["gfd-gpu/cuda"]
 gpu-amgx = ["gpu", "gfd-gpu/amgx"]
+# Professional CAD/mesh backends (C++ FFI; off by default so CI/dev without a
+# C++ toolchain still builds — the server falls back to gfd-cad/gfd-mesh).
+occt = ["dep:gfd-occt", "gfd-occt/occt"]
+gmsh = ["dep:gfd-gmsh", "gfd-gmsh/gmsh"]
+cad-pro = ["occt", "gmsh"]
 
 # ---------------------------------------------------------------------------
 # Shared dependency versions (consumed via `dep.workspace = true` in crates)
@@ -96,6 +103,8 @@ gfd-postprocess = { path = "crates/gfd-postprocess" }
 gfd-mesh        = { path = "crates/gfd-mesh" }
 gfd-cad         = { path = "crates/gfd-cad" }
 gfd-gpu         = { path = "crates/gfd-gpu", optional = true }
+gfd-occt        = { path = "crates/gfd-occt", optional = true }
+gfd-gmsh        = { path = "crates/gfd-gmsh", optional = true }
 
 # External (from workspace)
 clap              = { workspace = true }

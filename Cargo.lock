@@ -193,12 +193,14 @@ dependencies = [
  "gfd-discretize",
  "gfd-expression",
  "gfd-fluid",
+ "gfd-gmsh",
  "gfd-gpu",
  "gfd-io",
  "gfd-linalg",
  "gfd-material",
  "gfd-matrix",
  "gfd-mesh",
+ "gfd-occt",
  "gfd-parallel",
  "gfd-postprocess",
  "gfd-solid",
@@ -398,6 +400,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gfd-gmsh"
+version = "0.1.0"
+dependencies = [
+ "gfd-core",
+ "thiserror",
+]
+
+[[package]]
 name = "gfd-gpu"
 version = "0.1.0"
 dependencies = [
@@ -454,6 +464,14 @@ version = "0.1.0"
 dependencies = [
  "gfd-core",
  "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "gfd-occt"
+version = "0.1.0"
+dependencies = [
+ "gfd-core",
  "thiserror",
 ]
 

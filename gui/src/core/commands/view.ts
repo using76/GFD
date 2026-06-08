@@ -66,6 +66,52 @@ export const setCamera: CommandDef<SetCameraParams, CameraState> = {
   },
 };
 
+const cloneJson = (v: unknown): JsonValue => JSON.parse(JSON.stringify(v)) as JsonValue;
+
+/** Reset camera + render mode + section plane + results-viz to the saved defaults. Undoable. */
+export const resetView: CommandDef<Record<string, never>, null> = {
+  id: 'view.reset',
+  category: 'view',
+  group: 'Camera',
+  title: 'Reset View',
+  titleKo: '뷰 리셋',
+  description:
+    'Reset the camera, render mode, section plane, and results visualization to the saved defaults. Undoable.',
+  capability: 'view-only',
+  undoable: true,
+  paramsSchema: { type: 'object', properties: {} },
+  async run(_params, ctx) {
+    const d = ctx.getState().viewDefaults;
+    const patch: PatchOp[] = [
+      { op: 'replace', path: ['camera'], value: cloneJson(d.camera) },
+      { op: 'replace', path: ['display'], value: cloneJson(d.display) },
+      { op: 'replace', path: ['viz'], value: cloneJson(d.viz) },
+    ];
+    return { ok: true, result: null, statePatch: patch };
+  },
+};
+
+/** Snapshot the current camera/display/viz as the defaults that Reset restores. */
+export const saveViewDefaults: CommandDef<Record<string, never>, null> = {
+  id: 'view.save_defaults',
+  category: 'view',
+  group: 'Camera',
+  title: 'Save View Defaults',
+  titleKo: '뷰 기본값 저장',
+  description:
+    'Save the current camera, render mode, section plane, and results-viz settings as the defaults that Reset restores (persisted across sessions).',
+  capability: 'view-only',
+  undoable: false,
+  paramsSchema: { type: 'object', properties: {} },
+  async run(_params, ctx) {
+    const s = ctx.getState();
+    const value = cloneJson({ camera: s.camera, display: s.display, viz: s.viz });
+    return { ok: true, result: null, statePatch: [{ op: 'replace', path: ['viewDefaults'], value }] };
+  },
+};
+
 export function registerViewCommands(registry: CommandRegistry): void {
   registry.register(setCamera);
+  registry.register(resetView);
+  registry.register(saveViewDefaults);
 }

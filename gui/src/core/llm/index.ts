@@ -1,6 +1,7 @@
 export * from './provider';
 export * from './claude';
 export * from './ollama';
+export * from './agent';
 
 import { LlmProviderRegistry } from './provider';
 import { createClaudeProvider } from './claude';

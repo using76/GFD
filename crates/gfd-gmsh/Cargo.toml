@@ -1,0 +1,16 @@
+[package]
+name = "gfd-gmsh"
+version = "0.1.0"
+edition = "2021"
+description = "Gmsh C++ FFI backend for GFD — CAD-aware meshing (size fields, boundary layers, 2D/3D) exporting to gfd-core UnstructuredMesh. Feature-gated; without `gmsh` it compiles as a stub that returns NotBuilt."
+
+[features]
+default = []
+# When enabled, build.rs links the Gmsh SDK (libgmsh via GMSH_LIB_DIR) and the
+# FFI bridge is compiled. Added in the Gmsh integration phase; until then this
+# only flips `is_available()`.
+gmsh = []
+
+[dependencies]
+gfd-core = { path = "../gfd-core" }
+thiserror = { workspace = true }

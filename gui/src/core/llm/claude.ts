@@ -45,6 +45,9 @@ export function createClaudeProvider(opts: ClaudeOptions): LlmProvider {
           'content-type': 'application/json',
           'x-api-key': opts.apiKey,
           'anthropic-version': '2023-06-01',
+          // Allow calling the Messages API directly from the Electron renderer
+          // (browser-origin request) without a CORS preflight failure.
+          'anthropic-dangerous-direct-browser-access': 'true',
         },
         body: JSON.stringify(body),
       });

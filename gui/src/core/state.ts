@@ -117,6 +117,29 @@ export interface VizState {
   streamlineSteps: number;
 }
 
+/**
+ * Saved "pipeline" defaults — the camera + display + viz settings that
+ * `view.reset` restores and `view.save_defaults` overwrites. Persisted to the
+ * renderer's localStorage (see AssistantShell) so the view comes back next run.
+ */
+export interface ViewDefaults {
+  camera: CameraState;
+  display: DisplayState;
+  viz: VizState;
+}
+
+/**
+ * Whole-model triangulation from the Gmsh (OCC) backend, rendered as one mesh
+ * (Gmsh meshes the whole model, not per shape). Updated after each `gmsh.*` op.
+ */
+export interface GmshScene {
+  mesh: { positions: number[]; indices: number[]; triangleCount: number } | null;
+  /** Live Gmsh OCC solid ids ("shape_N") so the AI can reference them. */
+  shapeIds: string[];
+  /** Last volume-mesh stats, if meshed. */
+  meshStats: { nodes: number; tets: number } | null;
+}
+
 /** A CFD-prep named face/shape group, used to map geometry to boundary patches. */
 export interface NamedSelection {
   name: string;
@@ -150,22 +173,37 @@ export interface AppState {
   prepare: PrepareState;
   display: DisplayState;
   viz: VizState;
+  /** User-saved camera/display/viz defaults that `view.reset` restores. */
+  viewDefaults: ViewDefaults;
+  /** Gmsh (OCC) backend scene — pro CAD/enclosure/mesh, driven by `gmsh.*`. */
+  gmsh: GmshScene;
   solver: SolverStatus;
   results: ResultsSummary | null;
   ui: UiState;
 }
 
 export function createInitialState(): AppState {
+  const camera: CameraState = {
+    position: [5, 5, 5],
+    target: [0, 0, 0],
+    up: [0, 1, 0],
+    fov: 50,
+    projection: 'perspective',
+  };
+  const display: DisplayState = { renderMode: 'shaded', sectionPlane: { enabled: false, axis: 'x', offset: 0 } };
+  const viz: VizState = {
+    showContour: true,
+    showVectors: false,
+    vectorScale: 1,
+    vectorStride: 4,
+    showStreamlines: false,
+    streamlineSeeds: 20,
+    streamlineSteps: 200,
+  };
   return {
     doc: { id: 'doc_1', revision: 0, geometry: { roots: [], nodes: {} }, sketchIds: [] },
     selection: { entityType: null, ids: [] },
-    camera: {
-      position: [5, 5, 5],
-      target: [0, 0, 0],
-      up: [0, 1, 0],
-      fov: 50,
-      projection: 'perspective',
-    },
+    camera,
     mesh: null,
     physics: {
       models: { flow: 'incompressible', turbulence: 'none', energy: false, multiphase: 'none', radiation: 'none' },
@@ -177,16 +215,10 @@ export function createInitialState(): AppState {
       solver: { method: 'SIMPLE', maxIterations: 200, tolerance: 1e-4, relaxVelocity: 0.5, relaxPressure: 0.3 },
     },
     prepare: { namedSelections: [] },
-    display: { renderMode: 'shaded', sectionPlane: { enabled: false, axis: 'x', offset: 0 } },
-    viz: {
-      showContour: true,
-      showVectors: false,
-      vectorScale: 1,
-      vectorStride: 4,
-      showStreamlines: false,
-      streamlineSeeds: 20,
-      streamlineSteps: 200,
-    },
+    display,
+    viz,
+    viewDefaults: JSON.parse(JSON.stringify({ camera, display, viz })) as ViewDefaults,
+    gmsh: { mesh: null, shapeIds: [], meshStats: null },
     solver: { jobId: null, status: 'idle', iteration: 0, residual: null, maxIterations: 200 },
     results: null,
     ui: { activeTab: 'geometry', activeTool: null, units: 'SI' },

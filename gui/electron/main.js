@@ -4,6 +4,18 @@ const { spawn } = require('child_process');
 
 let mainWindow = null;
 let gfdProcess = null;
+// Newline-delimited JSON framing for the gfd-server stdio channel. stdout 'data'
+// chunks do NOT align to message boundaries — a large response (e.g. tessellation
+// is several KB) spans multiple chunks — so we buffer, split on '\n', and route
+// each complete line by request id (a pending resolver) or, if id-less, as an
+// async event. The previous per-request listener could not reassemble a JSON
+// object split across chunks, so big responses silently timed out.
+let gfdStdoutBuffer = '';
+const gfdPending = new Map(); // id -> { resolve, timer }
+// The gfd-server expects the JSON-RPC `id` to be a u64 (number), so use an
+// incrementing integer — NOT a string (a string id is rejected with a JSON
+// parse error and the request then times out).
+let gfdRequestId = 0;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -34,14 +46,19 @@ function createWindow() {
     mainWindow.reload();
   });
 
+  // Which workbench shell to open: ?ai = AI-only assistant workbench (default),
+  // ?v2 = data-driven ribbon, none = legacy. Override with GFD_SHELL=v2|legacy|ai.
+  const shell = process.env.GFD_SHELL || 'ai';
+  const query = shell === 'legacy' ? '' : `?${shell}`;
+
   // In development, load from Vite dev server; in production, load built files
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5173').catch(() => {
+    mainWindow.loadURL(`http://localhost:5173/${query}`).catch(() => {
       // Fallback to built files if dev server is not running
-      mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+      mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), query ? { search: query } : {});
     });
   } else {
-    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), query ? { search: query } : {});
   }
 
   mainWindow.on('closed', () => {
@@ -71,18 +88,35 @@ function spawnGfdBackend() {
     gfdProcess = spawn(binary, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    gfdStdoutBuffer = '';
 
     gfdProcess.stdout.on('data', (data) => {
-      const lines = data.toString().split('\n').filter((l) => l.trim());
-      for (const line of lines) {
+      gfdStdoutBuffer += data.toString();
+      let nl;
+      while ((nl = gfdStdoutBuffer.indexOf('\n')) >= 0) {
+        const line = gfdStdoutBuffer.slice(0, nl);
+        gfdStdoutBuffer = gfdStdoutBuffer.slice(nl + 1);
+        if (!line.trim()) continue;
+        let msg;
         try {
-          const msg = JSON.parse(line);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('gfd:event', msg);
-          }
+          msg = JSON.parse(line);
         } catch {
           // Non-JSON output (log lines, etc.)
           console.log('[GFD]', line);
+          continue;
+        }
+        if (msg && msg.id !== undefined) {
+          // A response to a request — resolve its pending promise.
+          const pending = gfdPending.get(msg.id);
+          if (pending) {
+            clearTimeout(pending.timer);
+            gfdPending.delete(msg.id);
+            pending.resolve(msg.result ?? { error: msg.error });
+          }
+          // else: stale/unmatched response (e.g. after a timeout) → drop.
+        } else if (mainWindow && !mainWindow.isDestroyed()) {
+          // No id → an async event (solver progress, etc.).
+          mainWindow.webContents.send('gfd:event', msg);
         }
       }
     });
@@ -94,6 +128,12 @@ function spawnGfdBackend() {
     gfdProcess.on('close', (code) => {
       console.log(`[GFD] process exited with code ${code}`);
       gfdProcess = null;
+      gfdStdoutBuffer = '';
+      for (const [, p] of gfdPending) {
+        clearTimeout(p.timer);
+        p.resolve({ error: 'GFD backend stopped' });
+      }
+      gfdPending.clear();
     });
 
     gfdProcess.on('error', (err) => {
@@ -112,32 +152,18 @@ ipcMain.handle('gfd:request', async (_event, { method, params }) => {
   }
 
   return new Promise((resolve) => {
-    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const id = ++gfdRequestId;
     const request = JSON.stringify({ jsonrpc: '2.0', id, method, params });
 
-    const onData = (data) => {
-      const lines = data.toString().split('\n').filter((l) => l.trim());
-      for (const line of lines) {
-        try {
-          const msg = JSON.parse(line);
-          if (msg.id === id) {
-            gfdProcess.stdout.off('data', onData);
-            resolve(msg.result ?? { error: msg.error });
-          }
-        } catch {
-          // ignore non-JSON
-        }
+    // Routed by the central line-buffered stdout reader (see spawnGfdBackend).
+    const timer = setTimeout(() => {
+      if (gfdPending.has(id)) {
+        gfdPending.delete(id);
+        resolve({ error: 'Request timed out' });
       }
-    };
-
-    gfdProcess.stdout.on('data', onData);
-    gfdProcess.stdin.write(request + '\n');
-
-    // Timeout after 30 seconds
-    setTimeout(() => {
-      gfdProcess.stdout.off('data', onData);
-      resolve({ error: 'Request timed out' });
     }, 30000);
+    gfdPending.set(id, { resolve, timer });
+    gfdProcess.stdin.write(request + '\n');
   });
 });
 
