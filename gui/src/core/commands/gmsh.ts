@@ -68,6 +68,27 @@ const gmshPrimitive: CommandDef<JsonObject, { shape_id: string; tag: number }> =
   },
 };
 
+const gmshImport: CommandDef<JsonObject, { imported: string; shape_ids: string[]; count?: number }> = {
+  id: 'gmsh.import',
+  category: 'geometry',
+  group: 'OCC (Gmsh)',
+  title: 'Import CAD (OCC)',
+  titleKo: 'CAD 임포트 (OCC)',
+  description:
+    'Import a STEP/IGES/BREP (or STL) file BY PATH into the OCC model. Dirty CAD is auto-healed and huge-unit models are auto-normalized. Returns imported solid ids; the viewport updates. Then enclose / mesh as usual. (In the chat use the 📎 Import button to pick a file.)',
+  capability: 'mutate-scene',
+  paramsSchema: {
+    type: 'object',
+    properties: { path: { type: 'string' }, kind: { type: 'string', enum: ['step', 'stl'] } },
+    required: ['path'],
+  },
+  async run(params, ctx) {
+    const resp = await ctx.rpc.request<{ imported: string; shape_ids: string[]; count?: number }>('gmsh.import', params);
+    const ids = [...ctx.getState().gmsh.shapeIds, ...(resp.shape_ids ?? [])];
+    return { ok: true, result: resp, statePatch: await refreshScene(ctx, ids) };
+  },
+};
+
 const gmshBoolean: CommandDef<JsonObject, { shape_ids: string[] }> = {
   id: 'gmsh.boolean',
   category: 'geometry',
@@ -201,6 +222,7 @@ const gmshMesh: CommandDef<JsonObject, { nodes: number; tets: number }> = {
 
 export function registerGmshCommands(registry: CommandRegistry): void {
   registry.register(gmshPrimitive);
+  registry.register(gmshImport);
   registry.register(gmshBoolean);
   registry.register(gmshHeal);
   registry.register(gmshEnclosure);
