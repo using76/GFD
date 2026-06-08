@@ -9,7 +9,18 @@
     "electron": "electron .",
     "start": "vite build && electron .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dist": "tsc && vite build && electron-builder"
+  },
+  "build": {
+    "appId": "com.gfd.workbench",
+    "productName": "GFD Workbench",
+    "directories": { "output": "release-build" },
+    "files": ["dist/**/*", "electron/**/*"],
+    "extraResources": [
+      { "from": "../target/release", "to": "bin", "filter": ["gfd-server.exe", "gmsh-*.dll"] }
+    ],
+    "win": { "target": "dir" }
   },
   "keywords": [],
   "author": "",

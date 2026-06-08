@@ -36,6 +36,25 @@ End-to-end verified over stdio: part → enclosure → fluid → mesh
 | 10 | Mesh quality metrics returned from `gmsh.mesh` (placeholder values now) | partial | `crates/gfd-gmsh` (gmsh quality) → `gmsh.mesh` result | S |
 | 11 | Standalone OCCT (opencascade-rs) for OCC ops outside Gmsh — deferred (Gmsh's OCC covers current needs) | deferred | `crates/gfd-occt` (scaffold exists) | L |
 
+## Update — STEP import, packaging, boundary layers
+
+- **STEP/IGES/STL import** ✅ — `gmsh.import` RPC + ChatPanel "📎 Import CAD" button.
+  Dirty CAD is auto-healed (OCC fix small edges/faces, sew, dedup) and **huge-unit
+  models are auto-normalized** (scale about bbox center to ~1e3 — fixes 2D mesher
+  stalls). Verified on a real 5.7MB ANSYS STEP (imports + tessellates to 41k tris).
+  Volume-meshing very dirty parts can still fail on overlapping facets (CAD quality).
+- **Live elapsed-time** ✅ on running chat actions; API key/provider persisted.
+- **Packaging** ✅ (config) — `gui/package.json` `build` block (`extraResources`
+  bundles `gfd-server.exe` + `gmsh-*.dll` into `resources/bin`), `npm run dist`
+  (electron-builder). `electron/main.js` resolves the packaged backend path. The
+  installer build itself (`npm run dist`) is the deploy step (not run in CI here).
+- **Boundary layers** ⚠️ partial — `gmsh.mesh` accepts `bl_first/bl_ratio/bl_thickness`
+  and configures a Gmsh BoundaryLayer field with a **graceful fallback**: Gmsh's 3D
+  boundary-layer field is limited and often can't grow layers on closed fluid
+  volumes, so when it can't, the field is removed and a plain tet mesh is returned
+  (response notes `boundary_layer: "requested but not generated …"`). Robust 3D prism
+  layers would use gfd-mesh's `prism_layer` extrusion — future work.
+
 ## Build notes
 
 Pro backend: `cargo build --release --bin gfd-server --features gmsh` with

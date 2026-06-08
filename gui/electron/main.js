@@ -67,20 +67,22 @@ function createWindow() {
 }
 
 function spawnGfdBackend() {
-  // Try gfd-server binary first, then gfd with server subcommand
-  const serverBinary = path.join(__dirname, '..', '..', 'target', 'release', 'gfd-server');
-  const gfdBinary = path.join(__dirname, '..', '..', 'target', 'release', 'gfd');
-
-  // Check which binary exists
   const fs = require('fs');
-  let binary, args;
-  if (fs.existsSync(serverBinary + '.exe') || fs.existsSync(serverBinary)) {
-    binary = serverBinary;
-    args = [];
+  // Packaged app: resources/bin/gfd-server.exe (Gmsh DLL is bundled alongside it,
+  // so it loads from the exe directory). Dev: target/release/gfd-server(.exe).
+  const packagedBinary = path.join(process.resourcesPath || '', 'bin', 'gfd-server.exe');
+  const devBinary = path.join(__dirname, '..', '..', 'target', 'release', 'gfd-server');
+
+  let binary;
+  const args = [];
+  if (app.isPackaged && fs.existsSync(packagedBinary)) {
+    binary = packagedBinary;
+  } else if (fs.existsSync(devBinary + '.exe') || fs.existsSync(devBinary)) {
+    binary = devBinary;
   } else {
     // GUI works without backend (browser simulation mode)
     console.log('[GFD] No backend binary found. GUI running in simulation mode.');
-    console.log('[GFD] Build with: cargo build --release --bin gfd-server');
+    console.log('[GFD] Build with: cargo build --release --bin gfd-server --features gmsh');
     return;
   }
 
