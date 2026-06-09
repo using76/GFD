@@ -21,7 +21,31 @@ interface DiagView {
   converged?: boolean;
   reynolds?: number | null;
   flowRegime?: string;
+  residualsByEq?: Record<string, number | null> | null;
+  dominantEquation?: string | null;
   issues?: DiagIssueView[];
+}
+
+/** Per-equation residual bar; the convergence-limiting equation is highlighted. */
+function EqResiduals({ diag }: { diag: DiagView }) {
+  const eq = diag.residualsByEq;
+  if (!eq) return null;
+  const entries = Object.entries(eq).filter(([, v]) => typeof v === 'number') as Array<[string, number]>;
+  if (!entries.length) return null;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '4px 0', color: '#bbb' }}>
+      <span style={{ color: '#888' }}>방정식 잔차:</span>
+      {entries.map(([name, val]) => {
+        const dominant = name === diag.dominantEquation;
+        return (
+          <span key={name} style={{ color: dominant ? '#ffc14a' : '#bbb', fontWeight: dominant ? 600 : 400 }}>
+            {name} {val.toExponential(1)}
+            {dominant ? ' ◄' : ''}
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 const SEV_COLOR: Record<string, string> = { error: '#ff6b6b', warning: '#ffc14a', info: '#7fb3d5' };
@@ -65,6 +89,7 @@ function DiagnosisSection() {
       {diag && (
         <>
           <div style={{ color: '#bbb', marginBottom: 4 }}>{diag.summary}</div>
+          <EqResiduals diag={diag} />
           {(diag.issues ?? []).map((iss, idx) => (
             <div key={`${iss.code}_${idx}`} style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginTop: 4 }}>
               <span style={{ color: SEV_COLOR[iss.severity] ?? '#aaa', fontWeight: 600, minWidth: 54 }}>[{iss.severity}]</span>

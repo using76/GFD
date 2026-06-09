@@ -145,11 +145,27 @@
   AI가 저렴한 요약 한 번으로 어느 방정식(vx/vy/vz/pressure/continuity)이 문제인지 파악.
 - 검증: tsc 0, mcp 테스트 통과.
 
+### iter 14 — diagnose UI에 per-equation 잔차 + 지배 방정식 표시 ✅ (완료)
+- 구현(`gui/src/react/ResultsPanel.tsx`): `EqResiduals` — `state.diagnosis.residualsByEq`를
+  방정식별로 표시하고 `dominantEquation`을 강조(◄). "라이브로 보이고"의 human-facing 완성.
+- 검증: tsc 0, vite build 성공.
+
+### iter 15 — 전체 루프 end-to-end 통합 테스트 ✅ (완료)
+- 목적: 사용자의 핵심 요구("이 루프가 작동")를 단위가 아닌 **전 구간 조합**으로 검증 + 회귀 방지.
+- 구현(`gui/src/core/__tests__/loop.test.ts`): fakeBackend로
+  (1) import_mesh→mesh.generate→setup(model/material/boundary)→calc.run→수렴→
+  calc.diagnose(healthy, per-eq residual state 반영) 전 구간,
+  (2) 고Re+층류모델 → diagnose가 TURBULENCE_MODEL 감지 → `auto_refine`(MCP 메타툴)이
+  k_epsilon로 자가수정 → healthy. **자가수정 폐루프까지 end-to-end 통과.**
+- 검증: tsc 0, vitest 103 passed (통합 테스트 2개).
+- 결과 확인 (mesh 전제조건): 실제 백엔드(`server.rs handle_solve_start`)는 mesh 없으면
+  "No mesh generated yet. Call mesh.generate first." 반환 — 이미 graceful(gap 아님).
+
 ## 향후 후보 (backlog)
 - import한 STEP의 topology 복원(현재 points-only) — 백엔드.
 - measure.angle (edge/face 방향 — 백엔드 필요).
 - nearest/semantic의 face/edge 단위(백엔드 tessellation 기반).
-- diagnose 결과의 residualsByEq를 UI 패널에 표시.
+- isosurface 렌더(marching cubes) — 미구현.
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
 - mesh 품질/설정 패널(size/prism/quality) command + UI.
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).
