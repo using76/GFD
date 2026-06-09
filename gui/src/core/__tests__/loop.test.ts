@@ -87,6 +87,8 @@ describe('AI simulation loop — end to end', () => {
     await run('setup.set_model', { key: 'flow', value: 'incompressible' });
     await run('setup.set_material', { property: 'viscosity', value: 0.1 });
     await run('setup.add_boundary', { patch: 'inlet', type: 'velocity_inlet', parameters: { vx: 1 } });
+    // well-posed: an open inlet needs a pressure outlet (else diagnose flags it)
+    await run('setup.add_boundary', { patch: 'outlet', type: 'pressure_outlet', parameters: { pressure: 0 } });
 
     // 4. solve
     const solved = await run('calc.run', { pollIntervalMs: 1 });

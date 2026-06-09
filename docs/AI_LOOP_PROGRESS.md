@@ -263,10 +263,21 @@
 - 검증: `cargo test -p gfd-cad-io` 20 passed (L자 6각형 → 4 삼각형, 총면적=3.0으로
   겹침/누락 없음 검증), `cargo build --bin gfd-server`.
 
+### iter 23 — 경계조건/모델 정합성 검사 (ill-posed 설정 사전 탐지) ✅ (완료)
+- 문제: 입구(inlet)만 있고 출구/압력 기준이 없는 설정은 질량보존 불가 → 비압축 해가
+  ill-posed/발산. 흔한 실수인데 diagnose가 못 잡았음(발산만 보고 근본원인 모름).
+- 구현(`calc.ts` diagnoseState): setup.boundaries+models를 읽어
+  - `INLET_NO_OUTLET`(warning): inlet 있고 outlet/pressure 없음 → pressure_outlet 추가 fix.
+  - `ENERGY_NO_THERMAL_BC`(info): energy 모델 on인데 온도 BC 없음.
+  setup만 읽으므로 **솔브 전 diagnose**로도 탐지 가능. auto_refine 에스컬레이션이 outlet
+  추가를 시도(완화계수로 안 잡힐 때).
+- 검증: tsc 0, vitest 117 (정합성 테스트 3개; 기존 loop 통합테스트의 실제 ill-posed
+  설정을 잡아내 well-posed로 보정).
+
 ## 향후 후보 (남은 deep/niche backlog)
-- STEP 곡면(CYLINDRICAL/SPHERICAL_SURFACE) 세분(현재 면 폴리곤 근사).
-- measure.angle (edge/face 방향 — 백엔드 필요).
-- nearest/semantic의 face/edge 단위(백엔드 tessellation 기반).
+- imported 형상이 구조격자 mesh.generate에 반영(immersed boundary/cut-cell) — deep.
+- STEP 곡면(원통/구면) 세분(현재 면 폴리곤 근사).
+- measure.angle / face 단위 공간참조.
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
 - mesh 품질/설정 패널(size/prism/quality) command + UI.
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).

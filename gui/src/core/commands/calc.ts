@@ -555,6 +555,42 @@ export function diagnoseState(state: AppState): DiagnoseResult {
     });
   }
 
+  // (g1b) Boundary-condition / model consistency — catch ill-posed setups (an
+  // open inlet with no outlet/pressure reference, energy on without a thermal BC)
+  // that are a common cause of non-convergence. Read from setup, so this also
+  // surfaces when diagnosing BEFORE a solve.
+  const bcs = state.setup.boundaries;
+  if (isFlow && bcs.length > 0) {
+    const hasInlet = bcs.some((b) => (b.type ?? '').toLowerCase().includes('inlet'));
+    const hasOutlet = bcs.some((b) => {
+      const t = (b.type ?? '').toLowerCase();
+      return t.includes('outlet') || t.includes('pressure') || typeof b.parameters?.pressure === 'number';
+    });
+    if (hasInlet && !hasOutlet) {
+      issues.push({
+        code: 'INLET_NO_OUTLET',
+        severity: 'warning',
+        message: '입구(inlet)는 있지만 출구/압력(outlet/pressure) 경계가 없습니다 — 질량 보존이 불가능해 해가 ill-posed/발산할 수 있습니다.',
+        suggestion: '압력 출구(pressure_outlet, pressure=0) 경계를 추가하세요.',
+        fix: { command: 'setup.add_boundary', params: { patch: 'outlet', type: 'pressure_outlet', parameters: { pressure: 0 } } },
+      });
+    }
+  }
+  if (state.physics.models.energy && bcs.length > 0) {
+    const hasThermalBc = bcs.some((b) => {
+      const t = (b.type ?? '').toLowerCase();
+      return t.includes('temp') || typeof b.parameters?.temperature === 'number';
+    });
+    if (!hasThermalBc) {
+      issues.push({
+        code: 'ENERGY_NO_THERMAL_BC',
+        severity: 'info',
+        message: '에너지(열) 모델이 켜져 있지만 온도 경계조건이 없습니다.',
+        suggestion: '입구/벽에 온도(temperature) 경계조건을 지정하세요.',
+      });
+    }
+  }
+
   // (g2) Mesh quality — a leading cause of divergence/slow convergence. Suggest
   // a finer re-mesh (doubling the grid) when orthogonality/skewness/bad-cells
   // cross typical CFD thresholds.

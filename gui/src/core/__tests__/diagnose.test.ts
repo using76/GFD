@@ -212,6 +212,34 @@ describe('calc.diagnose — analyze → identify → fix', () => {
     expect(d.issues.some((i) => i.code === 'STALLED')).toBe(false);
   });
 
+  it('flags an inlet without an outlet (ill-posed) and suggests a pressure outlet', () => {
+    const s = baseState();
+    s.physics.models = { ...s.physics.models, flow: 'incompressible' };
+    s.setup.boundaries = [{ patch: 'in', type: 'velocity_inlet', parameters: { vx: 1 } }];
+    const d = diagnoseState(s);
+    const iss = d.issues.find((i) => i.code === 'INLET_NO_OUTLET');
+    expect(iss?.severity).toBe('warning');
+    expect(iss?.fix?.command).toBe('setup.add_boundary');
+    expect((iss?.fix?.params as { type: string }).type).toBe('pressure_outlet');
+  });
+
+  it('does not flag INLET_NO_OUTLET once a pressure outlet exists', () => {
+    const s = baseState();
+    s.physics.models = { ...s.physics.models, flow: 'incompressible' };
+    s.setup.boundaries = [
+      { patch: 'in', type: 'velocity_inlet', parameters: { vx: 1 } },
+      { patch: 'out', type: 'pressure_outlet', parameters: { pressure: 0 } },
+    ];
+    expect(diagnoseState(s).issues.some((i) => i.code === 'INLET_NO_OUTLET')).toBe(false);
+  });
+
+  it('flags an energy model with no thermal boundary condition', () => {
+    const s = baseState();
+    s.physics.models = { ...s.physics.models, flow: 'incompressible', energy: true };
+    s.setup.boundaries = [{ patch: 'wall', type: 'wall', parameters: {} }];
+    expect(diagnoseState(s).issues.some((i) => i.code === 'ENERGY_NO_THERMAL_BC')).toBe(true);
+  });
+
   it('is registered and dispatchable, returning a summary', async () => {
     const core = createCore({ rpc: createMockRpcClient(() => ({})) });
     const r = await core.dispatcher.dispatch({ commandId: 'calc.diagnose', params: {}, source: 'agent' });
