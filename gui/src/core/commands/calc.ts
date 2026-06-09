@@ -103,7 +103,12 @@ export const calcRun: CommandDef<CalcRunParams, { jobId: string }> = {
             fieldStats: Object.fromEntries(r.fields.map((f) => [f.name, { min: f.min, max: f.max, mean: f.mean }])),
           };
           ctx.update([
-            ...solverPatch({ status, iteration: r.iteration, residual: r.residual }),
+            ...solverPatch({
+              status,
+              iteration: r.iteration,
+              residual: r.residual,
+              ...(r.residualsByEq ? { residualsByEq: r.residualsByEq } : {}),
+            }),
             { op: 'replace', path: ['results'], value: results as unknown as JsonValue },
           ]);
           ctx.emit({ type: 'solver-done', jobId, status: r.status, iteration: r.iteration });
@@ -327,6 +332,10 @@ export interface DiagnoseResult {
   characteristicVelocity: number;
   flowRegime: FlowRegime;
   mesh: DiagnoseMesh | null;
+  /** Per-equation final update residuals from the backend (vx/vy/vz/pressure/continuity). */
+  residualsByEq: Record<string, number | null> | null;
+  /** Equation with the largest update residual (the one limiting convergence). */
+  dominantEquation: string | null;
   fieldStats: Record<string, { min: number; max: number; mean: number }>;
   issues: DiagnoseIssue[];
   summary: string;
@@ -447,6 +456,35 @@ export function diagnoseState(state: AppState): DiagnoseResult {
     });
   }
 
+  // (d2) Per-equation residuals — point at WHICH equation limits convergence and
+  // tie the fix to the right relaxation factor (momentum vs pressure).
+  const eq = solver.residualsByEq ?? null;
+  let dominantEquation: string | null = null;
+  if (eq) {
+    const entries = Object.entries(eq).filter(
+      ([, v]) => typeof v === 'number' && Number.isFinite(v as number)
+    ) as Array<[string, number]>;
+    if (entries.length >= 2) {
+      entries.sort((a, b) => b[1] - a[1]);
+      const [topName, topVal] = entries[0];
+      const restMax = Math.max(0, ...entries.slice(1).map(([, v]) => v));
+      dominantEquation = topName;
+      if (solver.status !== 'converged' && topVal > restMax * 3 && topVal > ss.tolerance && badFields.length === 0) {
+        const isMomentum = topName === 'vx' || topName === 'vy' || topName === 'vz';
+        issues.push({
+          code: 'DOMINANT_EQUATION',
+          severity: 'info',
+          message: `${topName} 방정식의 update 잔차(${topVal.toExponential(2)})가 다른 방정식보다 지배적입니다 — 이 방정식이 수렴을 저해합니다.`,
+          suggestion: isMomentum ? '운동량 완화계수(relaxVelocity)를 낮추세요.' : '압력 완화계수(relaxPressure)를 낮추세요.',
+          fix: {
+            command: 'setup.set_solver',
+            params: isMomentum ? { relaxVelocity: lowRelaxV } : { relaxPressure: lowRelaxP },
+          },
+        });
+      }
+    }
+  }
+
   // (e) Turbulent/transitional regime but a laminar model is selected.
   if (reynolds !== null && reynolds > 2300 && isFlow && state.physics.models.turbulence === 'none') {
     issues.push({
@@ -563,6 +601,8 @@ export function diagnoseState(state: AppState): DiagnoseResult {
     characteristicVelocity: U,
     flowRegime,
     mesh: meshSummary,
+    residualsByEq: eq,
+    dominantEquation,
     fieldStats,
     issues,
     summary,

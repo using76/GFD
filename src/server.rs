@@ -136,6 +136,9 @@ struct JobResult {
     status: String,
     iterations: usize,
     residual: f64,
+    /// Per-equation final update residuals [vx, vy, vz, pressure]; f64::MAX = n/a
+    /// (e.g. thermal solves). `residual` above is the continuity/mass residual.
+    eq_residuals: [f64; 4],
     fields: HashMap<String, Vec<f64>>,
 }
 
@@ -4960,6 +4963,16 @@ fn run_fluid_solve(
     let mut final_residual = f64::MAX;
     let mut final_iter = 0;
 
+    // Per-equation update residuals: the normalized L2 change of each field
+    // between successive iterations. These are computed here (additively, without
+    // touching the gfd-fluid solver) so the AI can tell WHICH equation isn't
+    // converging — e.g. u-momentum stalled while v-momentum/pressure are fine.
+    let mut eq_res = [f64::MAX; 4];
+    let mut prev_vx = vec![0.0_f64; n];
+    let mut prev_vy = vec![0.0_f64; n];
+    let mut prev_vz = vec![0.0_f64; n];
+    let mut prev_p = vec![0.0_f64; n];
+
     for iter in 0..max_iter {
         if !running.load(Ordering::SeqCst) {
             final_status = "stopped".to_string();
@@ -4981,6 +4994,33 @@ fn run_fluid_solve(
                 if let Ok(mut guard) = residual.lock() {
                     *guard = r;
                 }
+
+                // Per-component update residual for this iteration.
+                let vel = state.velocity.values();
+                let pre = state.pressure.values();
+                let mut s = [0.0_f64; 4];
+                for i in 0..n {
+                    let dvx = vel[i][0] - prev_vx[i];
+                    let dvy = vel[i][1] - prev_vy[i];
+                    let dvz = vel[i][2] - prev_vz[i];
+                    let dp = pre[i] - prev_p[i];
+                    s[0] += dvx * dvx;
+                    s[1] += dvy * dvy;
+                    s[2] += dvz * dvz;
+                    s[3] += dp * dp;
+                    prev_vx[i] = vel[i][0];
+                    prev_vy[i] = vel[i][1];
+                    prev_vz[i] = vel[i][2];
+                    prev_p[i] = pre[i];
+                }
+                let inv = if n > 0 { 1.0 / n as f64 } else { 1.0 };
+                eq_res = [
+                    (s[0] * inv).sqrt(),
+                    (s[1] * inv).sqrt(),
+                    (s[2] * inv).sqrt(),
+                    (s[3] * inv).sqrt(),
+                ];
+
                 if r < tolerance {
                     final_status = "converged".to_string();
                     break;
@@ -5016,6 +5056,7 @@ fn run_fluid_solve(
             status: final_status,
             iterations: final_iter,
             residual: final_residual,
+            eq_residuals: eq_res,
             fields,
         });
     }
@@ -5089,6 +5130,7 @@ fn run_thermal_solve(
             status,
             iterations: 1,
             residual: final_res,
+            eq_residuals: [f64::MAX; 4], // n/a for single-equation thermal solves
             fields,
         });
     }
@@ -5188,13 +5230,22 @@ fn handle_solve_status(state: &mut ServerState, id: u64, params: &Value) -> RpcR
                 "elapsed_ms": elapsed_ms,
             });
 
-            // If finished, include the final status, iterations and residual
+            // If finished, include the final status, iterations and residual, plus
+            // the per-equation update residuals (n/a values emitted as null).
             if !is_running {
                 if let Ok(guard) = handle.result.lock() {
                     if let Some(ref jr) = *guard {
                         resp["status"] = Value::String(jr.status.clone());
                         resp["iteration"] = serde_json::json!(jr.iterations);
                         resp["residual"] = serde_json::json!(jr.residual);
+                        let conv = |x: f64| if x.is_finite() && x < 1e30 { serde_json::json!(x) } else { Value::Null };
+                        resp["residuals"] = serde_json::json!({
+                            "vx": conv(jr.eq_residuals[0]),
+                            "vy": conv(jr.eq_residuals[1]),
+                            "vz": conv(jr.eq_residuals[2]),
+                            "pressure": conv(jr.eq_residuals[3]),
+                            "continuity": conv(jr.residual),
+                        });
                     }
                 }
             }

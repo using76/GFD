@@ -53,6 +53,8 @@ export interface SolverResult {
   status: string;
   iteration: number;
   residual: number;
+  /** Per-equation final update residuals (vx/vy/vz/pressure/continuity), if reported. */
+  residualsByEq?: Record<string, number | null>;
   fields: SolverFieldResult[];
 }
 
@@ -79,6 +81,7 @@ interface StatusResponse {
   residual: number;
   elapsed_ms: number;
   status?: string;
+  residuals?: Record<string, number | null>;
 }
 
 function toStartParams(config: SolverConfig): JsonObject {
@@ -181,6 +184,7 @@ export async function runRealSolver(
           status: status.status ?? 'finished',
           iteration: status.iteration,
           residual: status.residual,
+          ...(status.residuals ? { residualsByEq: status.residuals } : {}),
           fields,
         });
         return;

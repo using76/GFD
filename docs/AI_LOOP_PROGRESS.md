@@ -103,12 +103,25 @@
   >1% 감소) 아니면 `stoppedReason='no_progress'`로 즉시 중단. 솔버 낭비 방지.
 - 검증: tsc 0, vitest 90 (stuck backend → 1 라운드 후 no_progress 테스트).
 
+### iter 9 — per-equation residual 분리 (백엔드→진단 전 스택) ✅ (완료)
+- 문제: 백엔드가 단일 residual(연속/continuity)만 보고 → AI가 어느 방정식이
+  발산/미수렴하는지 모름.
+- 구현(안전한 additive, gfd-fluid 미변경):
+  - 백엔드(`src/server.rs`): `run_fluid_solve`가 반복 간 필드별 update 잔차
+    (Δvx/Δvy/Δvz/Δp의 normalized L2)를 계산 → `JobResult.eq_residuals`. `solve.status`가
+    finished 시 `residuals{vx,vy,vz,pressure,continuity}` 노출(n/a는 null).
+  - `realSolver.ts`→`SolverStatus.residualsByEq`→`calc.run` 저장.
+  - `diagnoseState`: 미수렴 시 지배(dominant) 방정식 식별 → 운동량이면 relaxVelocity,
+    압력이면 relaxPressure를 낮추는 타깃 fix(`DOMINANT_EQUATION`, info). `dominantEquation`/
+    `residualsByEq` 반환.
+- 검증: `cargo build --bin gfd-server` OK, tsc 0, vitest 92 passed (per-eq 테스트 2개).
+
 ## 향후 후보 (backlog)
-- per-equation residual 분리(현재 단일 scalar) → AI 수렴 진단 정밀화.
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).
 - Distance/angle 2-pick measure.
 - import한 STEP의 topology 복원(현재 points-only).
 - auto_refine: floor 도달한 완화계수 대신 메쉬 fix로 escalate.
+- get_state_summary에 residualsByEq 노출.
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
 - mesh 품질/설정 패널(size/prism/quality) command + UI.
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).

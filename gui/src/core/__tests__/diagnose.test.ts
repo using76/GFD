@@ -128,6 +128,49 @@ describe('calc.diagnose — analyze → identify → fix', () => {
     expect(d.issues.some((i) => i.code === 'MESH_ORTHOGONALITY')).toBe(false);
   });
 
+  it('identifies the dominant non-converged equation and targets its relaxation', () => {
+    const s = baseState();
+    s.physics.material = { ...s.physics.material, density: 1, viscosity: 0.1 };
+    s.solver = {
+      ...s.solver,
+      status: 'finished',
+      iteration: 200,
+      residual: 1e-2,
+      residualsByEq: { vx: 5e-2, vy: 1e-4, vz: 1e-4, pressure: 2e-4, continuity: 1e-2 },
+    };
+    s.results = {
+      availableFields: ['velocity_magnitude'],
+      activeField: 'velocity_magnitude',
+      fieldStats: { velocity_magnitude: { min: 0, max: 0.5, mean: 0.2 } },
+    };
+    const d = diagnoseState(s);
+    expect(d.dominantEquation).toBe('vx');
+    const dom = d.issues.find((i) => i.code === 'DOMINANT_EQUATION');
+    expect(dom).toBeTruthy();
+    // vx is a momentum equation → fix targets relaxVelocity, not relaxPressure.
+    expect((dom?.fix?.params as { relaxVelocity?: number }).relaxVelocity).toBeDefined();
+    expect((dom?.fix?.params as { relaxPressure?: number }).relaxPressure).toBeUndefined();
+  });
+
+  it('does not flag a dominant equation once converged', () => {
+    const s = baseState();
+    s.solver = {
+      ...s.solver,
+      status: 'converged',
+      iteration: 60,
+      residual: 1e-6,
+      residualsByEq: { vx: 5e-7, vy: 1e-7, vz: 1e-7, pressure: 2e-7, continuity: 1e-6 },
+    };
+    s.results = {
+      availableFields: ['velocity_magnitude'],
+      activeField: 'velocity_magnitude',
+      fieldStats: { velocity_magnitude: { min: 0, max: 0.5, mean: 0.2 } },
+    };
+    const d = diagnoseState(s);
+    expect(typeof d.dominantEquation).toBe('string'); // largest is still reported…
+    expect(d.issues.some((i) => i.code === 'DOMINANT_EQUATION')).toBe(false); // …but not an issue
+  });
+
   it('is registered and dispatchable, returning a summary', async () => {
     const core = createCore({ rpc: createMockRpcClient(() => ({})) });
     const r = await core.dispatcher.dispatch({ commandId: 'calc.diagnose', params: {}, source: 'agent' });
