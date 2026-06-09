@@ -116,12 +116,28 @@
     `residualsByEq` 반환.
 - 검증: `cargo build --bin gfd-server` OK, tsc 0, vitest 92 passed (per-eq 테스트 2개).
 
+### iter 10 — 공간 엔티티 참조(nearest/semantic) 구현 ✅ (완료)
+- 문제: `entity.ts`의 `nearest`/`semantic`이 null 반환(stub) → AI가 위치/방향으로 형상
+  선택 불가. (`query_spatial`/`select` MCP 메타툴이 이 resolver를 사용.)
+- 구현(`gui/src/core/entity.ts`, AppState bbox 기반 shape 단위):
+  - `nearest{point}`: 점→AABB 최단거리로 가장 가까운 형상.
+  - `semantic{hint}`: top/bottom/left/right/front/back = 해당 축 극단 형상(+Z up),
+    inlet/outlet = 이름 매칭, largest_face ≈ 최대 bbox 형상, `of`로 풀 제한.
+  - face/edge/vertex 단위는 백엔드 tessellation 필요 → null 유지(정직).
+- 검증: tsc 0, vitest 97 passed (entity 테스트 5개).
+
+### iter 11 — `measure.distance` 명령 ✅ (완료)
+- 문제: 두 형상 간 거리/간격 측정 명령 부재(상태문서 distance 2-pick gap).
+- 구현(`gui/src/core/commands/measure.ts`): `measure.distance{a,b}` — 중심거리 +
+  bbox 최근접 간격(겹치면 0) + 각 중심. AI가 간격/클리어런스 점검 가능.
+- 검증: tsc 0, vitest 100 passed (measureDistance 테스트 3개).
+
 ## 향후 후보 (backlog)
-- 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).
-- Distance/angle 2-pick measure.
 - import한 STEP의 topology 복원(현재 points-only).
 - auto_refine: floor 도달한 완화계수 대신 메쉬 fix로 escalate.
 - get_state_summary에 residualsByEq 노출.
+- measure.angle (edge/face 방향 — 백엔드 필요).
+- nearest/semantic의 face/edge 단위(백엔드 tessellation 기반).
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
 - mesh 품질/설정 패널(size/prism/quality) command + UI.
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).

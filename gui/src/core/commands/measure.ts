@@ -81,9 +81,71 @@ export const measureBoundingBox: CommandDef<ShapeIdParams, { min: Vec3; max: Vec
   },
 };
 
+function bboxCenter(b: { min: Vec3; max: Vec3 }): Vec3 {
+  return [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2];
+}
+
+function distance(a: Vec3, b: Vec3): number {
+  return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
+/** Closest gap between two AABBs (0 if they overlap/touch). */
+function bboxGap(a: { min: Vec3; max: Vec3 }, b: { min: Vec3; max: Vec3 }): number {
+  let s = 0;
+  for (let k = 0; k < 3; k++) {
+    const sep = Math.max(0, a.min[k] - b.max[k], b.min[k] - a.max[k]);
+    s += sep * sep;
+  }
+  return Math.sqrt(s);
+}
+
+export interface MeasureDistanceParams {
+  a: string;
+  b: string;
+}
+
+export interface MeasureDistanceResult {
+  centerDistance: number;
+  gap: number;
+  centerA: Vec3;
+  centerB: Vec3;
+}
+
+export const measureDistance: CommandDef<MeasureDistanceParams, MeasureDistanceResult> = {
+  id: 'measure.distance',
+  category: 'measure',
+  group: 'Extent',
+  title: 'Distance',
+  titleKo: '거리',
+  description:
+    'Distance between two shapes (by id): center-to-center distance and the closest gap between their bounding boxes (0 if they overlap). Lets the AI check clearances and spacing.',
+  capability: 'read',
+  paramsSchema: {
+    type: 'object',
+    properties: { a: { type: 'string' }, b: { type: 'string' } },
+    required: ['a', 'b'],
+  },
+  async run(params, ctx) {
+    const tree = ctx.getState().doc.geometry.nodes;
+    const na = tree[params.a];
+    const nb = tree[params.b];
+    if (!na || !nb) {
+      const missing = !na ? params.a : params.b;
+      return { ok: false, error: { code: 'UNKNOWN_SHAPE', message: `No shape "${missing}"` } };
+    }
+    const centerA = bboxCenter(na.bbox);
+    const centerB = bboxCenter(nb.bbox);
+    return {
+      ok: true,
+      result: { centerDistance: distance(centerA, centerB), gap: bboxGap(na.bbox, nb.bbox), centerA, centerB },
+    };
+  },
+};
+
 export function registerMeasureCommands(registry: CommandRegistry): void {
   registry.register(measureVolume);
   registry.register(measureSurfaceArea);
   registry.register(measureCenterOfMass);
   registry.register(measureBoundingBox);
+  registry.register(measureDistance);
 }
