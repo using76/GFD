@@ -180,11 +180,22 @@
   - UI(`ResultsPanel.tsx`): Isosurface 토글 + isovalue 슬라이더(field min~max).
 - 검증: `cargo test --bin gfd-server march_tet` 3 passed, tsc 0, vite build, vitest 109.
 
+### iter 18 — vorticity 파생장 (결과 분석/표현, 전 스택) ✅ (완료)
+- 문제: 와류 분석에 필수인 vorticity(|∇×u|) 파생장이 없음. isosurface(17)와 결합 시 강력.
+- 구현:
+  - 백엔드(`src/server.rs`): `compute_vorticity_magnitude`(구조격자 중심차분, 경계 one-sided) +
+    `handle_field_vorticity`(velocity→vorticity_magnitude를 state.fields에 등록) +
+    `field.vorticity` RPC. **Rust 테스트**(솔리드회전 u=(-Ωy,Ωx,0) → |ω|=2Ω 전셀 검증).
+  - command-core: `results.vorticity` — 계산 후 `availableFields`/`fieldStats`/`activeField`에
+    vorticity_magnitude 추가 → contour/isosurface/load_field로 바로 사용.
+  - UI: ResultsPanel "+ 와도" 버튼. 프롬프트 VISUALIZE 단계에 isosurface/vorticity 안내.
+- 검증: `cargo test --bin gfd-server` 4 passed, tsc 0, vite build, vitest 110.
+
 ## 향후 후보 (backlog)
 - import한 STEP의 topology 복원(현재 points-only) — 백엔드.
 - measure.angle (edge/face 방향 — 백엔드 필요).
 - nearest/semantic의 face/edge 단위(백엔드 tessellation 기반).
-- Q-criterion/vorticity 등 파생장(isosurface와 결합).
+- Q-criterion 등 추가 파생장.
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
 - mesh 품질/설정 패널(size/prism/quality) command + UI.
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).

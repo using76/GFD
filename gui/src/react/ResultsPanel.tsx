@@ -175,7 +175,16 @@ export function ResultsPanel() {
   return (
     <div style={{ padding: 10, color: '#ddd', fontSize: 12 }}>
       <DiagnosisSection />
-      <div style={{ fontWeight: 600, marginBottom: 6 }}>Results — color field</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <span style={{ fontWeight: 600 }}>Results — color field</span>
+        <button
+          onClick={() => void dispatch('results.vorticity', {})}
+          title="Compute |∇×u| and add it as a field"
+          style={{ padding: '2px 8px', border: '1px solid #3a3a3a', borderRadius: 4, background: '#2a2a2a', color: '#9ad', cursor: 'pointer' }}
+        >
+          + 와도
+        </button>
+      </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
         {results.availableFields.map((f) => {
           const active = results.activeField === f;

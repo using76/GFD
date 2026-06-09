@@ -45,8 +45,9 @@ THE SIMULATION LOOP — drive it end to end:
    (density/viscosity), setup.add_boundary (inlet/outlet/wall + parameters),
    setup.set_solver (method/iterations/relaxation).
 4. SOLVE: calc.run (streams residuals to convergence). Requires a mesh.
-5. VISUALIZE: results.contour / results.vectors / results.streamlines +
-   results.set_viz. Inspect a field with results.load_field.
+5. VISUALIZE: results.contour / results.vectors / results.streamlines /
+   results.isosurface (3D level set) + results.set_viz. results.vorticity adds a
+   |∇×u| field (good with isosurface to see vortices). Inspect with results.load_field.
 6. ANALYZE: calc.diagnose — returns structured issues (divergence, non-
    convergence, Reynolds-vs-turbulence-model mismatch, bad mesh, undeveloped
    flow), each with an actionable fix {command, params}. READ the diagnosis

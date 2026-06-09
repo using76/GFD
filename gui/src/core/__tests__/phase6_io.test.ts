@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createCore } from '../index';
+import { createInitialState } from '../state';
 import { createMcpBridge } from '../mcp/bridge';
 import { createMockRpcClient } from '../transport/rpcClient';
 import type { JsonObject } from '../types';
@@ -161,6 +162,22 @@ describe('Vector / streamline viz commands', () => {
     await core.dispatcher.dispatch({ commandId: 'results.set_viz', params: { showIsosurface: true, isovalue: 0.3 }, source: 'agent' });
     expect(core.store.getState().viz.showIsosurface).toBe(true);
     expect(core.store.getState().viz.isovalue).toBe(0.3);
+  });
+
+  it('computes vorticity and registers it as a selectable field', async () => {
+    const rpc = createMockRpcClient((method: string) => {
+      if (method === 'field.vorticity') return { field: 'vorticity_magnitude', min: 0, max: 12, mean: 3 };
+      return {};
+    });
+    const seeded = createInitialState();
+    seeded.results = { availableFields: ['velocity_magnitude'], activeField: 'velocity_magnitude', fieldStats: { velocity_magnitude: { min: 0, max: 1, mean: 0.5 } } };
+    const core = createCore({ rpc, initialState: seeded });
+    const r = await core.dispatcher.dispatch({ commandId: 'results.vorticity', params: {}, source: 'agent' });
+    expect(r.ok).toBe(true);
+    const res = core.store.getState().results;
+    expect(res?.availableFields).toContain('vorticity_magnitude');
+    expect(res?.activeField).toBe('vorticity_magnitude');
+    expect(res?.fieldStats['vorticity_magnitude']?.max).toBe(12);
   });
 });
 
