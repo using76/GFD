@@ -65,6 +65,12 @@ function pickActionable(issues: DiagnoseIssue[]): DiagnoseIssue | null {
   );
 }
 
+/** Run calc.diagnose so the analysis is cached in state, and return it. */
+async function dispatchDiagnose(core: Core): Promise<DiagnoseResult> {
+  const o = await core.dispatcher.dispatch({ commandId: 'calc.diagnose', params: {}, source: 'agent' });
+  return (o.ok && o.result ? o.result : diagnoseState(core.store.getState())) as DiagnoseResult;
+}
+
 /** Block until the async solver runner flips status away from 'running'. */
 async function waitForSolve(core: Core, timeoutMs: number, pollMs: number, signal?: AbortSignal): Promise<void> {
   const start = Date.now();
@@ -87,6 +93,7 @@ export async function runAutoRefine(
   const timeoutMs = opts.timeoutMs ?? 120_000;
   const rounds: AutoRefineRound[] = [];
   let stoppedReason: StoppedReason = 'max_rounds';
+  let lastDiag: DiagnoseResult | null = null;
 
   for (let round = 1; round <= maxRounds; round++) {
     if (opts.signal?.aborted) {
@@ -94,7 +101,9 @@ export async function runAutoRefine(
       break;
     }
 
-    const diag = diagnoseState(core.store.getState());
+    // Diagnose through the command so the analysis is cached in AppState live.
+    const diag = await dispatchDiagnose(core);
+    lastDiag = diag;
     const issue = pickActionable(diag.issues);
     if (!issue) {
       stoppedReason = 'healthy';
@@ -143,7 +152,9 @@ export async function runAutoRefine(
     onEvent?.({ type: 'solve_done', round, status: after.status, residual: after.residual });
   }
 
-  const finalDiagnosis = diagnoseState(core.store.getState());
+  // Use the last in-loop diagnosis when we stopped because it was healthy;
+  // otherwise re-diagnose to capture the post-last-solve state (and cache it).
+  const finalDiagnosis = stoppedReason === 'healthy' && lastDiag ? lastDiag : await dispatchDiagnose(core);
   const healthy = !finalDiagnosis.issues.some((i) => i.severity === 'error' || i.severity === 'warning');
   if (healthy && stoppedReason === 'max_rounds') stoppedReason = 'healthy';
   const result: AutoRefineResult = { rounds, finalDiagnosis, healthy, stoppedReason };

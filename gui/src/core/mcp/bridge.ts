@@ -69,13 +69,20 @@ export function createMcpBridge(core: Core): McpBridge {
       schema: { name: 'get_state_summary', description: 'Token-cheap summary: entity counts/names, mesh, solver, results.', inputSchema: EMPTY_SCHEMA },
       handler: async () => {
         const s = core.store.getState();
+        const diag = s.diagnosis as null | { summary?: unknown; issues?: Array<{ code: string; severity: string; message: string }> };
         return ok({
           revision: s.doc.revision,
           shapes: Object.values(s.doc.geometry.nodes).map((n) => ({ id: n.id, name: n.name, kind: n.kind, visible: n.visible })),
           selection: s.selection as unknown as JsonValue,
-          mesh: s.mesh ? { cells: s.mesh.cellCount, nodes: s.mesh.nodeCount } : null,
+          mesh: s.mesh ? { cells: s.mesh.cellCount, nodes: s.mesh.nodeCount, badCells: s.mesh.badCells ?? 0 } : null,
           solver: { status: s.solver.status, iteration: s.solver.iteration, residual: s.solver.residual },
           results: s.results ? { fields: s.results.availableFields, active: s.results.activeField } : null,
+          diagnosis: diag
+            ? {
+                summary: diag.summary ?? null,
+                issues: (diag.issues ?? []).map((i) => ({ code: i.code, severity: i.severity, message: i.message })),
+              }
+            : null,
         } as JsonValue);
       },
     },

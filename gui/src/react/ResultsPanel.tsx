@@ -5,7 +5,88 @@
  * results.set_viz), so the AI can drive the exact same controls.
  */
 
-import { useAppState, useDispatch } from './CoreContext';
+import { useState } from 'react';
+import { useAppState, useDispatch, useCore } from './CoreContext';
+import { runAutoRefine } from '../core/solver/autoRefine';
+
+interface DiagIssueView {
+  code: string;
+  severity: 'info' | 'warning' | 'error';
+  message: string;
+  suggestion?: string;
+  fix?: { command: string; params: Record<string, number | string | boolean> };
+}
+interface DiagView {
+  summary?: string;
+  converged?: boolean;
+  reynolds?: number | null;
+  flowRegime?: string;
+  issues?: DiagIssueView[];
+}
+
+const SEV_COLOR: Record<string, string> = { error: '#ff6b6b', warning: '#ffc14a', info: '#7fb3d5' };
+
+/** Live analysis surface: shows calc.diagnose output and one-click fixes. */
+function DiagnosisSection() {
+  const state = useAppState();
+  const dispatch = useDispatch();
+  const core = useCore();
+  const [refining, setRefining] = useState(false);
+  const diag = state.diagnosis as DiagView | null;
+
+  const onAutoRefine = async () => {
+    setRefining(true);
+    try {
+      await runAutoRefine(core, { maxRounds: 3 });
+    } finally {
+      setRefining(false);
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: 10, borderBottom: '1px solid #333', paddingBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <span style={{ fontWeight: 600 }}>진단 / Diagnosis</span>
+        <button
+          onClick={() => void dispatch('calc.diagnose', {})}
+          style={{ padding: '2px 8px', border: '1px solid #3a3a3a', borderRadius: 4, background: '#2a2a2a', color: '#ddd', cursor: 'pointer' }}
+        >
+          진단
+        </button>
+        <button
+          onClick={() => void onAutoRefine()}
+          disabled={refining}
+          style={{ padding: '2px 8px', border: '1px solid #3a5a8a', borderRadius: 4, background: refining ? '#333' : '#27406a', color: '#fff', cursor: refining ? 'default' : 'pointer' }}
+        >
+          {refining ? '자동 수정 중…' : '자동 수정'}
+        </button>
+      </div>
+      {!diag && <div style={{ color: '#888' }}>아직 진단 없음 — "진단"을 누르세요.</div>}
+      {diag && (
+        <>
+          <div style={{ color: '#bbb', marginBottom: 4 }}>{diag.summary}</div>
+          {(diag.issues ?? []).map((iss, idx) => (
+            <div key={`${iss.code}_${idx}`} style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginTop: 4 }}>
+              <span style={{ color: SEV_COLOR[iss.severity] ?? '#aaa', fontWeight: 600, minWidth: 54 }}>[{iss.severity}]</span>
+              <span style={{ flex: 1, color: '#ddd' }}>
+                {iss.message}
+                {iss.suggestion && <span style={{ color: '#999' }}> — {iss.suggestion}</span>}
+              </span>
+              {iss.fix && (
+                <button
+                  onClick={() => void dispatch(iss.fix!.command, iss.fix!.params)}
+                  style={{ padding: '1px 6px', border: '1px solid #3a3a3a', borderRadius: 4, background: '#2a2a2a', color: '#9ad', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                >
+                  적용
+                </button>
+              )}
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
 
 function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -56,13 +137,19 @@ export function ResultsPanel() {
   const setViz = (p: Record<string, number | boolean>) => void dispatch('results.set_viz', p);
 
   if (!results || results.availableFields.length === 0) {
-    return <div style={{ padding: 10, color: '#888', fontSize: 12 }}>No results yet — run a solve.</div>;
+    return (
+      <div style={{ padding: 10, color: '#ddd', fontSize: 12 }}>
+        <DiagnosisSection />
+        <div style={{ color: '#888' }}>No results yet — run a solve.</div>
+      </div>
+    );
   }
 
   const stats = results.activeField ? results.fieldStats[results.activeField] : undefined;
 
   return (
     <div style={{ padding: 10, color: '#ddd', fontSize: 12 }}>
+      <DiagnosisSection />
       <div style={{ fontWeight: 600, marginBottom: 6 }}>Results — color field</div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
         {results.availableFields.map((f) => {

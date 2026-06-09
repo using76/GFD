@@ -90,10 +90,58 @@ describe('calc.diagnose — analyze → identify → fix', () => {
     expect(d.reynolds).toBeNull();
   });
 
+  it('flags a low-orthogonality mesh and suggests a finer re-mesh', () => {
+    const s = baseState();
+    s.mesh = {
+      generated: true,
+      cellCount: 400,
+      nodeCount: 500,
+      quality: { minOrthogonality: 0.05, maxSkewness: 0.4, maxAspectRatio: 8 },
+      badCells: 0,
+      gen: { nx: 20, ny: 20, nz: 0 },
+    };
+    s.solver = { ...s.solver, status: 'converged', iteration: 30, residual: 1e-5 };
+    s.results = {
+      availableFields: ['velocity_magnitude'],
+      activeField: 'velocity_magnitude',
+      fieldStats: { velocity_magnitude: { min: 0, max: 0.5, mean: 0.2 } },
+    };
+    const d = diagnoseState(s);
+    expect(d.mesh?.cells).toBe(400);
+    const mq = d.issues.find((i) => i.code === 'MESH_ORTHOGONALITY');
+    expect(mq?.severity).toBe('warning');
+    expect(mq?.fix).toEqual({ command: 'mesh.generate', params: { nx: 40, ny: 40, nz: 0 } });
+  });
+
+  it('flags bad cells with priority over other mesh metrics', () => {
+    const s = baseState();
+    s.mesh = {
+      generated: true,
+      cellCount: 400,
+      nodeCount: 500,
+      quality: { minOrthogonality: 0.05, maxSkewness: 0.95, maxAspectRatio: 8 },
+      badCells: 7,
+      gen: { nx: 16, ny: 16, nz: 4 },
+    };
+    const d = diagnoseState(s);
+    expect(d.issues.find((i) => i.code === 'MESH_BAD_CELLS')?.fix?.params).toEqual({ nx: 32, ny: 32, nz: 8 });
+    expect(d.issues.some((i) => i.code === 'MESH_ORTHOGONALITY')).toBe(false);
+  });
+
   it('is registered and dispatchable, returning a summary', async () => {
     const core = createCore({ rpc: createMockRpcClient(() => ({})) });
     const r = await core.dispatcher.dispatch({ commandId: 'calc.diagnose', params: {}, source: 'agent' });
     expect(r.ok).toBe(true);
     expect((r.result as DiagnoseResult).summary).toContain('status=');
+  });
+
+  it('caches the diagnosis into AppState for the UI / get_state', async () => {
+    const core = createCore({ rpc: createMockRpcClient(() => ({})) });
+    expect(core.store.getState().diagnosis).toBeNull();
+    await core.dispatcher.dispatch({ commandId: 'calc.diagnose', params: {}, source: 'agent' });
+    const cached = core.store.getState().diagnosis as DiagnoseResult | null;
+    expect(cached).not.toBeNull();
+    expect(cached?.summary).toContain('status=');
+    expect(Array.isArray(cached?.issues)).toBe(true);
   });
 });

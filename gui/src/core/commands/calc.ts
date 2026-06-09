@@ -308,6 +308,14 @@ export interface DiagnoseIssue {
 
 export type FlowRegime = 'laminar' | 'transitional' | 'turbulent' | 'unknown';
 
+export interface DiagnoseMesh {
+  cells: number;
+  badCells: number;
+  minOrthogonality: number | null;
+  maxSkewness: number | null;
+  maxAspectRatio: number | null;
+}
+
 export interface DiagnoseResult {
   status: string;
   converged: boolean;
@@ -318,6 +326,7 @@ export interface DiagnoseResult {
   characteristicLength: number;
   characteristicVelocity: number;
   flowRegime: FlowRegime;
+  mesh: DiagnoseMesh | null;
   fieldStats: Record<string, { min: number; max: number; mean: number }>;
   issues: DiagnoseIssue[];
   summary: string;
@@ -470,6 +479,58 @@ export function diagnoseState(state: AppState): DiagnoseResult {
     });
   }
 
+  // (g2) Mesh quality — a leading cause of divergence/slow convergence. Suggest
+  // a finer re-mesh (doubling the grid) when orthogonality/skewness/bad-cells
+  // cross typical CFD thresholds.
+  const mesh = state.mesh;
+  let meshSummary: DiagnoseMesh | null = null;
+  if (mesh) {
+    const q = mesh.quality;
+    meshSummary = {
+      cells: mesh.cellCount,
+      badCells: mesh.badCells ?? 0,
+      minOrthogonality: q ? q.minOrthogonality : null,
+      maxSkewness: q ? q.maxSkewness : null,
+      maxAspectRatio: q ? q.maxAspectRatio : null,
+    };
+    const finer = mesh.gen
+      ? { nx: mesh.gen.nx * 2, ny: mesh.gen.ny * 2, nz: mesh.gen.nz === 0 ? 0 : mesh.gen.nz * 2 }
+      : undefined;
+    const meshFix = finer ? { command: 'mesh.generate', params: finer as JsonObject } : undefined;
+    if ((mesh.badCells ?? 0) > 0) {
+      issues.push({
+        code: 'MESH_BAD_CELLS',
+        severity: 'warning',
+        message: `메쉬에 품질 기준 미달 셀이 ${mesh.badCells}개 있습니다.`,
+        suggestion: '메쉬를 더 조밀하게 재생성하거나 도메인/경계층 설정을 점검하세요.',
+        ...(meshFix ? { fix: meshFix } : {}),
+      });
+    } else if (q && q.minOrthogonality < 0.15) {
+      issues.push({
+        code: 'MESH_ORTHOGONALITY',
+        severity: 'warning',
+        message: `메쉬 직교성 최소값 ${q.minOrthogonality.toFixed(3)}가 매우 낮습니다(<0.15).`,
+        suggestion: '메쉬를 더 조밀하게 재생성하세요. 비직교 보정이 수렴을 저해합니다.',
+        ...(meshFix ? { fix: meshFix } : {}),
+      });
+    } else if (q && q.maxSkewness > 0.9) {
+      issues.push({
+        code: 'MESH_SKEWNESS',
+        severity: 'warning',
+        message: `메쉬 최대 왜도 ${q.maxSkewness.toFixed(3)}가 과도합니다(>0.9).`,
+        suggestion: '왜곡된 셀이 많습니다 — 더 조밀하게 재생성하세요.',
+        ...(meshFix ? { fix: meshFix } : {}),
+      });
+    } else if (q && q.maxAspectRatio > 1000) {
+      issues.push({
+        code: 'MESH_ASPECT',
+        severity: 'info',
+        message: `메쉬 최대 종횡비 ${q.maxAspectRatio.toFixed(0)}가 큽니다(>1000).`,
+        suggestion: '경계층 의도가 아니라면 격자 비율을 점검하세요.',
+      });
+    }
+  }
+
   // (h) Clean bill of health.
   const hasProblem = issues.some((i) => i.severity !== 'info');
   if (!hasProblem && solver.status === 'converged') {
@@ -501,6 +562,7 @@ export function diagnoseState(state: AppState): DiagnoseResult {
     characteristicLength: L,
     characteristicVelocity: U,
     flowRegime,
+    mesh: meshSummary,
     fieldStats,
     issues,
     summary,
@@ -519,7 +581,13 @@ export const calcDiagnose: CommandDef<Record<string, never>, DiagnoseResult> = {
   undoable: false,
   paramsSchema: { type: 'object', properties: {} },
   async run(_params, ctx) {
-    return { ok: true, result: diagnoseState(ctx.getState()) };
+    const result = diagnoseState(ctx.getState());
+    // Cache the analysis in state so the UI panel and `get_state` can show it.
+    return {
+      ok: true,
+      result,
+      statePatch: [{ op: 'replace', path: ['diagnosis'], value: result as unknown as JsonValue }],
+    };
   },
 };
 

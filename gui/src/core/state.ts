@@ -6,7 +6,7 @@
  * letting an agent detect staleness / do optimistic concurrency.
  */
 
-import type { Vec3 } from './types';
+import type { Vec3, JsonValue } from './types';
 import { applyPatch, type AppliedOp, type PatchOp } from './patch';
 import { buildDefaultManifest, type PhysicsManifest } from './physics/manifest';
 
@@ -51,6 +51,10 @@ export interface MeshState {
   cellCount: number;
   nodeCount: number;
   quality: { minOrthogonality: number; maxSkewness: number; maxAspectRatio: number } | null;
+  /** Count of cells failing a quality threshold (from the backend mesher). */
+  badCells?: number;
+  /** The grid resolution used to generate this mesh (so a refine fix can scale it). */
+  gen?: { nx: number; ny: number; nz: number };
 }
 
 export interface SolverStatus {
@@ -179,6 +183,12 @@ export interface AppState {
   gmsh: GmshScene;
   solver: SolverStatus;
   results: ResultsSummary | null;
+  /**
+   * Latest analysis from `calc.diagnose` / `auto_refine` (a DiagnoseResult,
+   * stored loosely to avoid a state↔command type cycle). Lets the human UI and
+   * an AI agent see the current problem assessment + suggested fixes.
+   */
+  diagnosis: JsonValue | null;
   ui: UiState;
 }
 
@@ -221,6 +231,7 @@ export function createInitialState(): AppState {
     gmsh: { mesh: null, shapeIds: [], meshStats: null },
     solver: { jobId: null, status: 'idle', iteration: 0, residual: null, maxIterations: 200 },
     results: null,
+    diagnosis: null,
     ui: { activeTab: 'geometry', activeTool: null, units: 'SI' },
   };
 }

@@ -67,9 +67,33 @@
 - 검증: `tsc --noEmit` 0 errors, `vitest run` 83 passed (autorefine 테스트 3개:
   발산→완화하향→수렴, healthy no-op, MCP 노출).
 
+### iter 4 — 메쉬 품질을 diagnose에 통합 ✅ (완료)
+- 문제: 발산/저수렴의 주요 원인인 나쁜 메쉬를 분석이 보지 못함.
+- 구현: `MeshState`에 `badCells`/`gen{nx,ny,nz}` 저장(`mesh.generate`), `diagnoseState`가
+  직교성<0.15·왜도>0.9·bad cells>0·종횡비>1000 감지 → 경고 + `mesh.generate`(격자 2배)
+  fix 제안. `DiagnoseResult.mesh` 요약 추가.
+- 검증: tsc 0, vitest 85 passed (메쉬 진단 테스트 2개 추가).
+
+### iter 5 — 진단 결과 AppState 캐시 + MCP 노출 ✅ (완료)
+- 문제: diagnose/auto_refine 결과가 명령 반환값으로만 존재 → UI/AI가 상태로 못 봄.
+- 구현: `AppState.diagnosis`(JsonValue) 추가, `calc.diagnose`가 결과를 state에 기록,
+  `auto_refine`이 매 라운드 `calc.diagnose` dispatch로 라이브 갱신, `get_state_summary`
+  메타툴이 diagnosis(summary+issues) 노출.
+- 검증: tsc 0, vitest 86 passed (state 캐시 테스트 추가).
+
+### iter 6 — 진단 라이브 UI 패널 ✅ (완료)
+- 문제: "결과 분석"이 화면에 안 보임("라이브로 보이고" 미충족).
+- 구현(`gui/src/react/ResultsPanel.tsx`): `DiagnosisSection` — [진단]/[자동 수정] 버튼 +
+  `state.diagnosis` 이슈를 심각도 색상으로 표시 + 이슈별 [적용] 버튼(`fix.command` dispatch).
+  결과 없을 때도 표시. 사람도 한 번에 AI 제안을 적용/자율수정 실행 가능.
+- 검증: tsc 0, `vite build` 성공, vitest 86 passed.
+
 ## 향후 후보 (backlog)
 - per-equation residual 분리(현재 단일 scalar) → AI 수렴 진단 정밀화.
-- diagnose/auto_refine 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
+- auto_refine 동일 fix 반복 방지(완화계수 floor 도달 시 메쉬 fix로 전환).
+- 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).
+- Distance/angle 2-pick measure.
+- import한 STEP의 topology 복원(현재 points-only).
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
 - mesh 품질/설정 패널(size/prism/quality) command + UI.
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).

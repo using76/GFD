@@ -65,6 +65,8 @@ export const meshGenerate: CommandDef<MeshGenerateParams, MeshGenerateResponse> 
         maxSkewness: res.quality.max_skew,
         maxAspectRatio: res.quality.max_ar,
       },
+      badCells: res.quality.bad_cells,
+      gen: { nx: params.nx, ny: params.ny, nz: params.nz },
     };
     const patch: PatchOp[] = [{ op: 'replace', path: ['mesh'], value: meshState as unknown as JsonObject }];
     return { ok: true, result: res, statePatch: patch };
