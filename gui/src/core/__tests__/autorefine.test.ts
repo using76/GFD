@@ -100,6 +100,37 @@ describe('auto-refine — autonomous diagnose→fix→re-run loop', () => {
     expect(result.healthy).toBe(false);
   });
 
+  it('escalates to a different fix (re-mesh) when relaxation does not help', async () => {
+    const s = divergedState();
+    // Add a poor-quality mesh so a MESH_ORTHOGONALITY fix is available to escalate to.
+    s.mesh = {
+      generated: true,
+      cellCount: 400,
+      nodeCount: 500,
+      quality: { minOrthogonality: 0.05, maxSkewness: 0.4, maxAspectRatio: 8 },
+      badCells: 0,
+      gen: { nx: 20, ny: 20, nz: 0 },
+    };
+    const stuckBackend = createMockRpcClient((method: string) => {
+      if (method === 'solve.start') return { job_id: 'job1' };
+      if (method === 'solve.status') return { running: false, iteration: 100, residual: 1e3, status: 'finished' };
+      if (method === 'field.get') return { values: [1], min: 0, max: Infinity, mean: Infinity };
+      if (method === 'mesh.generate') {
+        return { cells: 1600, faces: 5000, nodes: 1800, quality: { min_ortho: 0.8, max_skew: 0.2, max_ar: 5, bad_cells: 0 } };
+      }
+      return {};
+    });
+    const core = createCore({ rpc: stuckBackend, initialState: s });
+    const result = await runAutoRefine(core, { maxRounds: 5, pollIntervalMs: 5 });
+    // Round 1 tries the relaxation fix; round 2 escalates to re-meshing; then stops.
+    expect(result.rounds[0].issueCode).toBe('DIVERGENCE');
+    expect(result.rounds[1].issueCode).toBe('MESH_ORTHOGONALITY');
+    expect(result.rounds[1].fixCommand).toBe('mesh.generate');
+    expect(result.stoppedReason).toBe('no_progress');
+    // After the re-mesh the backend reports good quality.
+    expect(core.store.getState().mesh?.quality?.minOrthogonality).toBeCloseTo(0.8);
+  });
+
   it('is exposed as the auto_refine MCP meta-tool', async () => {
     const core = createCore({ rpc: healthyBackend(), initialState: divergedState() });
     const bridge = createMcpBridge(core);

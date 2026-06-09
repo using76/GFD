@@ -62,15 +62,14 @@ function roundImproved(r: AutoRefineRound): boolean {
   return a !== null && b !== null && Number.isFinite(a) && Number.isFinite(b) && a < b * 0.99;
 }
 
-/** Highest-severity issue that carries an actionable fix (errors before warnings). */
-function pickActionable(issues: DiagnoseIssue[]): DiagnoseIssue | null {
+/** Actionable issues with a fix, ordered: errors → warnings → NO_RESULTS. */
+function actionableIssues(issues: DiagnoseIssue[]): DiagnoseIssue[] {
   const withFix = issues.filter((i) => !!i.fix);
-  return (
-    withFix.find((i) => i.severity === 'error') ??
-    withFix.find((i) => i.severity === 'warning') ??
-    withFix.find((i) => i.code === 'NO_RESULTS') ??
-    null
-  );
+  return [
+    ...withFix.filter((i) => i.severity === 'error'),
+    ...withFix.filter((i) => i.severity === 'warning'),
+    ...withFix.filter((i) => i.code === 'NO_RESULTS'),
+  ];
 }
 
 /** Run calc.diagnose so the analysis is cached in state, and return it. */
@@ -102,6 +101,10 @@ export async function runAutoRefine(
   const rounds: AutoRefineRound[] = [];
   let stoppedReason: StoppedReason = 'max_rounds';
   let lastDiag: DiagnoseResult | null = null;
+  // Issue codes whose fix was already tried and made no measurable progress —
+  // give each distinct fix exactly one shot, then escalate to the next actionable
+  // issue (e.g. relaxation didn't help → try re-meshing) before giving up.
+  const ineffectiveCodes = new Set<string>();
 
   for (let round = 1; round <= maxRounds; round++) {
     if (opts.signal?.aborted) {
@@ -112,18 +115,11 @@ export async function runAutoRefine(
     // Diagnose through the command so the analysis is cached in AppState live.
     const diag = await dispatchDiagnose(core);
     lastDiag = diag;
-    const issue = pickActionable(diag.issues);
+    const candidates = actionableIssues(diag.issues);
+    const issue = candidates.find((c) => !ineffectiveCodes.has(c.code)) ?? null;
     if (!issue) {
-      stoppedReason = 'healthy';
-      break;
-    }
-
-    // Don't burn solver runs re-applying a fix that isn't working: if the same
-    // problem persists from the previous round and that round made no measurable
-    // progress, stop and report it instead of looping on an ineffective fix.
-    const prev = rounds[rounds.length - 1];
-    if (prev && prev.issueCode === issue.code && !roundImproved(prev)) {
-      stoppedReason = 'no_progress';
+      // No fresh fix left: healthy if nothing was actionable, else stuck.
+      stoppedReason = candidates.length ? 'no_progress' : 'healthy';
       break;
     }
     onEvent?.({ type: 'round_start', round, issue });
@@ -156,7 +152,7 @@ export async function runAutoRefine(
     await waitForSolve(core, timeoutMs, pollMs, opts.signal);
 
     const after = core.store.getState().solver;
-    rounds.push({
+    const thisRound: AutoRefineRound = {
       round,
       issueCode: issue.code,
       severity: issue.severity,
@@ -165,8 +161,13 @@ export async function runAutoRefine(
       beforeResidual,
       afterResidual: after.residual,
       afterStatus: after.status,
-    });
+    };
+    rounds.push(thisRound);
     onEvent?.({ type: 'solve_done', round, status: after.status, residual: after.residual });
+
+    // If this fix didn't help, don't try it again — escalate to a different one
+    // next round (or stop once every actionable fix has been exhausted).
+    if (!roundImproved(thisRound)) ineffectiveCodes.add(issue.code);
   }
 
   // Reuse the last in-loop diagnosis when we stopped on it (healthy / no-progress

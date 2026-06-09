@@ -132,12 +132,24 @@
   bbox 최근접 간격(겹치면 0) + 각 중심. AI가 간격/클리어런스 점검 가능.
 - 검증: tsc 0, vitest 100 passed (measureDistance 테스트 3개).
 
+### iter 12 — auto_refine 에스컬레이션(효과 없는 fix → 다른 fix) ✅ (완료)
+- 문제: iter 8은 같은 이슈가 안 먹히면 즉시 중단 → 다른 처방(예: 메쉬 재생성)을 시도 안 함.
+- 구현(`autoRefine.ts`): `actionableIssues`(error→warning→NO_RESULTS 정렬) +
+  `ineffectiveCodes` 집합. 각 distinct fix를 한 번만 시도하고, 개선 없으면 그 코드를
+  제외하고 다음 actionable 이슈로 escalate. 모두 소진 시 `no_progress`.
+  예: 발산→완화계수 하향(무효)→메쉬 재생성으로 escalate→중단.
+- 검증: tsc 0, vitest 101 passed (에스컬레이션 테스트 추가; 기존 no_progress/healthy 유지).
+
+### iter 13 — get_state_summary에 per-equation residual 노출 ✅ (완료)
+- 구현(`mcp/bridge.ts`): `get_state_summary`의 solver에 `residualsByEq` 포함 →
+  AI가 저렴한 요약 한 번으로 어느 방정식(vx/vy/vz/pressure/continuity)이 문제인지 파악.
+- 검증: tsc 0, mcp 테스트 통과.
+
 ## 향후 후보 (backlog)
-- import한 STEP의 topology 복원(현재 points-only).
-- auto_refine: floor 도달한 완화계수 대신 메쉬 fix로 escalate.
-- get_state_summary에 residualsByEq 노출.
+- import한 STEP의 topology 복원(현재 points-only) — 백엔드.
 - measure.angle (edge/face 방향 — 백엔드 필요).
 - nearest/semantic의 face/edge 단위(백엔드 tessellation 기반).
+- diagnose 결과의 residualsByEq를 UI 패널에 표시.
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
 - mesh 품질/설정 패널(size/prism/quality) command + UI.
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).

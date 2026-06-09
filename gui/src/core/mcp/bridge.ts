@@ -75,7 +75,12 @@ export function createMcpBridge(core: Core): McpBridge {
           shapes: Object.values(s.doc.geometry.nodes).map((n) => ({ id: n.id, name: n.name, kind: n.kind, visible: n.visible })),
           selection: s.selection as unknown as JsonValue,
           mesh: s.mesh ? { cells: s.mesh.cellCount, nodes: s.mesh.nodeCount, badCells: s.mesh.badCells ?? 0 } : null,
-          solver: { status: s.solver.status, iteration: s.solver.iteration, residual: s.solver.residual },
+          solver: {
+            status: s.solver.status,
+            iteration: s.solver.iteration,
+            residual: s.solver.residual,
+            ...(s.solver.residualsByEq ? { residualsByEq: s.solver.residualsByEq } : {}),
+          },
           results: s.results ? { fields: s.results.availableFields, active: s.results.activeField } : null,
           diagnosis: diag
             ? {
