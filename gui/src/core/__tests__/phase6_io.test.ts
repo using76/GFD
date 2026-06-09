@@ -140,6 +140,28 @@ describe('Vector / streamline viz commands', () => {
     expect(core.store.getState().viz.showVectors).toBe(true);
     expect(core.store.getState().viz.vectorScale).toBe(2);
   });
+
+  it('extracts an isosurface and toggles its viz state', async () => {
+    const rpc = createMockRpcClient((method: string, params: JsonObject) => {
+      if (method === 'field.isosurface') {
+        expect(params.field).toBe('velocity_magnitude');
+        return { positions: [0, 0, 0, 1, 0, 0, 0, 1, 0], triangle_count: 1, isovalue: params.isovalue ?? 0.5, field: 'velocity_magnitude' };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const iso = await core.dispatcher.dispatch({
+      commandId: 'results.isosurface',
+      params: { field: 'velocity_magnitude', isovalue: 0.5 },
+      source: 'agent',
+    });
+    expect(iso.ok).toBe(true);
+    expect((iso.result as { triangle_count: number }).triangle_count).toBe(1);
+
+    await core.dispatcher.dispatch({ commandId: 'results.set_viz', params: { showIsosurface: true, isovalue: 0.3 }, source: 'agent' });
+    expect(core.store.getState().viz.showIsosurface).toBe(true);
+    expect(core.store.getState().viz.isovalue).toBe(0.3);
+  });
 });
 
 describe('CAD import → feature tree', () => {

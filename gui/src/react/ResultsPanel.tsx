@@ -215,6 +215,18 @@ export function ResultsPanel() {
           </>
         )}
 
+        <Toggle label="Isosurface" checked={viz.showIsosurface} onChange={(v) => setViz({ showIsosurface: v })} />
+        {viz.showIsosurface && stats && (
+          <Slider
+            label="isovalue"
+            value={viz.isovalue}
+            min={stats.min}
+            max={stats.max}
+            step={(stats.max - stats.min) / 100 || 0.01}
+            onChange={(v) => setViz({ isovalue: v })}
+          />
+        )}
+
         <Toggle label="Streamlines" checked={viz.showStreamlines} onChange={(v) => setViz({ showStreamlines: v })} />
         {viz.showStreamlines && (
           <>

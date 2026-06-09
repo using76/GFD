@@ -211,6 +211,49 @@ function StreamlineLayer() {
   );
 }
 
+/** Isosurface (marching-tet level set) of the active solved scalar field. */
+function IsosurfaceLayer() {
+  const state = useAppState();
+  const dispatch = useDispatch();
+  const viz = state.viz;
+  const activeField = state.results?.activeField ?? null;
+  const tag = `${activeField}:${state.solver.iteration}:${state.solver.status}:${viz.isovalue}`;
+  const [geo, setGeo] = useState<THREE.BufferGeometry | null>(null);
+
+  useEffect(() => {
+    if (!viz.showIsosurface || !activeField) {
+      setGeo(null);
+      return;
+    }
+    let cancelled = false;
+    const params: Record<string, string | number> = { field: activeField };
+    if (viz.isovalue !== 0) params.isovalue = viz.isovalue;
+    void dispatch('results.isosurface', params).then((o) => {
+      if (cancelled || !o.ok || !o.result) return;
+      const r = o.result as { positions: number[] };
+      if (!r.positions || r.positions.length < 9) {
+        setGeo(null);
+        return;
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(r.positions, 3));
+      g.computeVertexNormals();
+      setGeo(g);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [viz.showIsosurface, viz.isovalue, activeField, tag, dispatch]);
+  useEffect(() => () => geo?.dispose(), [geo]);
+
+  if (!viz.showIsosurface || !geo) return null;
+  return (
+    <mesh geometry={geo}>
+      <meshStandardMaterial color="#33dd88" metalness={0.1} roughness={0.5} side={THREE.DoubleSide} transparent opacity={0.85} />
+    </mesh>
+  );
+}
+
 /** Renders the whole-model triangulation from the Gmsh (OCC) backend as one mesh. */
 function GmshSceneLayer() {
   const gm = useAppState().gmsh.mesh;
@@ -341,6 +384,7 @@ export function ViewportV2() {
       <GeometryLayer />
       <GmshSceneLayer />
       <ResultsFieldLayer />
+      <IsosurfaceLayer />
       <VectorGlyphLayer />
       <StreamlineLayer />
       <GizmoHelper alignment="bottom-right" margin={[70, 70]}>

@@ -168,11 +168,23 @@
   step/command/hint) 반환. 레지스트리 command라 MCP 툴로 자동 노출. 프롬프트에도 안내 추가.
 - 검증: tsc 0, vitest 108 passed (단계별 nextAction 테스트 5개).
 
+### iter 17 — isosurface 렌더링 (결과 표현, 전 스택) ✅ (완료)
+- 문제: "결과 표현"에서 3D 등치면(isosurface)이 미구현(상태문서 X). contour는 경계면만.
+- 구현(marching tetrahedra, 테이블 없는 robust 방식):
+  - 백엔드(`src/server.rs`): `march_tet`(셀 below 개수로 분기) + `handle_field_isosurface`
+    (cell-center dual grid, cell idx=i+j·nx+k·nx·ny, 위치는 mesh.cell.center) +
+    `field.isosurface` RPC. **Rust 단위 테스트 3개**(1-below/2-2/no-crossing).
+  - command-core: `results.isosurface{field,isovalue}`(기본 isovalue=평균), `VizState`에
+    `showIsosurface`/`isovalue`.
+  - 렌더러(`ViewportV2.tsx`): `IsosurfaceLayer`(반투명 녹색 mesh, computeVertexNormals).
+  - UI(`ResultsPanel.tsx`): Isosurface 토글 + isovalue 슬라이더(field min~max).
+- 검증: `cargo test --bin gfd-server march_tet` 3 passed, tsc 0, vite build, vitest 109.
+
 ## 향후 후보 (backlog)
 - import한 STEP의 topology 복원(현재 points-only) — 백엔드.
 - measure.angle (edge/face 방향 — 백엔드 필요).
 - nearest/semantic의 face/edge 단위(백엔드 tessellation 기반).
-- isosurface 렌더(marching cubes) — 미구현.
+- Q-criterion/vorticity 등 파생장(isosurface와 결합).
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
 - mesh 품질/설정 패널(size/prism/quality) command + UI.
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).

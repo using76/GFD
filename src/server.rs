@@ -637,6 +637,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "field.contour" => handle_field_contour(state, req.id, &req.params),
         "field.export_vdb" => handle_field_export_vdb(state, req.id, &req.params),
         "field.vectors" => handle_field_vectors(state, req.id, &req.params),
+        "field.isosurface" => handle_field_isosurface(state, req.id, &req.params),
         "field.streamlines" => handle_field_streamlines(state, req.id, &req.params),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
@@ -5573,6 +5574,124 @@ fn handle_field_vectors(state: &mut ServerState, id: u64, params: &Value) -> Rpc
     }))
 }
 
+/// Marching tetrahedra on a single tet: append isosurface triangles (flat xyz
+/// floats) where the scalar `val` crosses `iso`. Table-free — splits by how many
+/// corners are below the level. Winding is not normalized (the renderer uses
+/// double-sided material + computed normals), which keeps this provably simple.
+fn march_tet(pos: &[[f64; 3]; 4], val: &[f64; 4], iso: f64, out: &mut Vec<f64>) {
+    let lerp = |lo: usize, hi: usize| -> [f64; 3] {
+        let denom = val[hi] - val[lo];
+        let t = if denom.abs() < 1e-30 { 0.5 } else { (iso - val[lo]) / denom };
+        [
+            pos[lo][0] + t * (pos[hi][0] - pos[lo][0]),
+            pos[lo][1] + t * (pos[hi][1] - pos[lo][1]),
+            pos[lo][2] + t * (pos[hi][2] - pos[lo][2]),
+        ]
+    };
+    let mut push = |p: [f64; 3]| out.extend_from_slice(&p);
+    let below: Vec<usize> = (0..4).filter(|&i| val[i] < iso).collect();
+    let above: Vec<usize> = (0..4).filter(|&i| val[i] >= iso).collect();
+    match below.len() {
+        1 => {
+            let lo = below[0];
+            let (a, b, c) = (lerp(lo, above[0]), lerp(lo, above[1]), lerp(lo, above[2]));
+            push(a); push(b); push(c);
+        }
+        3 => {
+            let hi = above[0];
+            let (a, b, c) = (lerp(below[0], hi), lerp(below[1], hi), lerp(below[2], hi));
+            push(a); push(b); push(c);
+        }
+        2 => {
+            let (b0, b1) = (below[0], below[1]);
+            let (a0, a1) = (above[0], above[1]);
+            let q0 = lerp(b0, a0);
+            let q1 = lerp(b0, a1);
+            let q2 = lerp(b1, a1);
+            let q3 = lerp(b1, a0);
+            push(q0); push(q1); push(q2);
+            push(q0); push(q2); push(q3);
+        }
+        _ => {} // 0 or 4 below: no crossing
+    }
+}
+
+/// Extract an isosurface of a cell-centered scalar field over the structured
+/// grid (marching tetrahedra on the dual grid of cell centers). Returns a flat
+/// triangle-soup `positions` buffer; the GUI computes normals.
+fn handle_field_isosurface(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let field_name = params.get("field").and_then(|v| v.as_str()).unwrap_or("velocity_magnitude");
+    let Some((nx, ny, nz, _lx, _ly, _lz)) = state.mesh_params else {
+        return RpcResponse::err(id, "No structured mesh (isosurface needs mesh.generate)");
+    };
+    let mesh = match &state.mesh {
+        Some(m) => m,
+        None => return RpcResponse::err(id, "No mesh"),
+    };
+    let values = match state.fields.get(field_name) {
+        Some(v) => v,
+        None => return RpcResponse::err(id, format!("Field '{}' not found; run a solve first", field_name)),
+    };
+    // Default isovalue = field mean over finite values.
+    let iso = params.get("isovalue").and_then(|v| v.as_f64()).unwrap_or_else(|| {
+        let (mut s, mut c) = (0.0, 0usize);
+        for &v in values.iter() {
+            if v.is_finite() {
+                s += v;
+                c += 1;
+            }
+        }
+        if c == 0 { 0.0 } else { s / c as f64 }
+    });
+
+    let (nxu, nyu, nzu) = (nx.max(1), ny.max(1), nz.max(1));
+    let cidx = |i: usize, j: usize, k: usize| i + j * nxu + k * nxu * nyu;
+    // Corner (dx,dy,dz) offsets and the 6-tet decomposition sharing diagonal 0-7.
+    const OFF: [[usize; 3]; 8] = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]];
+    const TETS: [[usize; 4]; 6] = [[0, 1, 3, 7], [0, 3, 2, 7], [0, 2, 6, 7], [0, 6, 4, 7], [0, 4, 5, 7], [0, 5, 1, 7]];
+
+    let mut positions: Vec<f64> = Vec::new();
+    if nxu >= 2 && nyu >= 2 && nzu >= 2 {
+        for k in 0..nzu - 1 {
+            for j in 0..nyu - 1 {
+                for i in 0..nxu - 1 {
+                    let mut cp = [[0.0f64; 3]; 8];
+                    let mut cv = [0.0f64; 8];
+                    let mut ok = true;
+                    for (c, off) in OFF.iter().enumerate() {
+                        let idx = cidx(i + off[0], j + off[1], k + off[2]);
+                        match mesh.cell(idx) {
+                            Ok(cell) => {
+                                cp[c] = cell.center;
+                                cv[c] = values.get(idx).copied().unwrap_or(0.0);
+                            }
+                            Err(_) => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if !ok || cv.iter().any(|v| !v.is_finite()) {
+                        continue;
+                    }
+                    for tet in &TETS {
+                        let pos = [cp[tet[0]], cp[tet[1]], cp[tet[2]], cp[tet[3]]];
+                        let val = [cv[tet[0]], cv[tet[1]], cv[tet[2]], cv[tet[3]]];
+                        march_tet(&pos, &val, iso, &mut positions);
+                    }
+                }
+            }
+        }
+    }
+    RpcResponse::ok(id, serde_json::json!({
+        "positions": positions,
+        "triangle_count": positions.len() / 9,
+        "isovalue": iso,
+        "field": field_name,
+    }))
+}
+
 /// Sample velocity at a point by nearest cell centroid.
 fn sample_velocity(
     p: [f64; 3],
@@ -5905,5 +6024,40 @@ fn main() {
         let resp = handle_request(&mut state, &req);
         let _ = writeln!(out, "{}", serde_json::to_string(&resp).unwrap());
         let _ = out.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn march_tet_one_below_emits_one_triangle_at_crossings() {
+        // corner 0 below (val 0), corners 1..3 above (val 1), iso 0.5 → edge midpoints.
+        let pos = [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]];
+        let val = [0.0, 1.0, 1.0, 1.0];
+        let mut out = Vec::new();
+        march_tet(&pos, &val, 0.5, &mut out);
+        assert_eq!(out.len(), 9, "exactly one triangle");
+        assert_eq!(&out, &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn march_tet_two_below_emits_a_quad() {
+        let pos = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let val = [0.0, 0.0, 1.0, 1.0];
+        let mut out = Vec::new();
+        march_tet(&pos, &val, 0.5, &mut out);
+        assert_eq!(out.len(), 18, "two triangles for the 2-2 split");
+    }
+
+    #[test]
+    fn march_tet_no_crossing_emits_nothing() {
+        let pos = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut out = Vec::new();
+        march_tet(&pos, &[1.0, 1.0, 1.0, 1.0], 0.5, &mut out);
+        assert!(out.is_empty());
+        march_tet(&pos, &[0.0, 0.0, 0.0, 0.0], 0.5, &mut out);
+        assert!(out.is_empty());
     }
 }

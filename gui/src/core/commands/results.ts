@@ -88,6 +88,41 @@ export const resultsContour: CommandDef<ContourParams, ContourResult> = {
   },
 };
 
+export interface IsosurfaceParams {
+  field?: string;
+  isovalue?: number;
+}
+
+export interface IsosurfaceResult {
+  positions: number[];
+  triangle_count: number;
+  isovalue: number;
+  field: string;
+}
+
+export const resultsIsosurface: CommandDef<IsosurfaceParams, IsosurfaceResult> = {
+  id: 'results.isosurface',
+  category: 'results',
+  group: 'Visualize',
+  title: 'Isosurface',
+  titleKo: '등치면',
+  description:
+    'Extract an isosurface (marching tetrahedra) of a solved scalar field at an isovalue (default: the field mean). Returns a triangle mesh for the viewport — the standard way to see a 3D field level set.',
+  capability: 'read',
+  paramsSchema: {
+    type: 'object',
+    properties: { field: { type: 'string' }, isovalue: { type: 'number' } },
+  },
+  async run(params, ctx) {
+    const field = params.field ?? ctx.getState().results?.activeField ?? 'velocity_magnitude';
+    const r = await ctx.rpc.request<IsosurfaceResult>('field.isosurface', {
+      field,
+      ...(params.isovalue !== undefined ? { isovalue: params.isovalue } : {}),
+    });
+    return { ok: true, result: r };
+  },
+};
+
 export interface VectorsResult {
   origins: number[];
   vectors: number[];
@@ -144,6 +179,8 @@ export interface SetVizParams {
   showStreamlines?: boolean;
   streamlineSeeds?: number;
   streamlineSteps?: number;
+  showIsosurface?: boolean;
+  isovalue?: number;
 }
 
 export const resultsSetViz: CommandDef<SetVizParams, Record<string, never>> = {
@@ -165,6 +202,8 @@ export const resultsSetViz: CommandDef<SetVizParams, Record<string, never>> = {
       showStreamlines: { type: 'boolean' },
       streamlineSeeds: { type: 'integer', minimum: 1 },
       streamlineSteps: { type: 'integer', minimum: 2 },
+      showIsosurface: { type: 'boolean' },
+      isovalue: { type: 'number' },
     },
   },
   async run(params) {
@@ -182,5 +221,6 @@ export function registerResultsCommands(registry: CommandRegistry): void {
   registry.register(resultsContour);
   registry.register(resultsVectors);
   registry.register(resultsStreamlines);
+  registry.register(resultsIsosurface);
   registry.register(resultsSetViz);
 }

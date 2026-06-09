@@ -121,6 +121,9 @@ export interface VizState {
   showStreamlines: boolean;
   streamlineSeeds: number;
   streamlineSteps: number;
+  showIsosurface: boolean;
+  /** Isosurface level; 0 means "auto" (backend uses the field mean). */
+  isovalue: number;
 }
 
 /**
@@ -211,6 +214,8 @@ export function createInitialState(): AppState {
     showStreamlines: false,
     streamlineSeeds: 20,
     streamlineSteps: 200,
+    showIsosurface: false,
+    isovalue: 0,
   };
   return {
     doc: { id: 'doc_1', revision: 0, geometry: { roots: [], nodes: {} }, sketchIds: [] },
