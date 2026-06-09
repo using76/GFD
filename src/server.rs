@@ -100,6 +100,11 @@ struct ServerState {
     cad_doc: Document,
     /// Map from GUI-facing shape string id ("shape_N") to arena ShapeId.
     cad_shape_map: HashMap<String, ShapeId>,
+    /// Imported triangle meshes (STL/OBJ/OFF/PLY/XYZ) keyed by GUI shape id.
+    /// These have no B-Rep arena entry — they are stored verbatim and returned
+    /// directly by the tessellate handlers so an imported CAD file can live in
+    /// the feature tree and render like any other shape.
+    imported_meshes: HashMap<String, TriMesh>,
     /// Counter for cad shape string ids.
     next_cad_shape_id: u64,
     /// Applied pluggable physics manifest (Phase 7), as received from the GUI.
@@ -146,6 +151,7 @@ impl ServerState {
             fields: HashMap::new(),
             cad_doc: Document::new(),
             cad_shape_map: HashMap::new(),
+            imported_meshes: HashMap::new(),
             next_cad_shape_id: 0,
             physics_manifest: None,
             #[cfg(feature = "gmsh")]
@@ -534,6 +540,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.import.off"        => handle_cad_import_mesh(req.id, &req.params, "off"),
         "cad.import.ply"        => handle_cad_import_mesh(req.id, &req.params, "ply"),
         "cad.import.xyz"        => handle_cad_import_mesh(req.id, &req.params, "xyz"),
+        "cad.import.mesh_to_tree" => handle_cad_import_mesh_to_tree(state, req.id, &req.params),
         "cad.measure.polygon_area" => handle_cad_measure_polygon_area(req.id, &req.params),
         "cad.measure.polygon_full" => handle_cad_measure_polygon_full(req.id, &req.params),
         "cad.measure.polygon_signed_area" => handle_cad_measure_polygon_signed_area(req.id, &req.params),
@@ -760,6 +767,7 @@ fn handle_cad_create_primitive(state: &mut ServerState, id: u64, params: &Value)
 fn handle_cad_document_new(state: &mut ServerState, id: u64) -> RpcResponse {
     state.cad_doc = Document::new();
     state.cad_shape_map.clear();
+    state.imported_meshes.clear();
     state.next_cad_shape_id = 0;
     RpcResponse::ok(id, serde_json::json!({ "ok": true }))
 }
@@ -803,6 +811,7 @@ fn handle_cad_document_from_string(state: &mut ServerState, id: u64, params: &Va
     };
     state.cad_doc = gfd_cad::Document::default();
     state.cad_shape_map.clear();
+    state.imported_meshes.clear();
     state.next_cad_shape_id = 0;
     let Some(arr) = doc.get("shapes").and_then(|v| v.as_array()) else {
         return RpcResponse::err(id, "doc missing 'shapes'");
@@ -878,6 +887,7 @@ fn handle_cad_document_load_json(state: &mut ServerState, id: u64, params: &Valu
     // Reset document (new arena + clear sketches).
     state.cad_doc = gfd_cad::Document::default();
     state.cad_shape_map.clear();
+    state.imported_meshes.clear();
     state.next_cad_shape_id = 0;
     let Some(arr) = doc.get("shapes").and_then(|v| v.as_array()) else {
         return RpcResponse::err(id, "doc missing 'shapes'");
@@ -1327,6 +1337,15 @@ fn handle_cad_tessellate_adaptive(state: &mut ServerState, id: u64, params: &Val
         Some(s) => s,
         None => return RpcResponse::err(id, "missing shape_id"),
     };
+    // Imported triangle meshes have no B-Rep arena entry — return them verbatim.
+    if let Some(mesh) = state.imported_meshes.get(str_id) {
+        let positions: Vec<f32> = mesh.positions.iter().flat_map(|p| p.iter().copied()).collect();
+        let normals:   Vec<f32> = mesh.normals.iter().flat_map(|n| n.iter().copied()).collect();
+        return RpcResponse::ok(id, serde_json::json!({
+            "positions": positions, "normals": normals, "indices": mesh.indices,
+            "triangle_count": mesh.indices.len() / 3,
+        }));
+    }
     let Some(arena_id) = state.cad_shape_map.get(str_id).copied() else {
         return RpcResponse::err(id, format!("unknown shape_id: {}", str_id));
     };
@@ -2018,6 +2037,72 @@ fn handle_cad_import_stl(id: u64, params: &Value) -> RpcResponse {
     }
 }
 
+/// Import a triangle-mesh CAD file (STL / OBJ / OFF / PLY / XYZ) and register
+/// it in the document as a renderable shape so it can live in the feature tree.
+///
+/// Unlike `cad.import.{stl,obj,...}` (which return a loose mesh with no id),
+/// this allocates a `shape_N` id, stores the `TriMesh` verbatim in
+/// `imported_meshes`, and returns the id + axis-aligned bbox + counts. The
+/// tessellate handlers return stored meshes directly, so the command-core can
+/// add a `GeometryNode` and the viewport renders it like a primitive.
+fn handle_cad_import_mesh_to_tree(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing path");
+    };
+    // Infer format from explicit param or the file extension.
+    let fmt = params
+        .get("format")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_ascii_lowercase())
+        .or_else(|| {
+            std::path::Path::new(path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase())
+        })
+        .unwrap_or_default();
+    let p = std::path::Path::new(path);
+    let mesh: TriMesh = match fmt.as_str() {
+        "stl" => match read_stl(p) {
+            Ok(m) => TriMesh { positions: m.positions, normals: m.normals, indices: m.indices },
+            Err(e) => return RpcResponse::err(id, format!("stl import failed: {}", e)),
+        },
+        "obj" => match read_obj(p) { Ok(m) => m, Err(e) => return RpcResponse::err(id, format!("obj import failed: {}", e)) },
+        "off" => match read_off(p) { Ok(m) => m, Err(e) => return RpcResponse::err(id, format!("off import failed: {}", e)) },
+        "ply" => match read_ply_ascii(p) { Ok(m) => m, Err(e) => return RpcResponse::err(id, format!("ply import failed: {}", e)) },
+        "xyz" => match read_xyz(p) { Ok(m) => m, Err(e) => return RpcResponse::err(id, format!("xyz import failed: {}", e)) },
+        other => return RpcResponse::err(id, format!("unsupported mesh format: {}", other)),
+    };
+    if mesh.positions.is_empty() {
+        return RpcResponse::err(id, "imported mesh has no vertices");
+    }
+    // Axis-aligned bounding box over all vertices.
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for v in &mesh.positions {
+        for k in 0..3 {
+            if v[k] < min[k] { min[k] = v[k]; }
+            if v[k] > max[k] { max[k] = v[k]; }
+        }
+    }
+    let tri_count = mesh.indices.len() / 3;
+    let vert_count = mesh.positions.len();
+    state.next_cad_shape_id += 1;
+    let str_id = format!("shape_{}", state.next_cad_shape_id);
+    state.imported_meshes.insert(str_id.clone(), mesh);
+    RpcResponse::ok(id, serde_json::json!({
+        "shape_id":       str_id,
+        "arena_id":       0,
+        "kind":           format!("imported_{}", fmt),
+        "triangle_count": tri_count,
+        "vertex_count":   vert_count,
+        "bbox": {
+            "min": [min[0] as f64, min[1] as f64, min[2] as f64],
+            "max": [max[0] as f64, max[1] as f64, max[2] as f64],
+        },
+    }))
+}
+
 fn handle_cad_measure_polygon_area(id: u64, params: &Value) -> RpcResponse {
     let Some(arr) = params.get("points").and_then(|v| v.as_array()) else {
         return RpcResponse::err(id, "missing points array");
@@ -2266,6 +2351,10 @@ fn handle_cad_arena_delete_shape(state: &mut ServerState, id: u64, params: &Valu
     let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
         return RpcResponse::err(id, "missing shape_id");
     };
+    // Imported meshes live outside the arena — drop them directly.
+    if state.imported_meshes.remove(str_id).is_some() {
+        return RpcResponse::ok(id, serde_json::json!({ "deleted": str_id, "arena_id": 0 }));
+    }
     let Some(aid) = state.cad_shape_map.remove(str_id) else {
         return RpcResponse::err(id, format!("unknown shape_id: {}", str_id));
     };

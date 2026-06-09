@@ -141,3 +141,55 @@ describe('Vector / streamline viz commands', () => {
     expect(core.store.getState().viz.vectorScale).toBe(2);
   });
 });
+
+describe('CAD import → feature tree', () => {
+  it('imports a mesh file as a tree node with its bbox', async () => {
+    const rpc = createMockRpcClient((method: string, params: JsonObject) => {
+      if (method === 'cad.import.mesh_to_tree') {
+        expect(params.path).toBe('/models/bracket.stl');
+        return {
+          shape_id: 'shape_7',
+          arena_id: 0,
+          kind: 'imported_stl',
+          triangle_count: 12,
+          vertex_count: 8,
+          bbox: { min: [-1, -1, -1], max: [1, 1, 1] },
+        };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const r = await core.dispatcher.dispatch({
+      commandId: 'io.import_mesh',
+      params: { path: '/models/bracket.stl' },
+      source: 'agent',
+    });
+    expect(r.ok).toBe(true);
+    const tree = core.store.getState().doc.geometry;
+    expect(tree.roots).toContain('shape_7');
+    const node = tree.nodes['shape_7'];
+    expect(node.kind).toBe('imported_stl');
+    expect(node.name).toBe('bracket.stl');
+    expect(node.bbox.max).toEqual([1, 1, 1]);
+    expect(node.visible).toBe(true);
+  });
+
+  it('imports a STEP file and derives the bbox from its tessellation', async () => {
+    const rpc = createMockRpcClient((method: string) => {
+      if (method === 'cad.import.step') return { shape_id: 'shape_3', arena_id: 3 };
+      if (method === 'cad.tessellate_adaptive') return { positions: [0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4], normals: [], indices: [] };
+      return {};
+    });
+    const core = createCore({ rpc });
+    const r = await core.dispatcher.dispatch({
+      commandId: 'io.import_step',
+      params: { path: 'C:\\cad\\part.step', name: 'part' },
+      source: 'agent',
+    });
+    expect(r.ok).toBe(true);
+    const node = core.store.getState().doc.geometry.nodes['shape_3'];
+    expect(node.name).toBe('part');
+    expect(node.bbox.min).toEqual([0, 0, 0]);
+    expect(node.bbox.max).toEqual([2, 3, 4]);
+  });
+});
