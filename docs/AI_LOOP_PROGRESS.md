@@ -254,8 +254,17 @@
   tsc 0, vitest 114 (faceted STEP import 테스트 추가).
 - 한계: 평면 폴리곤 면만(곡면은 면 폴리곤으로 근사), 볼록 가정(대부분 solid 면은 볼록).
 
+### iter 22 — STEP 비볼록 면 ear-clipping ✅ (완료)
+- 문제: iter 21의 fan 삼각화는 볼록 면만 정확 — L자/브래킷 등 비볼록 면은 삼각형이
+  면 밖으로 삐져나감.
+- 구현(`gfd-cad-io/step.rs`): `triangulate_face` — Newell normal로 면 법선 계산 →
+  in-plane (u,v) 기저로 3D→2D 투영 → CCW 보정 → `gfd_cad_tessel::triangulate_polygon`
+  (ear-clipping). 실패/퇴화 시 fan 폴백. `read_step_trimesh`가 이를 사용.
+- 검증: `cargo test -p gfd-cad-io` 20 passed (L자 6각형 → 4 삼각형, 총면적=3.0으로
+  겹침/누락 없음 검증), `cargo build --bin gfd-server`.
+
 ## 향후 후보 (남은 deep/niche backlog)
-- STEP 비볼록 면 ear-clipping(현재 fan) + 곡면 세분.
+- STEP 곡면(CYLINDRICAL/SPHERICAL_SURFACE) 세분(현재 면 폴리곤 근사).
 - measure.angle (edge/face 방향 — 백엔드 필요).
 - nearest/semantic의 face/edge 단위(백엔드 tessellation 기반).
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).

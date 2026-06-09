@@ -13,7 +13,7 @@ use std::io::Write;
 use std::path::Path;
 
 use gfd_cad_topo::{Shape, ShapeArena, ShapeId};
-use gfd_cad_tessel::TriMesh;
+use gfd_cad_tessel::{triangulate_polygon, TriMesh};
 
 use crate::{IoError, IoResult};
 
@@ -234,6 +234,81 @@ fn extract_floats(s: &str) -> Vec<f64> {
     out
 }
 
+/// Triangulate a 3D planar polygon. Projects onto its plane (Newell normal) and
+/// ear-clips in 2D so NON-convex faces (L-shapes, brackets) triangulate
+/// correctly; falls back to a fan for degenerate/failed cases.
+fn triangulate_face(poly: &[[f32; 3]]) -> Vec<[u32; 3]> {
+    let n = poly.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    if n == 3 {
+        return vec![[0, 1, 2]];
+    }
+    let fan = || -> Vec<[u32; 3]> { (1..n - 1).map(|i| [0u32, i as u32, i as u32 + 1]).collect() };
+    // Newell normal.
+    let (mut nx, mut ny, mut nz) = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..n {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        nx += ((a[1] - b[1]) * (a[2] + b[2])) as f64;
+        ny += ((a[2] - b[2]) * (a[0] + b[0])) as f64;
+        nz += ((a[0] - b[0]) * (a[1] + b[1])) as f64;
+    }
+    let nlen = (nx * nx + ny * ny + nz * nz).sqrt();
+    if nlen < 1e-20 {
+        return fan();
+    }
+    let nrm = [nx / nlen, ny / nlen, nz / nlen];
+    // In-plane basis (u, v).
+    let t = if nrm[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+    let mut u = [
+        t[1] * nrm[2] - t[2] * nrm[1],
+        t[2] * nrm[0] - t[0] * nrm[2],
+        t[0] * nrm[1] - t[1] * nrm[0],
+    ];
+    let ul = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+    if ul < 1e-20 {
+        return fan();
+    }
+    for c in &mut u {
+        *c /= ul;
+    }
+    let v = [
+        nrm[1] * u[2] - nrm[2] * u[1],
+        nrm[2] * u[0] - nrm[0] * u[2],
+        nrm[0] * u[1] - nrm[1] * u[0],
+    ];
+    let mut pts2: Vec<(f64, f64)> = poly
+        .iter()
+        .map(|p| {
+            let pd = [p[0] as f64, p[1] as f64, p[2] as f64];
+            (
+                pd[0] * u[0] + pd[1] * u[1] + pd[2] * u[2],
+                pd[0] * v[0] + pd[1] * v[1] + pd[2] * v[2],
+            )
+        })
+        .collect();
+    // Ear clipping expects CCW; flip if the projected loop is CW.
+    let mut area = 0.0;
+    for i in 0..n {
+        let (x0, y0) = pts2[i];
+        let (x1, y1) = pts2[(i + 1) % n];
+        area += x0 * y1 - x1 * y0;
+    }
+    if area < 0.0 {
+        for p in &mut pts2 {
+            p.1 = -p.1;
+        }
+    }
+    let tris = triangulate_polygon(&pts2);
+    if tris.len() == n - 2 {
+        tris
+    } else {
+        fan()
+    }
+}
+
 /// STEP reader that reconstructs planar polygon faces into a `TriMesh`.
 ///
 /// Walks ADVANCED_FACE → FACE_OUTER_BOUND → EDGE_LOOP → EDGE_CURVE (or
@@ -337,11 +412,12 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
                 continue;
             }
             let base = mesh.positions.len() as u32;
+            let tris = triangulate_face(&poly);
             mesh.positions.extend_from_slice(&poly);
-            for i in 1..poly.len() - 1 {
-                mesh.indices.push(base);
-                mesh.indices.push(base + i as u32);
-                mesh.indices.push(base + i as u32 + 1);
+            for tri in tris {
+                mesh.indices.push(base + tri[0]);
+                mesh.indices.push(base + tri[1]);
+                mesh.indices.push(base + tri[2]);
             }
         }
     }
@@ -441,6 +517,23 @@ mod tests {
         assert!(text.contains("AXIS2_PLACEMENT_3D"), "no AXIS2_PLACEMENT_3D");
         assert!(text.contains("PLANE("), "no PLANE entity");
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn triangulate_face_handles_a_nonconvex_l_shape() {
+        // CCW L-shape (z=0): a fan would spill outside; ear-clipping must not.
+        let l: Vec<[f32; 3]> = vec![
+            [0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0], [1.0, 2.0, 0.0], [0.0, 2.0, 0.0],
+        ];
+        let tris = triangulate_face(&l);
+        assert_eq!(tris.len(), 4, "6-gon → 4 triangles");
+        // Total triangle area must equal the L-shape area (3.0): proof no overlap/gap.
+        let area = |a: [f32; 3], b: [f32; 3], c: [f32; 3]| {
+            0.5 * (((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) as f64).abs()
+        };
+        let total: f64 = tris.iter().map(|t| area(l[t[0] as usize], l[t[1] as usize], l[t[2] as usize])).sum();
+        assert!((total - 3.0).abs() < 1e-6, "triangulated area {} != L-shape area 3.0", total);
     }
 
     #[test]
