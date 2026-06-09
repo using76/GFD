@@ -4494,6 +4494,26 @@ fn handle_cad_measure_segment_segment(id: u64, params: &Value) -> RpcResponse {
 // Mesh handlers
 // ---------------------------------------------------------------------------
 
+/// Translate an unstructured mesh in place (positions + cached cell/face
+/// centroids). Volume/area/normal are translation-invariant and left untouched.
+fn translate_mesh(mesh: &mut UnstructuredMesh, off: [f64; 3]) {
+    for nd in &mut mesh.nodes {
+        for k in 0..3 {
+            nd.position[k] += off[k];
+        }
+    }
+    for c in &mut mesh.cells {
+        for k in 0..3 {
+            c.center[k] += off[k];
+        }
+    }
+    for fc in &mut mesh.faces {
+        for k in 0..3 {
+            fc.center[k] += off[k];
+        }
+    }
+}
+
 fn handle_mesh_generate(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
     let nx = params.get("nx").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
     let ny = params.get("ny").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
@@ -4519,7 +4539,14 @@ fn handle_mesh_generate(state: &mut ServerState, id: u64, params: &Value) -> Rpc
             (lx, ly, lz, 0.0, 0.0, 0.0)
         };
 
-    let mesh = StructuredMesh::uniform(nx, ny, nz, lx, ly, lz).to_unstructured();
+    let mut mesh = StructuredMesh::uniform(nx, ny, nz, lx, ly, lz).to_unstructured();
+
+    // The structured mesh is built at the origin; shift it to the domain min so
+    // the solved field (contour/vectors/isosurface/probe) aligns with the
+    // geometry in the live 3D view.
+    if origin_x != 0.0 || origin_y != 0.0 || origin_z != 0.0 {
+        translate_mesh(&mut mesh, [origin_x, origin_y, origin_z]);
+    }
 
     let n_cells = mesh.num_cells();
     let n_faces = mesh.num_faces();
@@ -6381,6 +6408,21 @@ mod tests {
         for v in vort {
             assert!((v - 2.0).abs() < 1e-9, "expected |ω| = 2, got {}", v);
         }
+    }
+
+    #[test]
+    fn translate_mesh_shifts_positions_and_centroids() {
+        let mut mesh = StructuredMesh::uniform(2, 2, 1, 2.0, 2.0, 1.0).to_unstructured();
+        let n0 = mesh.nodes[0].position;
+        let c0 = mesh.cells[0].center;
+        let f0 = mesh.faces[0].center;
+        let vol0 = mesh.cells[0].volume;
+        translate_mesh(&mut mesh, [10.0, -5.0, 3.0]);
+        assert_eq!(mesh.nodes[0].position, [n0[0] + 10.0, n0[1] - 5.0, n0[2] + 3.0]);
+        assert_eq!(mesh.cells[0].center, [c0[0] + 10.0, c0[1] - 5.0, c0[2] + 3.0]);
+        assert_eq!(mesh.faces[0].center, [f0[0] + 10.0, f0[1] - 5.0, f0[2] + 3.0]);
+        // Volume is translation-invariant.
+        assert!((mesh.cells[0].volume - vol0).abs() < 1e-12);
     }
 
     #[test]

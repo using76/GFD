@@ -301,6 +301,17 @@
 - 효과: "import → (create_enclosure) → mesh.generate"가 별도 도메인 지정 없이 geometry를
   덮는 mesh를 생성 — 루프의 geometry↔mesh 링크 자동화.
 
+### iter 27 — mesh를 도메인 원점으로 평행이동(필드 결과 정렬) ✅ (완료)
+- 문제: 백엔드 mesh.generate가 domain의 xmin/ymin/zmin(origin)을 계산만 하고 안 써서,
+  `StructuredMesh::uniform`이 항상 원점에 mesh 생성 → iter 26 auto-domain 후 mesh가 올바른
+  크기지만 위치가 어긋나, 필드 결과(contour/vector/isosurface/probe)가 geometry와 미정렬.
+- 구현(`server.rs`): `translate_mesh(&mut UnstructuredMesh, off)` — node.position +
+  cell.center + face.center를 origin만큼 이동(volume/area/normal은 불변). handle_mesh_generate가
+  origin≠0이면 호출. (미사용 origin_x/y/z 변수도 해소.)
+- 검증: `cargo test --bin gfd-server` 6 passed (translate가 위치/중심 이동·부피 불변 검증).
+- 효과: "라이브 3D"에서 솔브된 필드가 **geometry 위치에 정렬되어 표시** — 부품 주변 유동을
+  제 위치에서 시각화.
+
 ## 향후 후보 (남은 deep/niche backlog)
 - imported 형상이 구조격자 mesh.generate에 반영(immersed boundary/cut-cell) — deep.
 - STEP 곡면(원통/구면) 세분(현재 면 폴리곤 근사).
