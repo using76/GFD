@@ -20,8 +20,8 @@
 | 6 | 모델 선택 | O | `physics.*`, manifest |
 | 7 | 계산 | O | 실제 solver `calc.run`, `realSolver` |
 | 8 | 결과 표현 | O | ViewportV2 layers (문서가 stale했음 — 실제로는 구현됨) |
-| 9 | **결과 분석** | △ | 단일 residual만; 진단/분석 명령 부족 |
-| 10 | **문제 파악 → 재수정** | △ | `calc.sensitivity` 있음; 자동 진단→제안 루프 부족 |
+| 9 | **결과 분석** | O(iter2) | `calc.diagnose` — 수렴/발산/Re·난류모델/유동미발달 진단 |
+| 10 | **문제 파악 → 재수정** | △ | `calc.diagnose`가 actionable fix 제안; `calc.sensitivity` 있음; 자동 적용+재실행 루프는 미구현 |
 
 ## Iteration 기록
 
@@ -39,10 +39,22 @@
   (import 노드 생성 테스트 2개 추가).
 - 효과: AI/유저가 STL/OBJ/STEP을 트리에 올려 ViewportV2에서 렌더 → 루프의 시작점 연결.
 
+### iter 2 — 결과 분석/진단 명령 `calc.diagnose` ✅ (완료)
+- 문제: 루프의 "결과 분석 → 문제 파악" 두뇌 부재. 단일 residual만 있고 AI가 무엇을
+  고쳐야 할지 판단할 구조화된 진단/제안이 없음.
+- 구현(`gui/src/core/commands/calc.ts`): `diagnoseState(AppState)` 순수 함수 +
+  `calc.diagnose` 명령. solver 상태·field 통계·재료·설정을 읽어 이슈 도출:
+  발산(NaN/Inf/과대)→error, 최대반복 미수렴→warning, 잔차정체→warning,
+  Re vs 난류모델 불일치→warning(k_epsilon 제안), 저Re+난류모델→info, 유동미발달→warning.
+  각 이슈에 actionable `fix:{command,params}`(setup.set_solver / setup.set_model /
+  calc.run) 포함 → AI가 바로 적용해 루프 폐쇄 가능. Re/유동영역(laminar/transitional/
+  turbulent)/특성길이·속도/요약 반환.
+- 검증: `tsc --noEmit` 0 errors, `vitest run` 80 passed (diagnose 테스트 5개 추가).
+
 ## 향후 후보 (backlog)
-- 결과 진단 명령 `results.diagnose` (발산/재순환/수렴품질/y+ 등 자동 분석) → AI가 읽음.
-- per-equation residual 분리(현재 단일 scalar) → AI 수렴 진단.
-- 자동 재수정 루프 `calc.auto_refine` (분석→파라미터 제안→재실행).
+- 자동 재수정 루프 `calc.auto_refine` (diagnose→최상위 fix 적용→재실행, 폐루프 자동화).
+- per-equation residual 분리(현재 단일 scalar) → AI 수렴 진단 정밀화.
+- diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
 - mesh 품질/설정 패널(size/prism/quality) command + UI.
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).
 - Distance/angle 2-pick measure.
