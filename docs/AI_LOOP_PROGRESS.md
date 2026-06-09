@@ -291,6 +291,16 @@
 - 참고: "imported CAD → gmsh.mesh → calc.run" 경로는 `volume_to_unstructured`로 이미
   연결됨(feature-gated) — 루프에 끊긴 곳 없음 확인.
 
+### iter 26 — geometry → mesh 도메인 자동 연결 ✅ (완료)
+- 문제: `prepare.create_enclosure`로 도메인 박스를 만들어도 `mesh.generate`가 자동으로
+  쓰지 않아, AI가 도메인을 수동 전달해야 함. 도메인 미지정 시 mesh가 geometry를 무시.
+- 구현(`mesh.ts`): `autoDomain` — 도메인 미지정 시 enclosure 노드 bbox(있으면 그대로),
+  없으면 visible 형상들의 combined bbox+10% 패딩을 도메인으로 mesh.generate에 전달.
+  백엔드는 이미 domain(xmin..zmax)을 받아 크기를 맞춤. 명시적 도메인은 그대로 존중.
+- 검증: tsc 0, vitest 123 (enclosure/combined-bbox/explicit/no-geometry 4 케이스).
+- 효과: "import → (create_enclosure) → mesh.generate"가 별도 도메인 지정 없이 geometry를
+  덮는 mesh를 생성 — 루프의 geometry↔mesh 링크 자동화.
+
 ## 향후 후보 (남은 deep/niche backlog)
 - imported 형상이 구조격자 mesh.generate에 반영(immersed boundary/cut-cell) — deep.
 - STEP 곡면(원통/구면) 세분(현재 면 폴리곤 근사).

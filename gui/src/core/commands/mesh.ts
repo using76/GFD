@@ -5,11 +5,46 @@
  * holds a mesh, and only mesh.generate populates ServerState.mesh.
  */
 
-import type { JsonObject } from '../types';
+import type { JsonObject, JsonValue } from '../types';
 import type { CommandDef } from '../command';
 import type { CommandRegistry } from '../registry';
-import type { MeshState } from '../state';
+import type { AppState, MeshState } from '../state';
 import type { PatchOp } from '../patch';
+
+interface MeshDomain {
+  xmin: number;
+  xmax: number;
+  ymin: number;
+  ymax: number;
+  zmin: number;
+  zmax: number;
+}
+
+/** Domain that covers the current geometry — the enclosure if one exists, else
+ *  the combined bbox of visible shapes (+10% padding). Connects geometry → mesh
+ *  so an imported/created part is actually inside the meshed domain. */
+function autoDomain(state: AppState): MeshDomain | undefined {
+  const nodes = Object.values(state.doc.geometry.nodes).filter((n) => n.visible);
+  if (nodes.length === 0) return undefined;
+  const enc = nodes.find((n) => n.kind === 'enclosure');
+  const pool = enc ? [enc] : nodes;
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const n of pool) {
+    for (let i = 0; i < 3; i++) {
+      min[i] = Math.min(min[i], n.bbox.min[i]);
+      max[i] = Math.max(max[i], n.bbox.max[i]);
+    }
+  }
+  if (!Number.isFinite(min[0])) return undefined;
+  const span = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2], 1);
+  const pad = enc ? 0 : 0.1 * span; // an enclosure is already padded
+  return {
+    xmin: min[0] - pad, xmax: max[0] + pad,
+    ymin: min[1] - pad, ymax: max[1] + pad,
+    zmin: min[2] - pad, zmax: max[2] + pad,
+  };
+}
 
 export interface MeshGenerateParams {
   nx: number;
@@ -32,7 +67,7 @@ export const meshGenerate: CommandDef<MeshGenerateParams, MeshGenerateResponse> 
   title: 'Generate Mesh',
   titleKo: '메시 생성',
   description:
-    'Generate a structured hex mesh on the backend over the given domain. Required before running the solver.',
+    'Generate a structured hex mesh on the backend. If no domain is given it auto-fits the geometry (enclosure box, or the combined bbox of visible shapes + padding). Required before running the solver.',
   capability: 'mutate-scene',
   paramsSchema: {
     type: 'object',
@@ -53,7 +88,8 @@ export const meshGenerate: CommandDef<MeshGenerateParams, MeshGenerateResponse> 
   },
   async run(params, ctx) {
     const rpcParams: JsonObject = { nx: params.nx, ny: params.ny, nz: params.nz };
-    if (params.domain) rpcParams.domain = params.domain;
+    const domain = params.domain ?? autoDomain(ctx.getState());
+    if (domain) rpcParams.domain = domain as unknown as JsonValue;
     const res = await ctx.rpc.request<MeshGenerateResponse>('mesh.generate', rpcParams);
 
     const meshState: MeshState = {
