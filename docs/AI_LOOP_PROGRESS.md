@@ -21,7 +21,11 @@
 | 7 | 계산 | O | 실제 solver `calc.run`, `realSolver` |
 | 8 | 결과 표현 | O | ViewportV2 layers (문서가 stale했음 — 실제로는 구현됨) |
 | 9 | **결과 분석** | O(iter2) | `calc.diagnose` — 수렴/발산/Re·난류모델/유동미발달 진단 |
-| 10 | **문제 파악 → 재수정** | △ | `calc.diagnose`가 actionable fix 제안; `calc.sensitivity` 있음; 자동 적용+재실행 루프는 미구현 |
+| 10 | **문제 파악 → 재수정** | O(iter3) | `runAutoRefine` + `auto_refine` MCP 메타툴 — diagnose→fix→재실행 자율 폐루프 |
+
+**→ iter 3 시점: 루프 spine 전 구간(1–10)이 연결됨.** AI는 `io.import_*`로 CAD를
+올리고, mesh/setup/model/calc.run으로 해석하고, `calc.diagnose`로 분석하고,
+`auto_refine` 한 번 호출로 진단→수정→재실행을 자율 반복할 수 있다.
 
 ## Iteration 기록
 
@@ -51,9 +55,21 @@
   turbulent)/특성길이·속도/요약 반환.
 - 검증: `tsc --noEmit` 0 errors, `vitest run` 80 passed (diagnose 테스트 5개 추가).
 
+### iter 3 — 자율 재수정 폐루프 `runAutoRefine` + `auto_refine` MCP 메타툴 ✅ (완료)
+- 문제: `CommandContext`에 `dispatch`가 없어 명령이 명령을 호출 못함 → 진단→수정→재실행
+  자동화가 불가. 루프의 마지막 링크(자율 재수정)가 비어 있었음.
+- 구현:
+  - `gui/src/core/solver/autoRefine.ts`: `runAutoRefine(core, opts, onEvent)` —
+    `core.dispatcher` 기반 오케스트레이터. 매 라운드 `diagnoseState`→최상위(에러>경고)
+    actionable 이슈 선택→fix 명령 dispatch→`calc.run` 재실행→완료 대기(status 폴링)→
+    라운드 기록. healthy까지 또는 maxRounds. round별 before/after residual·status 반환.
+  - `gui/src/core/mcp/bridge.ts`: `auto_refine` 메타툴 추가 → AI가 한 번 호출로 폐루프 실행.
+- 검증: `tsc --noEmit` 0 errors, `vitest run` 83 passed (autorefine 테스트 3개:
+  발산→완화하향→수렴, healthy no-op, MCP 노출).
+
 ## 향후 후보 (backlog)
-- 자동 재수정 루프 `calc.auto_refine` (diagnose→최상위 fix 적용→재실행, 폐루프 자동화).
 - per-equation residual 분리(현재 단일 scalar) → AI 수렴 진단 정밀화.
+- diagnose/auto_refine 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
 - mesh 품질/설정 패널(size/prism/quality) command + UI.
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).

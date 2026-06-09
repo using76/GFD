@@ -16,6 +16,7 @@ import type { JsonObject, JsonValue } from '../types';
 import type { JsonSchema } from '../schema';
 import type { Core } from '../index';
 import { createEntityResolver, type EntityRef, type EntityResolver } from '../entity';
+import { runAutoRefine } from '../solver/autoRefine';
 
 export interface McpToolSchema {
   name: string;
@@ -149,6 +150,27 @@ export function createMcpBridge(core: Core): McpBridge {
         } catch (e) {
           return fail(e instanceof Error ? e.message : String(e));
         }
+      },
+    },
+    auto_refine: {
+      schema: {
+        name: 'auto_refine',
+        description:
+          'Autonomous closed loop: diagnose the current solve, apply the highest-severity fix (relaxation / turbulence model / iterations), re-run the solver, and repeat up to maxRounds until healthy. Returns per-round history + final diagnosis. Requires a mesh + setup so calc.run can execute.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            maxRounds: { type: 'integer', minimum: 1, maximum: 10 },
+            maxIterations: { type: 'integer', minimum: 1 },
+          },
+        },
+      },
+      handler: async (args) => {
+        const result = await runAutoRefine(core, {
+          maxRounds: typeof args.maxRounds === 'number' ? args.maxRounds : undefined,
+          maxIterations: typeof args.maxIterations === 'number' ? args.maxIterations : undefined,
+        });
+        return ok(result as unknown as JsonValue);
       },
     },
     undo: {
