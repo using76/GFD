@@ -199,6 +199,20 @@ describe('Vector / streamline viz commands', () => {
     expect((r.result as { value: number }).value).toBe(42);
   });
 
+  it('computes scalar objectives from the current fields', async () => {
+    const rpc = createMockRpcClient((method: string) => {
+      if (method === 'field.objective') {
+        return { kinetic_energy: 12.5, max_velocity: 2, mean_velocity: 0.8, min_pressure: -3, max_pressure: 5, mean_pressure: 1, pressure_range: 8 };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const r = await core.dispatcher.dispatch({ commandId: 'results.objective', params: {}, source: 'agent' });
+    expect(r.ok).toBe(true);
+    expect((r.result as { kinetic_energy: number }).kinetic_energy).toBe(12.5);
+    expect((r.result as { pressure_range: number }).pressure_range).toBe(8);
+  });
+
   it('computes the Q-criterion as a selectable field', async () => {
     const rpc = createMockRpcClient((method: string) => {
       if (method === 'field.qcriterion') return { field: 'q_criterion', min: -5, max: 20, mean: 1.5 };

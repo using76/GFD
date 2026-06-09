@@ -282,6 +282,15 @@
   - command-core: `results.probe{field?,point}`. 프롬프트 ANALYZE/VISUALIZE에 안내.
 - 검증: `cargo build --bin gfd-server`, tsc 0, vitest 118 (probe 테스트 추가).
 
+### iter 25 — `results.objective` (최적화 목적함수 추적) ✅ (완료)
+- 문제: AI가 파라미터를 바꿔 재실행할 때 개선 여부를 판단할 저렴한 목적함수 조회가 없음
+  (`calc.sensitivity`는 유한차분으로 비쌈).
+- 구현: 백엔드 `field.objective`(현재 fields에서 운동에너지 Σ½|u|²·max/mean 속도·압력
+  min/max/mean·압력강하range 계산, 재솔브 없음) + `results.objective` 명령.
+- 검증: `cargo build --bin gfd-server`, tsc 0, vitest 119 (objective 테스트 추가).
+- 참고: "imported CAD → gmsh.mesh → calc.run" 경로는 `volume_to_unstructured`로 이미
+  연결됨(feature-gated) — 루프에 끊긴 곳 없음 확인.
+
 ## 향후 후보 (남은 deep/niche backlog)
 - imported 형상이 구조격자 mesh.generate에 반영(immersed boundary/cut-cell) — deep.
 - STEP 곡면(원통/구면) 세분(현재 면 폴리곤 근사).

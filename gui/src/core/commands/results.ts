@@ -185,6 +185,32 @@ export const resultsProbe: CommandDef<ProbeParams, ProbeResult> = {
   },
 };
 
+export interface ObjectiveResult {
+  kinetic_energy: number | null;
+  max_velocity: number | null;
+  mean_velocity: number | null;
+  min_pressure: number | null;
+  max_pressure: number | null;
+  mean_pressure: number | null;
+  pressure_range: number | null;
+}
+
+export const resultsObjective: CommandDef<Record<string, never>, ObjectiveResult> = {
+  id: 'results.objective',
+  category: 'results',
+  group: 'Fields',
+  title: 'Objectives',
+  titleKo: '목적함수',
+  description:
+    'Compute scalar objectives (kinetic energy, max/mean velocity, pressure range/drop) from the current solved fields without re-solving. Use it to track an optimization target across re-runs while tuning parameters.',
+  capability: 'read',
+  paramsSchema: { type: 'object', properties: {} },
+  async run(_params, ctx) {
+    const r = await ctx.rpc.request<ObjectiveResult>('field.objective', {});
+    return { ok: true, result: r };
+  },
+};
+
 export interface IsosurfaceParams {
   field?: string;
   isovalue?: number;
@@ -322,5 +348,6 @@ export function registerResultsCommands(registry: CommandRegistry): void {
   registry.register(resultsVorticity);
   registry.register(resultsQCriterion);
   registry.register(resultsProbe);
+  registry.register(resultsObjective);
   registry.register(resultsSetViz);
 }

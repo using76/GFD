@@ -642,6 +642,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "field.vorticity" => handle_field_vorticity(state, req.id, &req.params),
         "field.qcriterion" => handle_field_qcriterion(state, req.id, &req.params),
         "field.probe" => handle_field_probe(state, req.id, &req.params),
+        "field.objective" => handle_field_objective(state, req.id, &req.params),
         "field.streamlines" => handle_field_streamlines(state, req.id, &req.params),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
@@ -5948,6 +5949,44 @@ fn handle_field_probe(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
         "cell_center": best_center,
         "distance": best_d.sqrt(),
         "point": p,
+    }))
+}
+
+/// Scalar objectives from the current solved fields (no re-solve), so an AI can
+/// cheaply track an optimization target across re-runs (cf. the expensive
+/// finite-difference calc.sensitivity).
+fn handle_field_objective(state: &mut ServerState, id: u64, _params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let f = &state.fields;
+    let to_null = |x: Option<f64>| x.map(|v| serde_json::json!(v)).unwrap_or(Value::Null);
+
+    // Kinetic energy Σ ½|u|² over cells.
+    let ke = f.get("vx").map(|vx| {
+        let vy = f.get("vy");
+        let vz = f.get("vz");
+        let mut s = 0.0;
+        for i in 0..vx.len() {
+            let a = vx[i];
+            let b = vy.and_then(|v| v.get(i).copied()).unwrap_or(0.0);
+            let c = vz.and_then(|v| v.get(i).copied()).unwrap_or(0.0);
+            s += 0.5 * (a * a + b * b + c * c);
+        }
+        s
+    });
+    let vstat = f.get("velocity_magnitude").map(|v| field_stats(v));
+    let pstat = f.get("pressure").map(|v| field_stats(v));
+
+    if ke.is_none() && vstat.is_none() && pstat.is_none() {
+        return RpcResponse::err(id, "No solved fields; run a solve first");
+    }
+    RpcResponse::ok(id, serde_json::json!({
+        "kinetic_energy": to_null(ke),
+        "max_velocity":   to_null(vstat.map(|s| s.1)),
+        "mean_velocity":  to_null(vstat.map(|s| s.2)),
+        "min_pressure":   to_null(pstat.map(|s| s.0)),
+        "max_pressure":   to_null(pstat.map(|s| s.1)),
+        "mean_pressure":  to_null(pstat.map(|s| s.2)),
+        "pressure_range": to_null(pstat.map(|s| s.1 - s.0)),
     }))
 }
 
