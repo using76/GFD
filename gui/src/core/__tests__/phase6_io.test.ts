@@ -94,6 +94,20 @@ describe('OpenUSD / OpenVDB export commands', () => {
     const vdb = await core.dispatcher.dispatch({ commandId: 'results.export_vdb', params: { field: 'pressure', path: '/tmp/f.vdb' }, source: 'agent' });
     expect((vdb.result as { voxels: number }).voxels).toBe(256);
   });
+
+  it('exports the solved fields to a VTK file', async () => {
+    const rpc = createMockRpcClient((method: string, params: JsonObject) => {
+      if (method === 'field.export_vtk') {
+        expect(params.path).toBe('/out/run.vtk');
+        return { ok: true, path: '/out/run.vtk', fields: 5, cells: 400 };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const r = await core.dispatcher.dispatch({ commandId: 'results.export_vtk', params: { path: '/out/run.vtk' }, source: 'agent' });
+    expect(r.ok).toBe(true);
+    expect((r.result as { fields: number }).fields).toBe(5);
+  });
 });
 
 describe('Solver→UI field contour', () => {

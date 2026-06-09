@@ -643,6 +643,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "field.qcriterion" => handle_field_qcriterion(state, req.id, &req.params),
         "field.probe" => handle_field_probe(state, req.id, &req.params),
         "field.objective" => handle_field_objective(state, req.id, &req.params),
+        "field.export_vtk" => handle_field_export_vtk(state, req.id, &req.params),
         "field.streamlines" => handle_field_streamlines(state, req.id, &req.params),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
@@ -6015,6 +6016,33 @@ fn handle_field_objective(state: &mut ServerState, id: u64, _params: &Value) -> 
         "mean_pressure":  to_null(pstat.map(|s| s.2)),
         "pressure_range": to_null(pstat.map(|s| s.1 - s.0)),
     }))
+}
+
+/// Export the solved mesh + all cell-centered fields to a VTK Legacy
+/// UNSTRUCTURED_GRID file (.vtk) for ParaView / professional post-processing —
+/// the loop's "take the result out" link.
+fn handle_field_export_vtk(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing path");
+    };
+    let mesh = match &state.mesh {
+        Some(m) => m,
+        None => return RpcResponse::err(id, "No mesh (export needs an FVM solve with a mesh)"),
+    };
+    if state.fields.is_empty() {
+        return RpcResponse::err(id, "No solved fields; run a solve first");
+    }
+    let mut fields: gfd_core::FieldSet = std::collections::HashMap::new();
+    for (name, vals) in &state.fields {
+        fields.insert(name.clone(), gfd_core::FieldData::Scalar(ScalarField::from_vec(name, vals.clone())));
+    }
+    match gfd_io::vtk_writer::write_vtk(path, mesh, &fields) {
+        Ok(_) => RpcResponse::ok(id, serde_json::json!({
+            "ok": true, "path": path, "fields": fields.len(), "cells": mesh.num_cells(),
+        })),
+        Err(e) => RpcResponse::err(id, format!("vtk export failed: {}", e)),
+    }
 }
 
 /// Sample velocity at a point by nearest cell centroid.

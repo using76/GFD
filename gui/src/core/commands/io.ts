@@ -325,10 +325,37 @@ export const importStep: CommandDef<ImportBrepParams, { shape_id: string; arena_
 
 export const importBrep = brepImportCommand('io.import_brep', 'cad.import.brep', 'Import BRep', 'BRep 가져오기', 'BRep');
 
+export interface ExportVtkParams {
+  path: string;
+}
+
+export const exportVtk: CommandDef<ExportVtkParams, { ok: boolean; path: string; fields: number; cells: number }> = {
+  id: 'results.export_vtk',
+  category: 'results',
+  group: 'Export',
+  title: 'Export VTK',
+  titleKo: 'VTK 내보내기',
+  description:
+    'Write the solved mesh + all fields to a VTK Legacy (.vtk) unstructured-grid file for ParaView / professional post-processing.',
+  capability: 'read',
+  paramsSchema: {
+    type: 'object',
+    properties: { path: { type: 'string' } },
+    required: ['path'],
+  },
+  async run(params, ctx) {
+    const r = await ctx.rpc.request<{ ok: boolean; path: string; fields: number; cells: number }>('field.export_vtk', {
+      path: params.path,
+    });
+    return { ok: true, result: r };
+  },
+};
+
 export function registerIoCommands(registry: CommandRegistry): void {
   registry.register(exportStl);
   registry.register(exportUsd);
   registry.register(exportVdb);
+  registry.register(exportVtk);
   registry.register(importMesh);
   registry.register(importStep);
   registry.register(importBrep);

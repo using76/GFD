@@ -312,8 +312,27 @@
 - 효과: "라이브 3D"에서 솔브된 필드가 **geometry 위치에 정렬되어 표시** — 부품 주변 유동을
   제 위치에서 시각화.
 
+### iter 28 — 결과 → VTK Legacy 내보내기 (ParaView 후처리) ✅ (완료)
+- 문제: 솔브 결과를 외부 전문 후처리(ParaView)로 가져가는 출력 링크가 없음.
+- 구현: 백엔드 `field.export_vtk{path}` — mesh + 모든 cell-centered field를 VTK Legacy
+  UNSTRUCTURED_GRID(.vtk)로 기록(`gfd_io::vtk_writer::write_vtk`, state.fields→FieldSet 변환).
+  command-core `results.export_vtk{path}`.
+- 검증: `cargo build --bin gfd-server`, tsc 0, vitest 124 (VTK export 테스트).
+- 효과: "결과 표현"의 마지막 링크 — 인앱 시각화(6종) + 외부 후처리(VTK/USD/VDB) 완비.
+
+---
+
+## 🏁 Ralph loop 종료 (turn 20/20). 누적 28 iteration, 23 commits.
+
+**목표 달성:** "AI 직접 조작 → 라이브 3D → CAD 읽기 → mesh → 설정 → 모델 → 계산 →
+표현 → 분석 → 문제파악 → 재수정" 폐루프가 end-to-end로 작동·검증됨. 검증 총계:
+**124 TS + 8 Rust tests**, tsc 0 errors, vite build OK, cargo build/test OK.
+
+**branch `feat/ai-sim-loop` (23 commits) — 리뷰/머지 준비 완료.**
+
 ## 향후 후보 (남은 deep/niche backlog)
-- imported 형상이 구조격자 mesh.generate에 반영(immersed boundary/cut-cell) — deep.
+- imported 형상이 구조격자 mesh.generate에 반영(immersed boundary/cut-cell) — deep
+  (단, gmsh tet-mesh 경로가 geometry-conforming 메싱을 이미 대체).
 - STEP 곡면(원통/구면) 세분(현재 면 폴리곤 근사).
 - measure.angle / face 단위 공간참조.
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
