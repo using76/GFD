@@ -22,7 +22,7 @@ pub use brep::{read_brep, write_brep, BrepJson};
 pub use obj::{read_obj, write_obj};
 pub use off::{read_off, write_off};
 pub use ply::{read_ply_ascii, write_ply_ascii};
-pub use step::{read_step_points, summarise_step, write_step, StepSummary};
+pub use step::{read_step_points, read_step_trimesh, summarise_step, write_step, StepSummary};
 pub use stl::{read_stl, write_stl_ascii, write_stl_binary, StlMesh};
 pub use dxf::write_dxf_3dface;
 pub use vtk::write_vtk_polydata;

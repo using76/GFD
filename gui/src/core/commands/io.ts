@@ -269,7 +269,60 @@ function brepImportCommand(
   };
 }
 
-export const importStep = brepImportCommand('io.import_step', 'cad.import.step', 'Import STEP', 'STEP 가져오기', 'STEP');
+/** STEP import: reconstruct planar faces into a renderable solid when possible,
+ *  else fall back to the arena (points-only) representation. */
+export const importStep: CommandDef<ImportBrepParams, { shape_id: string; arena_id: number; faceted: boolean }> = {
+  id: 'io.import_step',
+  category: 'geometry',
+  group: 'Import',
+  title: 'Import STEP',
+  titleKo: 'STEP 가져오기',
+  description:
+    'Import a STEP file into the tree. Reconstructs planar faces into a renderable, meshable solid when possible; otherwise falls back to the arena (points) shape.',
+  capability: 'mutate-scene',
+  paramsSchema: {
+    type: 'object',
+    properties: { path: { type: 'string' }, name: { type: 'string' } },
+    required: ['path'],
+  },
+  async run(params, ctx) {
+    const base = params.path.replace(/\\/g, '/').split('/').pop() ?? params.path;
+    const name = params.name ?? base;
+    // 1. Faceted reconstruction (renders as a solid).
+    try {
+      const resp = await ctx.rpc.request<ImportMeshResponse>('cad.import.step_mesh', { path: params.path });
+      if (resp.shape_id) {
+        const patch = appendImportedNode(ctx, resp.shape_id, resp.arena_id, name, resp.kind, resp.bbox, {
+          format: 'step',
+          triangles: resp.triangle_count,
+        });
+        return { ok: true, result: { shape_id: resp.shape_id, arena_id: resp.arena_id, faceted: true }, statePatch: patch };
+      }
+    } catch {
+      // fall through to the arena/points path
+    }
+    // 2. Fallback: arena shape (points-only), bbox from a coarse tessellation.
+    const resp = await ctx.rpc.request<{ shape_id: string | null; arena_id?: number }>('cad.import.step', {
+      path: params.path,
+    });
+    if (!resp.shape_id) {
+      return { ok: false, error: { code: 'IMPORT_EMPTY', message: 'STEP import produced no shape' } };
+    }
+    let bbox: Bbox = { min: [0, 0, 0], max: [0, 0, 0] };
+    try {
+      const tess = await ctx.rpc.request<{ positions: number[] }>('cad.tessellate_adaptive', {
+        shape_id: resp.shape_id,
+        chord_tolerance: 0.05,
+      });
+      if (tess.positions && tess.positions.length >= 3) bbox = bboxFromPositions(tess.positions);
+    } catch {
+      // keep the zero bbox
+    }
+    const patch = appendImportedNode(ctx, resp.shape_id, resp.arena_id ?? 0, name, 'imported_step', bbox, { format: 'step' });
+    return { ok: true, result: { shape_id: resp.shape_id, arena_id: resp.arena_id ?? 0, faceted: false }, statePatch: patch };
+  },
+};
+
 export const importBrep = brepImportCommand('io.import_brep', 'cad.import.brep', 'Import BRep', 'BRep 가져오기', 'BRep');
 
 export function registerIoCommands(registry: CommandRegistry): void {

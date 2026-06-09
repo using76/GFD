@@ -227,6 +227,33 @@ describe('CAD import → feature tree', () => {
     expect(node.visible).toBe(true);
   });
 
+  it('imports a STEP file as a faceted solid when faces reconstruct', async () => {
+    const rpc = createMockRpcClient((method: string) => {
+      if (method === 'cad.import.step_mesh') {
+        return {
+          shape_id: 'shape_9',
+          arena_id: 0,
+          kind: 'imported_step',
+          triangle_count: 12,
+          vertex_count: 8,
+          bbox: { min: [0, 0, 0], max: [2, 1, 1] },
+        };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const r = await core.dispatcher.dispatch({
+      commandId: 'io.import_step',
+      params: { path: '/cad/bracket.step', name: 'bracket' },
+      source: 'agent',
+    });
+    expect(r.ok).toBe(true);
+    expect((r.result as { faceted: boolean }).faceted).toBe(true);
+    const node = core.store.getState().doc.geometry.nodes['shape_9'];
+    expect(node.kind).toBe('imported_step');
+    expect(node.bbox.max).toEqual([2, 1, 1]);
+  });
+
   it('imports a STEP file and derives the bbox from its tessellation', async () => {
     const rpc = createMockRpcClient((method: string) => {
       if (method === 'cad.import.step') return { shape_id: 'shape_3', arena_id: 3 };

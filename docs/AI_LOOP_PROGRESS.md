@@ -238,8 +238,24 @@
 `cargo build/test --bin gfd-server` OK. branch `feat/ai-sim-loop` (14 commits) —
 리뷰/머지 준비 완료.
 
+### iter 21 — STEP 면(face) 복원 → 렌더 가능한 solid ✅ (완료)
+- 문제: STEP import가 points-only라 임포트 시 보이지 않는 점 구름만 생성(가장 흔한
+  엔지니어링 CAD 포맷인데 사용 불가).
+- 구현:
+  - `gfd-cad-io`(`step.rs`): `read_step_trimesh` — ADVANCED_FACE→FACE_OUTER_BOUND→
+    EDGE_LOOP→EDGE_CURVE(/ORIENTED_EDGE)→VERTEX_POINT→CARTESIAN_POINT 체인을 파싱,
+    각 루프의 정렬된 정점으로 폴리곤 면 복원 후 fan 삼각화 → TriMesh. **Rust 테스트**
+    (삼각형 면 write→read 라운드트립, 복원 정점이 원본 위에 있음 검증).
+  - 백엔드(`server.rs`): `cad.import.step_mesh`(read_step_trimesh→imported_meshes 등록,
+    shape_id+bbox 반환 — iter 1 인프라 재사용).
+  - command-core(`io.ts`): `io.import_step`이 faceted 재구성 우선, 실패 시 arena/points
+    폴백. 결과에 `faceted` 플래그.
+- 검증: `cargo test -p gfd-cad-io read_step_trimesh` 1 passed, `cargo build --bin gfd-server`,
+  tsc 0, vitest 114 (faceted STEP import 테스트 추가).
+- 한계: 평면 폴리곤 면만(곡면은 면 폴리곤으로 근사), 볼록 가정(대부분 solid 면은 볼록).
+
 ## 향후 후보 (남은 deep/niche backlog)
-- import한 STEP의 topology 복원(현재 points-only) — 백엔드 B-Rep 재구성.
+- STEP 비볼록 면 ear-clipping(현재 fan) + 곡면 세분.
 - measure.angle (edge/face 방향 — 백엔드 필요).
 - nearest/semantic의 face/edge 단위(백엔드 tessellation 기반).
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).

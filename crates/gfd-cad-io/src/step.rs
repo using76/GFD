@@ -13,6 +13,7 @@ use std::io::Write;
 use std::path::Path;
 
 use gfd_cad_topo::{Shape, ShapeArena, ShapeId};
+use gfd_cad_tessel::TriMesh;
 
 use crate::{IoError, IoResult};
 
@@ -180,6 +181,176 @@ pub fn read_step_points(path: &Path) -> IoResult<Vec<(f64, f64, f64)>> {
     Ok(out)
 }
 
+/// All `#nnn` entity references inside an argument string.
+fn extract_refs(s: &str) -> Vec<u32> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'#' {
+            let mut j = i + 1;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 {
+                if let Ok(n) = s[i + 1..j].parse::<u32>() {
+                    out.push(n);
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// All numeric literals inside an argument string (STEP reals/ints).
+fn extract_floats(s: &str) -> Vec<f64> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'-' || c == b'+' || c == b'.' || c.is_ascii_digit() {
+            let start = i;
+            let mut j = i;
+            while j < b.len() {
+                let cj = b[j];
+                if cj.is_ascii_digit() || matches!(cj, b'.' | b'-' | b'+' | b'e' | b'E') {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            if let Ok(f) = s[start..j].parse::<f64>() {
+                out.push(f);
+            }
+            i = j.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// STEP reader that reconstructs planar polygon faces into a `TriMesh`.
+///
+/// Walks ADVANCED_FACE → FACE_OUTER_BOUND → EDGE_LOOP → EDGE_CURVE (or
+/// ORIENTED_EDGE) → VERTEX_POINT → CARTESIAN_POINT, collecting each loop's
+/// ordered vertices and fan-triangulating the polygon (exact for convex faces,
+/// which is what solid B-Reps emit). Unlike `read_step_points` this yields a
+/// renderable, meshable solid. Curved surfaces are still approximated by their
+/// face polygon.
+pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
+    use std::collections::HashMap;
+    let text = fs::read_to_string(path)?;
+
+    let mut cps: HashMap<u32, [f32; 3]> = HashMap::new();
+    let mut vps: HashMap<u32, u32> = HashMap::new(); // vertex_point -> cartesian_point
+    let mut edges: HashMap<u32, (u32, u32)> = HashMap::new(); // edge_curve -> (vp_a, vp_b)
+    let mut oriented: HashMap<u32, u32> = HashMap::new(); // oriented_edge -> edge_curve
+    let mut loops: HashMap<u32, Vec<u32>> = HashMap::new(); // edge_loop -> elems
+    let mut bounds: HashMap<u32, u32> = HashMap::new(); // face_bound -> loop
+    let mut faces: Vec<Vec<u32>> = Vec::new(); // advanced_face -> refs
+
+    for record in text.split(';') {
+        let record = record.trim();
+        if !record.starts_with('#') {
+            continue;
+        }
+        let Some(eq) = record.find('=') else { continue };
+        let Ok(id) = record[1..eq].trim().parse::<u32>() else { continue };
+        let rhs = record[eq + 1..].trim();
+        let Some(paren) = rhs.find('(') else { continue };
+        let typ = rhs[..paren].trim();
+        let args = &rhs[paren..];
+        match typ {
+            "CARTESIAN_POINT" => {
+                let f = extract_floats(args);
+                if f.len() >= 3 {
+                    cps.insert(id, [f[0] as f32, f[1] as f32, f[2] as f32]);
+                }
+            }
+            "VERTEX_POINT" => {
+                if let Some(&cp) = extract_refs(args).first() {
+                    vps.insert(id, cp);
+                }
+            }
+            "EDGE_CURVE" => {
+                let r = extract_refs(args);
+                if r.len() >= 2 {
+                    edges.insert(id, (r[0], r[1]));
+                }
+            }
+            "ORIENTED_EDGE" => {
+                if let Some(&e) = extract_refs(args).first() {
+                    oriented.insert(id, e);
+                }
+            }
+            "EDGE_LOOP" => {
+                loops.insert(id, extract_refs(args));
+            }
+            "FACE_OUTER_BOUND" | "FACE_BOUND" => {
+                if let Some(&l) = extract_refs(args).first() {
+                    bounds.insert(id, l);
+                }
+            }
+            "ADVANCED_FACE" | "FACE_SURFACE" => {
+                faces.push(extract_refs(args));
+            }
+            _ => {}
+        }
+    }
+
+    let dist2 = |a: &[f32; 3], b: &[f32; 3]| {
+        let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+        dx * dx + dy * dy + dz * dz
+    };
+    let mut mesh = TriMesh::default();
+    for frefs in &faces {
+        for br in frefs {
+            let Some(&loop_id) = bounds.get(br) else { continue };
+            let Some(elems) = loops.get(&loop_id) else { continue };
+            let mut poly: Vec<[f32; 3]> = Vec::new();
+            for el in elems {
+                let edge_id = if edges.contains_key(el) {
+                    *el
+                } else if let Some(&e) = oriented.get(el) {
+                    e
+                } else {
+                    continue;
+                };
+                let Some(&(va, _vb)) = edges.get(&edge_id) else { continue };
+                if let Some(&cp) = vps.get(&va) {
+                    if let Some(&p) = cps.get(&cp) {
+                        if poly.last().map_or(true, |q| dist2(q, &p) > 1e-12) {
+                            poly.push(p);
+                        }
+                    }
+                }
+            }
+            if poly.len() >= 3 && dist2(&poly[0], poly.last().unwrap()) < 1e-12 {
+                poly.pop();
+            }
+            if poly.len() < 3 {
+                continue;
+            }
+            let base = mesh.positions.len() as u32;
+            mesh.positions.extend_from_slice(&poly);
+            for i in 1..poly.len() - 1 {
+                mesh.indices.push(base);
+                mesh.indices.push(base + i as u32);
+                mesh.indices.push(base + i as u32 + 1);
+            }
+        }
+    }
+    if mesh.positions.is_empty() {
+        return Err(IoError::Parse("STEP file has no reconstructable planar faces".into()));
+    }
+    Ok(mesh)
+}
+
 /// Summary of a STEP file's contents — counts of each entity kind we know
 /// how to recognise. Used for import sanity checks and UI preview.
 #[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -270,6 +441,47 @@ mod tests {
         assert!(text.contains("AXIS2_PLACEMENT_3D"), "no AXIS2_PLACEMENT_3D");
         assert!(text.contains("PLANE("), "no PLANE entity");
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_step_trimesh_reconstructs_a_face() {
+        use gfd_cad_geom::{curve::Line, surface::Plane, Direction3, Point3};
+        use gfd_cad_topo::{shape::{CurveGeom, SurfaceGeom}, Orientation};
+        let mut arena = ShapeArena::new();
+        let pts = [Point3::new(0.0, 0.0, 0.0), Point3::new(2.0, 0.0, 0.0), Point3::new(0.0, 3.0, 0.0)];
+        let v = [
+            arena.push(Shape::vertex(pts[0])),
+            arena.push(Shape::vertex(pts[1])),
+            arena.push(Shape::vertex(pts[2])),
+        ];
+        let mut edges = Vec::new();
+        for i in 0..3 {
+            let j = (i + 1) % 3;
+            let line = Line::from_points(pts[i], pts[j]).unwrap();
+            let e = arena.push(Shape::Edge { curve: CurveGeom::Line(line), vertices: [v[i], v[j]], orient: Orientation::Forward });
+            edges.push((e, Orientation::Forward));
+        }
+        let wire = arena.push(Shape::Wire { edges });
+        let face = arena.push(Shape::Face {
+            surface: SurfaceGeom::Plane(Plane::new(Point3::ORIGIN, Direction3::Z, Direction3::X)),
+            wires: vec![wire],
+            orient: Orientation::Forward,
+        });
+        let path = std::env::temp_dir().join(format!("gfd_step_tri_{}.stp",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        write_step(&path, &arena, face).unwrap();
+        let mesh = read_step_trimesh(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        // A single triangular face → 3 positions, 1 triangle.
+        assert_eq!(mesh.positions.len(), 3, "expected 3 reconstructed vertices");
+        assert_eq!(mesh.indices.len(), 3, "expected one triangle");
+        // Every reconstructed point must be one of the original triangle corners.
+        for p in &mesh.positions {
+            let matched = pts.iter().any(|q| {
+                (q.x as f32 - p[0]).abs() < 1e-4 && (q.y as f32 - p[1]).abs() < 1e-4 && (q.z as f32 - p[2]).abs() < 1e-4
+            });
+            assert!(matched, "reconstructed point {:?} not on the original face", p);
+        }
     }
 
     #[test]

@@ -29,7 +29,7 @@ use gfd_cad::{
     bool_::{compound_merge, mesh_boolean, MeshOp},
     feature::{box_solid, c_channel_profile, t_beam_profile, z_section_profile, chamfered_box_solid, chamfered_box_top_edges, circular_array, cone_solid, capsule_revolve_profile, cup_revolve_profile, cylinder_solid, disc_solid, dodecahedron_solid, ellipse_profile, filleted_box_solid, filleted_box_top_edges, filleted_cylinder_solid, frustum_revolve_profile, gear_profile_simple, airfoil_naca4_profile, archimedean_spiral_path, helix_length, helix_path, honeycomb_pattern_solid, torus_knot_path, i_beam_profile, icosahedron_solid, icosphere_solid, l_angle_profile, linear_array, mirror_shape, ngon_prism_solid, octahedron_solid, offset_polygon_2d, pad_polygon_xy, pocket_polygon_xy, pyramid_solid, rectangle_profile, rectangular_array, regular_ngon_profile, revolve_profile_z, revolve_profile_z_partial, ring_revolve_profile, rotate_shape, rounded_rectangle_profile, scale_shape, slot_profile, sphere_solid, spiral_staircase_solid, stairs_solid, star_profile, tetrahedron_solid, torus_revolve_profile, torus_solid, translate_shape, tube_solid, wedge_solid, FeatureTree, MirrorPlane},
     heal::{check_validity, fix_shape, shape_stats, HealOptions},
-    io::{export_step, import_brep, import_step, read_brep, read_obj, read_off, read_ply_ascii, read_stl, read_xyz, summarise_step, write_brep, write_dxf_3dface, write_obj, write_off, write_ply_ascii, write_stl_ascii, write_stl_binary, write_vtk_polydata, write_wrl, write_xyz, StlMesh},
+    io::{export_step, import_brep, import_step, read_brep, read_obj, read_off, read_ply_ascii, read_step_trimesh, read_stl, read_xyz, summarise_step, write_brep, write_dxf_3dface, write_obj, write_off, write_ply_ascii, write_stl_ascii, write_stl_binary, write_vtk_polydata, write_wrl, write_xyz, StlMesh},
     measure::{bbox_volume, bounding_sphere, center_of_mass, closest_point_on_shape, distance as cad_distance, distance_edge_edge, distance_vertex_edge, divergence_volume, edge_length, edge_length_range, hausdorff_distance_vertex, inertia_tensor_full, is_convex_polygon, is_point_inside_solid, mesh_euler_genus, polygon_area, polygon_area_signed, polygon_centroid, polygon_contains_point, polygon_convex_hull, polygon_perimeter, principal_axes, signed_distance, surface_area, trimesh_aspect_ratio_stats, trimesh_bounding_box, trimesh_boundary_edges, trimesh_center_of_mass, trimesh_closest_point, trimesh_edge_length_stats, trimesh_inertia_tensor, trimesh_is_closed, trimesh_non_manifold_edges, trimesh_point_inside, trimesh_ray_intersect, trimesh_signed_distance, trimesh_surface_area, trimesh_volume},
     sketch::{Constraint as SkCons, EntityId as SkEid, Point2, PointId as SkPid, Sketch},
     tessel::{extract_edges, tessellate, tessellate_adaptive, TessellationOptions, TriMesh},
@@ -544,6 +544,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.import.ply"        => handle_cad_import_mesh(req.id, &req.params, "ply"),
         "cad.import.xyz"        => handle_cad_import_mesh(req.id, &req.params, "xyz"),
         "cad.import.mesh_to_tree" => handle_cad_import_mesh_to_tree(state, req.id, &req.params),
+        "cad.import.step_mesh"  => handle_cad_import_step_mesh(state, req.id, &req.params),
         "cad.measure.polygon_area" => handle_cad_measure_polygon_area(req.id, &req.params),
         "cad.measure.polygon_full" => handle_cad_measure_polygon_full(req.id, &req.params),
         "cad.measure.polygon_signed_area" => handle_cad_measure_polygon_signed_area(req.id, &req.params),
@@ -2100,6 +2101,46 @@ fn handle_cad_import_mesh_to_tree(state: &mut ServerState, id: u64, params: &Val
         "shape_id":       str_id,
         "arena_id":       0,
         "kind":           format!("imported_{}", fmt),
+        "triangle_count": tri_count,
+        "vertex_count":   vert_count,
+        "bbox": {
+            "min": [min[0] as f64, min[1] as f64, min[2] as f64],
+            "max": [max[0] as f64, max[1] as f64, max[2] as f64],
+        },
+    }))
+}
+
+/// Import a STEP file as a reconstructed faceted solid (planar faces) and
+/// register it as a renderable mesh shape in the tree — same path as
+/// `cad.import.mesh_to_tree`, so STEP files render as solids, not point clouds.
+fn handle_cad_import_step_mesh(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing path");
+    };
+    let mesh = match read_step_trimesh(std::path::Path::new(path)) {
+        Ok(m) => m,
+        Err(e) => return RpcResponse::err(id, format!("step face import failed: {}", e)),
+    };
+    if mesh.positions.is_empty() {
+        return RpcResponse::err(id, "STEP file has no reconstructable faces");
+    }
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for v in &mesh.positions {
+        for k in 0..3 {
+            if v[k] < min[k] { min[k] = v[k]; }
+            if v[k] > max[k] { max[k] = v[k]; }
+        }
+    }
+    let tri_count = mesh.indices.len() / 3;
+    let vert_count = mesh.positions.len();
+    state.next_cad_shape_id += 1;
+    let str_id = format!("shape_{}", state.next_cad_shape_id);
+    state.imported_meshes.insert(str_id.clone(), mesh);
+    RpcResponse::ok(id, serde_json::json!({
+        "shape_id":       str_id,
+        "arena_id":       0,
+        "kind":           "imported_step",
         "triangle_count": tri_count,
         "vertex_count":   vert_count,
         "bbox": {
