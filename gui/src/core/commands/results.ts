@@ -88,39 +88,64 @@ export const resultsContour: CommandDef<ContourParams, ContourResult> = {
   },
 };
 
-export interface VorticityResult {
+export interface DerivedFieldResult {
   field: string;
   min: number;
   max: number;
   mean: number;
 }
 
-export const resultsVorticity: CommandDef<Record<string, never>, VorticityResult> = {
-  id: 'results.vorticity',
-  category: 'results',
-  group: 'Fields',
-  title: 'Compute Vorticity',
-  titleKo: '와도 계산',
-  description:
-    'Compute the vorticity magnitude |∇×u| of the solved velocity field on the structured grid and register it as a selectable field (use it with contour or isosurface to see vortices).',
-  capability: 'read',
-  paramsSchema: { type: 'object', properties: {} },
-  async run(_params, ctx) {
-    const r = await ctx.rpc.request<VorticityResult>('field.vorticity', {});
-    const results = ctx.getState().results;
-    const patch: PatchOp[] = [];
-    if (results) {
-      const availableFields = results.availableFields.includes(r.field)
-        ? results.availableFields
-        : [...results.availableFields, r.field];
-      const fieldStats = { ...results.fieldStats, [r.field]: { min: r.min, max: r.max, mean: r.mean } };
-      patch.push({ op: 'replace', path: ['results', 'availableFields'], value: availableFields });
-      patch.push({ op: 'replace', path: ['results', 'fieldStats'], value: fieldStats as unknown as JsonValue });
-      patch.push({ op: 'replace', path: ['results', 'activeField'], value: r.field });
-    }
-    return { ok: true, result: r, statePatch: patch };
-  },
-};
+/** A backend-computed derived field (vorticity, Q-criterion, …) that registers
+ *  itself as a selectable, activatable field for contour/isosurface. */
+function makeDerivedFieldCommand(
+  id: string,
+  method: string,
+  title: string,
+  titleKo: string,
+  description: string
+): CommandDef<Record<string, never>, DerivedFieldResult> {
+  return {
+    id,
+    category: 'results',
+    group: 'Fields',
+    title,
+    titleKo,
+    description,
+    capability: 'read',
+    paramsSchema: { type: 'object', properties: {} },
+    async run(_params, ctx) {
+      const r = await ctx.rpc.request<DerivedFieldResult>(method, {});
+      const results = ctx.getState().results;
+      const patch: PatchOp[] = [];
+      if (results) {
+        const availableFields = results.availableFields.includes(r.field)
+          ? results.availableFields
+          : [...results.availableFields, r.field];
+        const fieldStats = { ...results.fieldStats, [r.field]: { min: r.min, max: r.max, mean: r.mean } };
+        patch.push({ op: 'replace', path: ['results', 'availableFields'], value: availableFields });
+        patch.push({ op: 'replace', path: ['results', 'fieldStats'], value: fieldStats as unknown as JsonValue });
+        patch.push({ op: 'replace', path: ['results', 'activeField'], value: r.field });
+      }
+      return { ok: true, result: r, statePatch: patch };
+    },
+  };
+}
+
+export const resultsVorticity = makeDerivedFieldCommand(
+  'results.vorticity',
+  'field.vorticity',
+  'Compute Vorticity',
+  '와도 계산',
+  'Compute the vorticity magnitude |∇×u| of the solved velocity field and register it as a selectable field (use it with contour or isosurface to see vortices).'
+);
+
+export const resultsQCriterion = makeDerivedFieldCommand(
+  'results.qcriterion',
+  'field.qcriterion',
+  'Compute Q-criterion',
+  'Q-기준 계산',
+  'Compute the Q-criterion ½(‖Ω‖²−‖S‖²) of the solved velocity field and register it as a selectable field. Q>0 isosurfaces mark vortex cores — the standard vortex-identification method.'
+);
 
 export interface IsosurfaceParams {
   field?: string;
@@ -257,5 +282,6 @@ export function registerResultsCommands(registry: CommandRegistry): void {
   registry.register(resultsStreamlines);
   registry.register(resultsIsosurface);
   registry.register(resultsVorticity);
+  registry.register(resultsQCriterion);
   registry.register(resultsSetViz);
 }

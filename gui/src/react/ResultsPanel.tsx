@@ -184,6 +184,13 @@ export function ResultsPanel() {
         >
           + 와도
         </button>
+        <button
+          onClick={() => void dispatch('results.qcriterion', {})}
+          title="Compute the Q-criterion (vortex cores) and add it as a field"
+          style={{ padding: '2px 8px', border: '1px solid #3a3a3a', borderRadius: 4, background: '#2a2a2a', color: '#9ad', cursor: 'pointer' }}
+        >
+          + Q
+        </button>
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
         {results.availableFields.map((f) => {

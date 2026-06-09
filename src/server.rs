@@ -639,6 +639,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "field.vectors" => handle_field_vectors(state, req.id, &req.params),
         "field.isosurface" => handle_field_isosurface(state, req.id, &req.params),
         "field.vorticity" => handle_field_vorticity(state, req.id, &req.params),
+        "field.qcriterion" => handle_field_qcriterion(state, req.id, &req.params),
         "field.streamlines" => handle_field_streamlines(state, req.id, &req.params),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
@@ -5766,6 +5767,94 @@ fn handle_field_vorticity(state: &mut ServerState, id: u64, _params: &Value) -> 
     }))
 }
 
+/// Q-criterion per cell: Q = ½(‖Ω‖² − ‖S‖²) where S/Ω are the symmetric /
+/// antisymmetric parts of the velocity-gradient tensor. Q>0 marks vortex cores
+/// (rotation dominates strain). Central differences on the structured grid.
+fn compute_q_criterion(
+    nx: usize, ny: usize, nz: usize, lx: f64, ly: f64, lz: f64,
+    vx: &[f64], vy: &[f64], vz: &[f64],
+) -> Vec<f64> {
+    let (nxu, nyu, nzu) = (nx.max(1), ny.max(1), nz.max(1));
+    let n = nxu * nyu * nzu;
+    let dx = lx / nxu as f64;
+    let dy = ly / nyu as f64;
+    let dz = lz / nzu as f64;
+    let idx = |i: usize, j: usize, k: usize| i + j * nxu + k * nxu * nyu;
+    let partial = |f: &[f64], axis: usize, i: usize, j: usize, k: usize| -> f64 {
+        let (n_ax, h, coord) = match axis { 0 => (nxu, dx, i), 1 => (nyu, dy, j), _ => (nzu, dz, k) };
+        if n_ax < 2 || h <= 0.0 { return 0.0; }
+        let val = |c: usize| -> f64 {
+            let (a, b, d) = match axis { 0 => (c, j, k), 1 => (i, c, k), _ => (i, j, c) };
+            f.get(idx(a, b, d)).copied().unwrap_or(0.0)
+        };
+        if coord == 0 { (val(1) - val(0)) / h }
+        else if coord == n_ax - 1 { (val(coord) - val(coord - 1)) / h }
+        else { (val(coord + 1) - val(coord - 1)) / (2.0 * h) }
+    };
+    let comps = [vx, vy, vz];
+    let mut out = vec![0.0; n];
+    for k in 0..nzu {
+        for j in 0..nyu {
+            for i in 0..nxu {
+                let c = idx(i, j, k);
+                if c >= out.len() { continue; }
+                // jac[row][col] = ∂u_row / ∂x_col
+                let mut jac = [[0.0f64; 3]; 3];
+                for (r, comp) in comps.iter().enumerate() {
+                    for a in 0..3 {
+                        jac[r][a] = partial(comp, a, i, j, k);
+                    }
+                }
+                let (mut s2, mut o2) = (0.0f64, 0.0f64);
+                for r in 0..3 {
+                    for a in 0..3 {
+                        let s = 0.5 * (jac[r][a] + jac[a][r]);
+                        let o = 0.5 * (jac[r][a] - jac[a][r]);
+                        s2 += s * s;
+                        o2 += o * o;
+                    }
+                }
+                out[c] = 0.5 * (o2 - s2);
+            }
+        }
+    }
+    out
+}
+
+/// Field-stats summary over finite values: (min, max, mean).
+fn field_stats(values: &[f64]) -> (f64, f64, f64) {
+    let (mut mn, mut mx, mut sum, mut cnt) = (f64::MAX, f64::MIN, 0.0, 0usize);
+    for &v in values {
+        if v.is_finite() {
+            mn = mn.min(v);
+            mx = mx.max(v);
+            sum += v;
+            cnt += 1;
+        }
+    }
+    if cnt == 0 { (0.0, 0.0, 0.0) } else { (mn, mx, sum / cnt as f64) }
+}
+
+/// Compute the Q-criterion from the solved velocity and register it as the
+/// `q_criterion` field (usable by contour / isosurface).
+fn handle_field_qcriterion(state: &mut ServerState, id: u64, _params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let Some((nx, ny, nz, lx, ly, lz)) = state.mesh_params else {
+        return RpcResponse::err(id, "No structured mesh (q-criterion needs mesh.generate)");
+    };
+    let Some(vx) = state.fields.get("vx").cloned() else {
+        return RpcResponse::err(id, "No 'vx' field; run a fluid solve first");
+    };
+    let vy = state.fields.get("vy").cloned().unwrap_or_else(|| vec![0.0; vx.len()]);
+    let vz = state.fields.get("vz").cloned().unwrap_or_else(|| vec![0.0; vx.len()]);
+    let q = compute_q_criterion(nx, ny, nz, lx, ly, lz, &vx, &vy, &vz);
+    let (mn, mx, mean) = field_stats(&q);
+    state.fields.insert("q_criterion".to_string(), q);
+    RpcResponse::ok(id, serde_json::json!({
+        "field": "q_criterion", "min": mn, "max": mx, "mean": mean,
+    }))
+}
+
 /// Sample velocity at a point by nearest cell centroid.
 fn sample_velocity(
     p: [f64; 3],
@@ -6156,6 +6245,28 @@ mod tests {
         let vort = compute_vorticity_magnitude(nx, ny, nz, lx, ly, lz, &vx, &vy, &vz);
         for v in vort {
             assert!((v - 2.0).abs() < 1e-9, "expected |ω| = 2, got {}", v);
+        }
+    }
+
+    #[test]
+    fn q_criterion_of_solid_body_rotation_is_positive_omega_squared() {
+        // Rigid rotation: strain S = 0, so Q = ½‖Ω‖² = ½·2 = 1 for Ω = 1.
+        let (nx, ny, nz) = (4usize, 4usize, 1usize);
+        let (lx, ly, lz) = (4.0, 4.0, 1.0);
+        let n = nx * ny * nz;
+        let mut vx = vec![0.0; n];
+        let mut vy = vec![0.0; n];
+        let vz = vec![0.0; n];
+        for j in 0..ny {
+            for i in 0..nx {
+                let c = i + j * nx;
+                vx[c] = -((j as f64 + 0.5) * (ly / ny as f64));
+                vy[c] = (i as f64 + 0.5) * (lx / nx as f64);
+            }
+        }
+        let q = compute_q_criterion(nx, ny, nz, lx, ly, lz, &vx, &vy, &vz);
+        for v in q {
+            assert!((v - 1.0).abs() < 1e-9, "expected Q = 1, got {}", v);
         }
     }
 }

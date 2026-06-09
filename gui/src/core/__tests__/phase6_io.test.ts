@@ -179,6 +179,20 @@ describe('Vector / streamline viz commands', () => {
     expect(res?.activeField).toBe('vorticity_magnitude');
     expect(res?.fieldStats['vorticity_magnitude']?.max).toBe(12);
   });
+
+  it('computes the Q-criterion as a selectable field', async () => {
+    const rpc = createMockRpcClient((method: string) => {
+      if (method === 'field.qcriterion') return { field: 'q_criterion', min: -5, max: 20, mean: 1.5 };
+      return {};
+    });
+    const seeded = createInitialState();
+    seeded.results = { availableFields: ['velocity_magnitude'], activeField: 'velocity_magnitude', fieldStats: {} };
+    const core = createCore({ rpc, initialState: seeded });
+    await core.dispatcher.dispatch({ commandId: 'results.qcriterion', params: {}, source: 'agent' });
+    const res = core.store.getState().results;
+    expect(res?.availableFields).toContain('q_criterion');
+    expect(res?.activeField).toBe('q_criterion');
+  });
 });
 
 describe('CAD import → feature tree', () => {

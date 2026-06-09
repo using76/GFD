@@ -191,11 +191,22 @@
   - UI: ResultsPanel "+ 와도" 버튼. 프롬프트 VISUALIZE 단계에 isosurface/vorticity 안내.
 - 검증: `cargo test --bin gfd-server` 4 passed, tsc 0, vite build, vitest 110.
 
+### iter 19 — Q-criterion 파생장 (와류 코어 식별) ✅ (완료)
+- 문제: vorticity는 전단까지 포함 → 와류 코어를 과대표시. Q-criterion(½(‖Ω‖²−‖S‖²))이
+  표준 와류 식별 기준(Q>0 = 회전 우세).
+- 구현:
+  - 백엔드(`src/server.rs`): `compute_q_criterion`(속도구배 텐서→S/Ω→Q) + `field_stats`
+    헬퍼 + `handle_field_qcriterion`(q_criterion 등록) + `field.qcriterion` RPC.
+    **Rust 테스트**: 솔리드회전 → S=0, Q=½‖Ω‖²=1 전셀 검증.
+  - command-core: 파생장 명령 팩토리 `makeDerivedFieldCommand`로 vorticity/qcriterion 통합.
+    `results.qcriterion`.
+  - UI: ResultsPanel "+ Q" 버튼. 프롬프트에 q-criterion 안내.
+- 검증: `cargo test --bin gfd-server` 5 passed, tsc 0, vite build, vitest 111.
+
 ## 향후 후보 (backlog)
 - import한 STEP의 topology 복원(현재 points-only) — 백엔드.
 - measure.angle (edge/face 방향 — 백엔드 필요).
 - nearest/semantic의 face/edge 단위(백엔드 tessellation 기반).
-- Q-criterion 등 추가 파생장.
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
 - mesh 품질/설정 패널(size/prism/quality) command + UI.
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).
