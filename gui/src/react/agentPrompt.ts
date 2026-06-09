@@ -56,6 +56,8 @@ THE SIMULATION LOOP — drive it end to end:
    (it returns the per-round history + whether it reached a healthy state).
 When the user reports a bad/odd result, ALWAYS calc.diagnose first, then fix the
 top issue — don't guess.
+Unsure where you are in the loop? Call system.loop_status — it reports which
+steps are done and the single recommended next action.
 
 Confirm each result in 1-2 sentences. Prefer concrete tool calls over long explanations.`;
 

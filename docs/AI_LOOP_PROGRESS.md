@@ -161,6 +161,13 @@
 - 결과 확인 (mesh 전제조건): 실제 백엔드(`server.rs handle_solve_start`)는 mesh 없으면
   "No mesh generated yet. Call mesh.generate first." 반환 — 이미 graceful(gap 아님).
 
+### iter 16 — `system.loop_status` (AI 루프 오케스트레이션 가이드) ✅ (완료)
+- 문제: AI가 루프 단계를 건너뛰거나 순서를 틀릴 수 있음(예: mesh 없이 solve 시도).
+- 구현(`gui/src/core/commands/system.ts`): `system.loop_status` — geometry→mesh→setup→
+  solve→analyze 각 단계 완료 여부 + `readyToSolve` + **단일 권장 다음 행동**(nextAction:
+  step/command/hint) 반환. 레지스트리 command라 MCP 툴로 자동 노출. 프롬프트에도 안내 추가.
+- 검증: tsc 0, vitest 108 passed (단계별 nextAction 테스트 5개).
+
 ## 향후 후보 (backlog)
 - import한 STEP의 topology 복원(현재 points-only) — 백엔드.
 - measure.angle (edge/face 방향 — 백엔드 필요).
