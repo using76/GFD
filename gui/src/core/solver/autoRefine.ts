@@ -39,7 +39,7 @@ export interface AutoRefineRound {
   afterStatus: string;
 }
 
-export type StoppedReason = 'healthy' | 'max_rounds' | 'aborted' | 'error';
+export type StoppedReason = 'healthy' | 'max_rounds' | 'aborted' | 'error' | 'no_progress';
 
 export interface AutoRefineResult {
   rounds: AutoRefineRound[];
@@ -53,6 +53,14 @@ export type AutoRefineEvent =
   | { type: 'fix_applied'; round: number; command: string }
   | { type: 'solve_done'; round: number; status: string; residual: number | null }
   | { type: 'done'; result: AutoRefineResult };
+
+/** Did a round measurably help? (converged, or residual dropped >1%.) */
+function roundImproved(r: AutoRefineRound): boolean {
+  if (r.afterStatus === 'converged') return true;
+  const a = r.afterResidual;
+  const b = r.beforeResidual;
+  return a !== null && b !== null && Number.isFinite(a) && Number.isFinite(b) && a < b * 0.99;
+}
 
 /** Highest-severity issue that carries an actionable fix (errors before warnings). */
 function pickActionable(issues: DiagnoseIssue[]): DiagnoseIssue | null {
@@ -109,6 +117,15 @@ export async function runAutoRefine(
       stoppedReason = 'healthy';
       break;
     }
+
+    // Don't burn solver runs re-applying a fix that isn't working: if the same
+    // problem persists from the previous round and that round made no measurable
+    // progress, stop and report it instead of looping on an ineffective fix.
+    const prev = rounds[rounds.length - 1];
+    if (prev && prev.issueCode === issue.code && !roundImproved(prev)) {
+      stoppedReason = 'no_progress';
+      break;
+    }
     onEvent?.({ type: 'round_start', round, issue });
 
     // Apply the corrective fix (unless the fix is itself "just run the solver").
@@ -152,9 +169,13 @@ export async function runAutoRefine(
     onEvent?.({ type: 'solve_done', round, status: after.status, residual: after.residual });
   }
 
-  // Use the last in-loop diagnosis when we stopped because it was healthy;
-  // otherwise re-diagnose to capture the post-last-solve state (and cache it).
-  const finalDiagnosis = stoppedReason === 'healthy' && lastDiag ? lastDiag : await dispatchDiagnose(core);
+  // Reuse the last in-loop diagnosis when we stopped on it (healthy / no-progress
+  // both diagnosed right before breaking); otherwise re-diagnose to capture the
+  // post-last-solve state (and cache it).
+  const finalDiagnosis =
+    lastDiag && (stoppedReason === 'healthy' || stoppedReason === 'no_progress')
+      ? lastDiag
+      : await dispatchDiagnose(core);
   const healthy = !finalDiagnosis.issues.some((i) => i.severity === 'error' || i.severity === 'warning');
   if (healthy && stoppedReason === 'max_rounds') stoppedReason = 'healthy';
   const result: AutoRefineResult = { rounds, finalDiagnosis, healthy, stoppedReason };

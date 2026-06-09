@@ -88,12 +88,27 @@
   결과 없을 때도 표시. 사람도 한 번에 AI 제안을 적용/자율수정 실행 가능.
 - 검증: tsc 0, `vite build` 성공, vitest 86 passed.
 
+### iter 7 — AI에게 시뮬레이션 루프 교육 + scene context에 진단 주입 ✅ (완료)
+- 문제: `SYSTEM_PROMPT`이 geometry/gmsh/calc.run만 알고 io.import_*/calc.diagnose/
+  auto_refine/전체 워크플로우를 몰라 AI가 새 기능을 안 씀(=루프 미작동).
+- 구현: 프롬프트/컨텍스트를 순수 모듈 `gui/src/react/agentPrompt.ts`로 분리하고
+  "THE SIMULATION LOOP" 7단계(GEOMETRY→MESH→SETUP→SOLVE→VISUALIZE→ANALYZE→
+  SELF-CORRECT)와 새 명령들을 명시. `sceneContext`가 `state.diagnosis` 요약+이슈를
+  매 턴 주입 → AI가 최신 분석을 보고 행동.
+- 검증: tsc 0, vite build, vitest 89 (agentPrompt 테스트 3개).
+
+### iter 8 — auto_refine 무진전(no-progress) 조기 종료 ✅ (완료)
+- 문제: 동일 이슈(예: 발산)가 개선 없이 반복되면 효과 없는 fix를 maxRounds까지 반복.
+- 구현(`autoRefine.ts`): 직전 라운드와 같은 issueCode이고 `roundImproved`(수렴 또는 잔차
+  >1% 감소) 아니면 `stoppedReason='no_progress'`로 즉시 중단. 솔버 낭비 방지.
+- 검증: tsc 0, vitest 90 (stuck backend → 1 라운드 후 no_progress 테스트).
+
 ## 향후 후보 (backlog)
 - per-equation residual 분리(현재 단일 scalar) → AI 수렴 진단 정밀화.
-- auto_refine 동일 fix 반복 방지(완화계수 floor 도달 시 메쉬 fix로 전환).
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).
 - Distance/angle 2-pick measure.
 - import한 STEP의 topology 복원(현재 points-only).
+- auto_refine: floor 도달한 완화계수 대신 메쉬 fix로 escalate.
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
 - mesh 품질/설정 패널(size/prism/quality) command + UI.
 - 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).

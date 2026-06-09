@@ -83,6 +83,23 @@ describe('auto-refine — autonomous diagnose→fix→re-run loop', () => {
     expect(result.stoppedReason).toBe('healthy');
   });
 
+  it('stops with no_progress instead of re-applying an ineffective fix', async () => {
+    // Backend whose re-runs stay diverged (field still Inf, residual flat).
+    const stuckBackend = createMockRpcClient((method: string) => {
+      if (method === 'solve.start') return { job_id: 'job1' };
+      if (method === 'solve.status') return { running: false, iteration: 100, residual: 1e3, status: 'finished' };
+      if (method === 'field.get') return { values: [1], min: 0, max: Infinity, mean: Infinity };
+      return {};
+    });
+    const core = createCore({ rpc: stuckBackend, initialState: divergedState() });
+    const result = await runAutoRefine(core, { maxRounds: 5, pollIntervalMs: 5 });
+    // Round 1 applies the relaxation fix; round 2 sees the same DIVERGENCE with no
+    // improvement and bails out rather than burning the remaining 3 rounds.
+    expect(result.rounds.length).toBe(1);
+    expect(result.stoppedReason).toBe('no_progress');
+    expect(result.healthy).toBe(false);
+  });
+
   it('is exposed as the auto_refine MCP meta-tool', async () => {
     const core = createCore({ rpc: healthyBackend(), initialState: divergedState() });
     const bridge = createMcpBridge(core);
