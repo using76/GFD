@@ -80,6 +80,8 @@ export const calcRun: CommandDef<CalcRunParams, { jobId: string }> = {
     const config = buildConfig(ctx, params);
     // Assigned synchronously below before any async callback can fire.
     let jobId = '';
+    // Accumulated residual trace for convergence-trend diagnosis (capped).
+    const residualHistory: number[] = [];
 
     const handle = await runRealSolver(
       ctx.rpc,
@@ -93,7 +95,9 @@ export const calcRun: CommandDef<CalcRunParams, { jobId: string }> = {
             residual: p.residual,
             elapsedMs: p.elapsedMs,
           });
-          ctx.update(solverPatch({ iteration: p.iteration, residual: p.residual }));
+          residualHistory.push(p.residual);
+          if (residualHistory.length > 200) residualHistory.shift();
+          ctx.update(solverPatch({ iteration: p.iteration, residual: p.residual, residualHistory: [...residualHistory] }));
         },
         onDone: (r) => {
           const status: SolverStatus['status'] = r.status === 'converged' ? 'converged' : 'finished';
@@ -135,6 +139,7 @@ export const calcRun: CommandDef<CalcRunParams, { jobId: string }> = {
         iteration: 0,
         residual: null,
         maxIterations: config.maxIterations,
+        residualHistory: [],
       }),
     };
   },
@@ -313,6 +318,22 @@ export interface DiagnoseIssue {
 
 export type FlowRegime = 'laminar' | 'transitional' | 'turbulent' | 'unknown';
 
+export type ConvergenceTrend = 'converging' | 'stalled' | 'diverging' | 'unknown';
+
+/** Classify the recent residual trace: dropping, flat, or rising. */
+function convergenceTrendOf(history: number[] | undefined): ConvergenceTrend {
+  if (!history || history.length < 6) return 'unknown';
+  const recent = history.slice(-6).filter((x) => Number.isFinite(x) && x > 0);
+  if (recent.length < 4) return 'unknown';
+  const first = recent[0];
+  const last = recent[recent.length - 1];
+  if (!(first > 0)) return 'unknown';
+  const ratio = last / first;
+  if (ratio > 1.2) return 'diverging';
+  if (ratio < 0.8) return 'converging';
+  return 'stalled';
+}
+
 export interface DiagnoseMesh {
   cells: number;
   badCells: number;
@@ -331,6 +352,7 @@ export interface DiagnoseResult {
   characteristicLength: number;
   characteristicVelocity: number;
   flowRegime: FlowRegime;
+  convergenceTrend: ConvergenceTrend;
   mesh: DiagnoseMesh | null;
   /** Per-equation final update residuals from the backend (vx/vy/vz/pressure/continuity). */
   residualsByEq: Record<string, number | null> | null;
@@ -423,6 +445,22 @@ export function diagnoseState(state: AppState): DiagnoseResult {
       severity: 'error',
       message: `발산(blow-up) 감지: [${badFields.join(', ')}] 필드에 비정상 값(NaN/Inf/과대).`,
       suggestion: `완화계수를 낮추고(relaxVelocity≈${lowRelaxV}, relaxPressure≈${lowRelaxP}) 메쉬를 점검한 뒤 재실행하세요.`,
+      fix: { command: 'setup.set_solver', params: { relaxVelocity: lowRelaxV, relaxPressure: lowRelaxP } },
+    });
+  }
+
+  // (b2) Convergence trend over the residual trace — disambiguates the fix: a
+  // flat (stalled) residual above tolerance won't improve with more iterations,
+  // so target relaxation/mesh instead. Placed before MAX_ITERS so auto_refine
+  // tries this fix first (and escalates to more-iterations if it doesn't help).
+  const convergenceTrend = convergenceTrendOf(solver.residualHistory);
+  const aboveTol = solver.residual !== null && Number.isFinite(solver.residual) && solver.residual > ss.tolerance;
+  if (solver.status !== 'converged' && convergenceTrend === 'stalled' && aboveTol && badFields.length === 0) {
+    issues.push({
+      code: 'STALLED',
+      severity: 'warning',
+      message: `잔차가 허용오차 위에서 정체되었습니다(추세 평탄, 마지막=${solver.residual!.toExponential(2)}).`,
+      suggestion: '반복을 늘려도 개선되지 않습니다 — 완화계수를 낮추거나 메쉬를 개선하세요.',
       fix: { command: 'setup.set_solver', params: { relaxVelocity: lowRelaxV, relaxPressure: lowRelaxP } },
     });
   }
@@ -588,7 +626,7 @@ export function diagnoseState(state: AppState): DiagnoseResult {
   const head = worst === 'error' ? '심각한 문제' : worst === 'warning' ? '주의 필요' : '정상';
   const summary = `[${head}] status=${solver.status}, iter=${solver.iteration}/${ss.maxIterations}, residual=${
     solver.residual === null ? 'n/a' : solver.residual.toExponential(2)
-  }, Re=${reynolds === null ? 'n/a' : Math.round(reynolds)} (${flowRegime}), issues=${issues.length}`;
+  }, Re=${reynolds === null ? 'n/a' : Math.round(reynolds)} (${flowRegime}), trend=${convergenceTrend}, issues=${issues.length}`;
 
   return {
     status: solver.status,
@@ -600,6 +638,7 @@ export function diagnoseState(state: AppState): DiagnoseResult {
     characteristicLength: L,
     characteristicVelocity: U,
     flowRegime,
+    convergenceTrend,
     mesh: meshSummary,
     residualsByEq: eq,
     dominantEquation,

@@ -65,6 +65,8 @@ export interface SolverStatus {
   maxIterations: number;
   /** Per-equation final update residuals (vx/vy/vz/pressure/continuity), if reported. */
   residualsByEq?: Record<string, number | null>;
+  /** Recent residual values (newest last), for convergence-trend analysis. */
+  residualHistory?: number[];
 }
 
 export interface ResultsSummary {

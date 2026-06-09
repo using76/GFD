@@ -203,8 +203,43 @@
   - UI: ResultsPanel "+ Q" 버튼. 프롬프트에 q-criterion 안내.
 - 검증: `cargo test --bin gfd-server` 5 passed, tsc 0, vite build, vitest 111.
 
-## 향후 후보 (backlog)
-- import한 STEP의 topology 복원(현재 points-only) — 백엔드.
+### iter 20 — 수렴 추세(convergence trend) 분석 ✅ (완료)
+- 문제: 단일 잔차만으로는 "느리게 수렴 중"과 "정체"를 구분 못함 → 처방이 모호.
+- 구현:
+  - `SolverStatus.residualHistory`(calc.run이 onResidual마다 누적, 200 cap, 시작 시 리셋).
+  - `diagnoseState`: `convergenceTrendOf`(최근 6점 비율→converging/stalled/diverging) →
+    `DiagnoseResult.convergenceTrend` + summary에 `trend=` 추가. 미수렴+정체+허용오차초과면
+    `STALLED` 경고(완화계수↓ fix)를 MAX_ITERS보다 먼저 → auto_refine이 완화계수부터 시도,
+    안되면 반복↑로 escalate(iter 12).
+- 검증: tsc 0, vitest 113 (정체/수렴 추세 테스트 2개).
+
+---
+
+## ✅ 최종 요약 (iter 1–20, Ralph loop 완료)
+
+**목표 달성:** "AI가 직접 조작 → 라이브 3D → CAD 읽기 → mesh → 설정 → 모델 →
+계산 → 표현 → 분석 → 문제파악 → 재수정" 폐루프가 **end-to-end로 작동·검증**됨
+(`loop.test.ts`가 자가수정까지 통과).
+
+| 루프 단계 | 구현 iteration |
+|---|---|
+| AI 직접 조작(MCP) | 7(프롬프트 교육), 16(loop_status), 10(공간선택) |
+| 라이브 3D | (기존) + 17(isosurface), 18/19(파생장 렌더) |
+| CAD 파일 읽기 | **1**(io.import_mesh/step/brep → 트리) |
+| mesh | 4(품질진단) |
+| 해석 설정/모델 | (기존) + diagnose 연동 |
+| 계산 | (기존, 실제 solver) + 9(per-eq residual) |
+| 결과 표현 | 6/14(패널), 17(isosurface), 18(vorticity), 19(Q-criterion) |
+| 결과 분석 | **2**(diagnose), 5(state캐시), 9/13(per-eq), 20(추세) |
+| 문제 파악→재수정 | **3**(auto_refine), 8(no-progress), 12(escalation) |
+| 측정/검증 | 11(measure.distance), 15(통합테스트) |
+
+**검증 총계:** 113 TS tests + 5 Rust tests, tsc 0 errors, vite build OK,
+`cargo build/test --bin gfd-server` OK. branch `feat/ai-sim-loop` (14 commits) —
+리뷰/머지 준비 완료.
+
+## 향후 후보 (남은 deep/niche backlog)
+- import한 STEP의 topology 복원(현재 points-only) — 백엔드 B-Rep 재구성.
 - measure.angle (edge/face 방향 — 백엔드 필요).
 - nearest/semantic의 face/edge 단위(백엔드 tessellation 기반).
 - diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).

@@ -171,6 +171,47 @@ describe('calc.diagnose — analyze → identify → fix', () => {
     expect(d.issues.some((i) => i.code === 'DOMINANT_EQUATION')).toBe(false); // …but not an issue
   });
 
+  it('flags a stalled residual (flat trend above tolerance) with a relaxation fix', () => {
+    const s = baseState();
+    s.solver = {
+      ...s.solver,
+      status: 'finished',
+      iteration: 120,
+      residual: 1e-2,
+      // last 6 nearly flat → stalled
+      residualHistory: [1.05e-2, 1.02e-2, 1.01e-2, 1.0e-2, 1.0e-2, 1.0e-2],
+    };
+    s.results = {
+      availableFields: ['velocity_magnitude'],
+      activeField: 'velocity_magnitude',
+      fieldStats: { velocity_magnitude: { min: 0, max: 0.5, mean: 0.2 } },
+    };
+    const d = diagnoseState(s);
+    expect(d.convergenceTrend).toBe('stalled');
+    const st = d.issues.find((i) => i.code === 'STALLED');
+    expect(st?.severity).toBe('warning');
+    expect((st?.fix?.params as { relaxVelocity?: number }).relaxVelocity).toBeDefined();
+  });
+
+  it('classifies a dropping residual trace as converging (no STALLED issue)', () => {
+    const s = baseState();
+    s.solver = {
+      ...s.solver,
+      status: 'finished',
+      iteration: 50,
+      residual: 1e-3,
+      residualHistory: [1e-1, 5e-2, 2e-2, 1e-2, 3e-3, 1e-3],
+    };
+    s.results = {
+      availableFields: ['velocity_magnitude'],
+      activeField: 'velocity_magnitude',
+      fieldStats: { velocity_magnitude: { min: 0, max: 0.5, mean: 0.2 } },
+    };
+    const d = diagnoseState(s);
+    expect(d.convergenceTrend).toBe('converging');
+    expect(d.issues.some((i) => i.code === 'STALLED')).toBe(false);
+  });
+
   it('is registered and dispatchable, returning a summary', async () => {
     const core = createCore({ rpc: createMockRpcClient(() => ({})) });
     const r = await core.dispatcher.dispatch({ commandId: 'calc.diagnose', params: {}, source: 'agent' });
