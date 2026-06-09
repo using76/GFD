@@ -641,6 +641,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "field.isosurface" => handle_field_isosurface(state, req.id, &req.params),
         "field.vorticity" => handle_field_vorticity(state, req.id, &req.params),
         "field.qcriterion" => handle_field_qcriterion(state, req.id, &req.params),
+        "field.probe" => handle_field_probe(state, req.id, &req.params),
         "field.streamlines" => handle_field_streamlines(state, req.id, &req.params),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
@@ -5893,6 +5894,60 @@ fn handle_field_qcriterion(state: &mut ServerState, id: u64, _params: &Value) ->
     state.fields.insert("q_criterion".to_string(), q);
     RpcResponse::ok(id, serde_json::json!({
         "field": "q_criterion", "min": mn, "max": mx, "mean": mean,
+    }))
+}
+
+/// Probe a solved scalar field at a 3D point (nearest cell centroid). Lets the
+/// AI inspect a specific location instead of fetching the whole field.
+fn handle_field_probe(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let field_name = params.get("field").and_then(|v| v.as_str()).unwrap_or("velocity_magnitude");
+    let Some(arr) = params.get("point").and_then(|v| v.as_array()) else {
+        return RpcResponse::err(id, "missing point [x,y,z]");
+    };
+    if arr.len() < 3 {
+        return RpcResponse::err(id, "point must be [x,y,z]");
+    }
+    let p = [
+        arr[0].as_f64().unwrap_or(0.0),
+        arr[1].as_f64().unwrap_or(0.0),
+        arr[2].as_f64().unwrap_or(0.0),
+    ];
+    let mesh = match &state.mesh {
+        Some(m) => m,
+        None => return RpcResponse::err(id, "No mesh (probe needs an FVM solve with a mesh)"),
+    };
+    let values = match state.fields.get(field_name) {
+        Some(v) => v,
+        None => return RpcResponse::err(id, format!("Field '{}' not found; run a solve first", field_name)),
+    };
+    let mut best = usize::MAX;
+    let mut best_d = f64::MAX;
+    let mut best_center = [0.0; 3];
+    for i in 0..mesh.num_cells() {
+        if let Ok(c) = mesh.cell(i) {
+            let dx = c.center[0] - p[0];
+            let dy = c.center[1] - p[1];
+            let dz = c.center[2] - p[2];
+            let d = dx * dx + dy * dy + dz * dz;
+            if d < best_d {
+                best_d = d;
+                best = i;
+                best_center = c.center;
+            }
+        }
+    }
+    if best == usize::MAX {
+        return RpcResponse::err(id, "empty mesh");
+    }
+    let val = values.get(best).copied().unwrap_or(0.0);
+    RpcResponse::ok(id, serde_json::json!({
+        "field": field_name,
+        "value": val,
+        "cell": best,
+        "cell_center": best_center,
+        "distance": best_d.sqrt(),
+        "point": p,
     }))
 }
 

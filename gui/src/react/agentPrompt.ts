@@ -48,7 +48,8 @@ THE SIMULATION LOOP — drive it end to end:
 5. VISUALIZE: results.contour / results.vectors / results.streamlines /
    results.isosurface (3D level set) + results.set_viz. results.vorticity (|∇×u|)
    and results.qcriterion (Q>0 vortex cores) add derived fields — pair them with
-   isosurface to see vortices. Inspect a value with results.load_field.
+   isosurface to see vortices. Inspect a whole field with results.load_field, or a
+   single point (e.g. velocity at the outlet) with results.probe(point).
 6. ANALYZE: calc.diagnose — returns structured issues (divergence, non-
    convergence, Reynolds-vs-turbulence-model mismatch, bad mesh, undeveloped
    flow), each with an actionable fix {command, params}. READ the diagnosis

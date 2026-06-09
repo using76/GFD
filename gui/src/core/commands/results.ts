@@ -147,6 +147,44 @@ export const resultsQCriterion = makeDerivedFieldCommand(
   'Compute the Q-criterion ½(‖Ω‖²−‖S‖²) of the solved velocity field and register it as a selectable field. Q>0 isosurfaces mark vortex cores — the standard vortex-identification method.'
 );
 
+export interface ProbeParams {
+  field?: string;
+  point: [number, number, number];
+}
+
+export interface ProbeResult {
+  field: string;
+  value: number;
+  cell: number;
+  cell_center: number[];
+  distance: number;
+  point: number[];
+}
+
+export const resultsProbe: CommandDef<ProbeParams, ProbeResult> = {
+  id: 'results.probe',
+  category: 'results',
+  group: 'Fields',
+  title: 'Probe Field',
+  titleKo: '필드 측정',
+  description:
+    'Read a solved field value at a 3D point (nearest cell). Lets the AI inspect a specific location — e.g. velocity at the outlet, temperature on a wall — instead of fetching the whole field.',
+  capability: 'read',
+  paramsSchema: {
+    type: 'object',
+    properties: {
+      field: { type: 'string' },
+      point: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+    },
+    required: ['point'],
+  },
+  async run(params, ctx) {
+    const field = params.field ?? ctx.getState().results?.activeField ?? 'velocity_magnitude';
+    const r = await ctx.rpc.request<ProbeResult>('field.probe', { field, point: params.point });
+    return { ok: true, result: r };
+  },
+};
+
 export interface IsosurfaceParams {
   field?: string;
   isovalue?: number;
@@ -283,5 +321,6 @@ export function registerResultsCommands(registry: CommandRegistry): void {
   registry.register(resultsIsosurface);
   registry.register(resultsVorticity);
   registry.register(resultsQCriterion);
+  registry.register(resultsProbe);
   registry.register(resultsSetViz);
 }

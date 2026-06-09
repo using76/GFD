@@ -274,6 +274,14 @@
 - 검증: tsc 0, vitest 117 (정합성 테스트 3개; 기존 loop 통합테스트의 실제 ill-posed
   설정을 잡아내 well-posed로 보정).
 
+### iter 24 — 필드 프로빙 `results.probe` (국소 결과 분석) ✅ (완료)
+- 문제: 전역 diagnose/stats는 있지만 "출구 속도는?", "벽면 온도는?" 같은 특정 지점
+  조회가 없음.
+- 구현:
+  - 백엔드(`server.rs`): `field.probe{field,point}` — 최근접 셀 값 + 셀 중심·거리 반환.
+  - command-core: `results.probe{field?,point}`. 프롬프트 ANALYZE/VISUALIZE에 안내.
+- 검증: `cargo build --bin gfd-server`, tsc 0, vitest 118 (probe 테스트 추가).
+
 ## 향후 후보 (남은 deep/niche backlog)
 - imported 형상이 구조격자 mesh.generate에 반영(immersed boundary/cut-cell) — deep.
 - STEP 곡면(원통/구면) 세분(현재 면 폴리곤 근사).

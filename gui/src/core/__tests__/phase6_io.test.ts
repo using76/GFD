@@ -180,6 +180,25 @@ describe('Vector / streamline viz commands', () => {
     expect(res?.fieldStats['vorticity_magnitude']?.max).toBe(12);
   });
 
+  it('probes a field value at a point', async () => {
+    const rpc = createMockRpcClient((method: string, params: JsonObject) => {
+      if (method === 'field.probe') {
+        expect(params.field).toBe('pressure');
+        expect(params.point).toEqual([1, 2, 0]);
+        return { field: 'pressure', value: 42, cell: 7, cell_center: [1.1, 2.0, 0.0], distance: 0.1, point: [1, 2, 0] };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const r = await core.dispatcher.dispatch({
+      commandId: 'results.probe',
+      params: { field: 'pressure', point: [1, 2, 0] },
+      source: 'agent',
+    });
+    expect(r.ok).toBe(true);
+    expect((r.result as { value: number }).value).toBe(42);
+  });
+
   it('computes the Q-criterion as a selectable field', async () => {
     const rpc = createMockRpcClient((method: string) => {
       if (method === 'field.qcriterion') return { field: 'q_criterion', min: -5, max: 20, mean: 1.5 };
