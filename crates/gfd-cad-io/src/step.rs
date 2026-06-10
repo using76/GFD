@@ -309,14 +309,80 @@ fn triangulate_face(poly: &[[f32; 3]]) -> Vec<[u32; 3]> {
     }
 }
 
-/// STEP reader that reconstructs planar polygon faces into a `TriMesh`.
+/// A curved underlying surface a STEP face references — used to refine the
+/// reconstructed polygon back onto the true geometry.
+enum CurvedSurf {
+    /// (center, radius)
+    Sphere([f64; 3], f64),
+    /// (axis origin, unit axis direction, radius)
+    Cylinder([f64; 3], [f64; 3], f64),
+}
+
+/// Project a point onto the curved surface (radially). Degenerate points (on
+/// the sphere center / cylinder axis) are returned unchanged.
+fn project_to_surf(p: [f32; 3], s: &CurvedSurf) -> [f32; 3] {
+    let pd = [p[0] as f64, p[1] as f64, p[2] as f64];
+    match s {
+        CurvedSurf::Sphere(c, r) => {
+            let w = [pd[0] - c[0], pd[1] - c[1], pd[2] - c[2]];
+            let len = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt();
+            if len < 1e-12 {
+                return p;
+            }
+            let k = r / len;
+            [(c[0] + w[0] * k) as f32, (c[1] + w[1] * k) as f32, (c[2] + w[2] * k) as f32]
+        }
+        CurvedSurf::Cylinder(o, d, r) => {
+            let w = [pd[0] - o[0], pd[1] - o[1], pd[2] - o[2]];
+            let ax = w[0] * d[0] + w[1] * d[1] + w[2] * d[2];
+            let rad = [w[0] - ax * d[0], w[1] - ax * d[1], w[2] - ax * d[2]];
+            let len = (rad[0] * rad[0] + rad[1] * rad[1] + rad[2] * rad[2]).sqrt();
+            if len < 1e-12 {
+                return p;
+            }
+            let k = r / len;
+            [
+                (o[0] + ax * d[0] + rad[0] * k) as f32,
+                (o[1] + ax * d[1] + rad[1] * k) as f32,
+                (o[2] + ax * d[2] + rad[2] * k) as f32,
+            ]
+        }
+    }
+}
+
+/// One level of midpoint subdivision on a local triangle soup (1 tri → 4).
+/// No welding — duplicate midpoints are fine for rendering.
+fn subdivide_local(positions: &mut Vec<[f32; 3]>, tris: &mut Vec<[u32; 3]>) {
+    let mid = |a: [f32; 3], b: [f32; 3]| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, (a[2] + b[2]) / 2.0];
+    let mut out = Vec::with_capacity(tris.len() * 4);
+    for t in tris.iter() {
+        let (pa, pb, pc) = (
+            positions[t[0] as usize],
+            positions[t[1] as usize],
+            positions[t[2] as usize],
+        );
+        let iab = positions.len() as u32;
+        positions.push(mid(pa, pb));
+        let ibc = positions.len() as u32;
+        positions.push(mid(pb, pc));
+        let ica = positions.len() as u32;
+        positions.push(mid(pc, pa));
+        out.push([t[0], iab, ica]);
+        out.push([iab, t[1], ibc]);
+        out.push([ica, ibc, t[2]]);
+        out.push([iab, ibc, ica]);
+    }
+    *tris = out;
+}
+
+/// STEP reader that reconstructs polygon faces into a `TriMesh`.
 ///
 /// Walks ADVANCED_FACE → FACE_OUTER_BOUND → EDGE_LOOP → EDGE_CURVE (or
 /// ORIENTED_EDGE) → VERTEX_POINT → CARTESIAN_POINT, collecting each loop's
-/// ordered vertices and fan-triangulating the polygon (exact for convex faces,
-/// which is what solid B-Reps emit). Unlike `read_step_points` this yields a
-/// renderable, meshable solid. Curved surfaces are still approximated by their
-/// face polygon.
+/// ordered vertices and ear-clipping the polygon. Faces referencing a
+/// SPHERICAL_SURFACE / CYLINDRICAL_SURFACE are refined: the triangulation is
+/// midpoint-subdivided twice and every vertex is projected back onto the true
+/// curved surface, so cylinders and spheres import round instead of faceted.
 pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
     use std::collections::HashMap;
     let text = fs::read_to_string(path)?;
@@ -328,6 +394,10 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
     let mut loops: HashMap<u32, Vec<u32>> = HashMap::new(); // edge_loop -> elems
     let mut bounds: HashMap<u32, u32> = HashMap::new(); // face_bound -> loop
     let mut faces: Vec<Vec<u32>> = Vec::new(); // advanced_face -> refs
+    let mut directions: HashMap<u32, [f64; 3]> = HashMap::new(); // direction -> unit vec
+    let mut placements: HashMap<u32, (u32, u32)> = HashMap::new(); // axis2_placement -> (point, z-dir)
+    let mut surf_sph: HashMap<u32, (u32, f64)> = HashMap::new(); // sphere -> (placement, radius)
+    let mut surf_cyl: HashMap<u32, (u32, f64)> = HashMap::new(); // cylinder -> (placement, radius)
 
     for record in text.split(';') {
         let record = record.trim();
@@ -374,9 +444,55 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
             "ADVANCED_FACE" | "FACE_SURFACE" => {
                 faces.push(extract_refs(args));
             }
+            "DIRECTION" => {
+                let f = extract_floats(args);
+                if f.len() >= 3 {
+                    let len = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
+                    if len > 1e-12 {
+                        directions.insert(id, [f[0] / len, f[1] / len, f[2] / len]);
+                    }
+                }
+            }
+            "AXIS2_PLACEMENT_3D" => {
+                let r = extract_refs(args);
+                if r.len() >= 2 {
+                    placements.insert(id, (r[0], r[1]));
+                }
+            }
+            "SPHERICAL_SURFACE" => {
+                let r = extract_refs(args);
+                // extract_floats also picks up the "#nnn" digits — radius is last.
+                if let (Some(&pl), Some(&rad)) = (r.first(), extract_floats(args).last()) {
+                    surf_sph.insert(id, (pl, rad));
+                }
+            }
+            "CYLINDRICAL_SURFACE" => {
+                let r = extract_refs(args);
+                if let (Some(&pl), Some(&rad)) = (r.first(), extract_floats(args).last()) {
+                    surf_cyl.insert(id, (pl, rad));
+                }
+            }
             _ => {}
         }
     }
+
+    // Resolve the curved surface a face references (if any) to concrete geometry.
+    let resolve_surf = |frefs: &[u32]| -> Option<CurvedSurf> {
+        for r in frefs {
+            if let Some(&(pl, rad)) = surf_sph.get(r) {
+                let &(cp_ref, _) = placements.get(&pl)?;
+                let c = cps.get(&cp_ref)?;
+                return Some(CurvedSurf::Sphere([c[0] as f64, c[1] as f64, c[2] as f64], rad));
+            }
+            if let Some(&(pl, rad)) = surf_cyl.get(r) {
+                let &(cp_ref, zd_ref) = placements.get(&pl)?;
+                let o = cps.get(&cp_ref)?;
+                let d = directions.get(&zd_ref)?;
+                return Some(CurvedSurf::Cylinder([o[0] as f64, o[1] as f64, o[2] as f64], *d, rad));
+            }
+        }
+        None
+    };
 
     let dist2 = |a: &[f32; 3], b: &[f32; 3]| {
         let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
@@ -384,6 +500,7 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
     };
     let mut mesh = TriMesh::default();
     for frefs in &faces {
+        let curved = resolve_surf(frefs);
         for br in frefs {
             let Some(&loop_id) = bounds.get(br) else { continue };
             let Some(elems) = loops.get(&loop_id) else { continue };
@@ -411,9 +528,19 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
             if poly.len() < 3 {
                 continue;
             }
+            let mut local_pos = poly.clone();
+            let mut tris = triangulate_face(&local_pos);
+            if let Some(surf) = &curved {
+                // Refine the flat triangulation back onto the curved surface.
+                for _ in 0..2 {
+                    subdivide_local(&mut local_pos, &mut tris);
+                }
+                for p in &mut local_pos {
+                    *p = project_to_surf(*p, surf);
+                }
+            }
             let base = mesh.positions.len() as u32;
-            let tris = triangulate_face(&poly);
-            mesh.positions.extend_from_slice(&poly);
+            mesh.positions.extend_from_slice(&local_pos);
             for tri in tris {
                 mesh.indices.push(base + tri[0]);
                 mesh.indices.push(base + tri[1]);
@@ -534,6 +661,84 @@ mod tests {
         };
         let total: f64 = tris.iter().map(|t| area(l[t[0] as usize], l[t[1] as usize], l[t[2] as usize])).sum();
         assert!((total - 3.0).abs() < 1e-6, "triangulated area {} != L-shape area 3.0", total);
+    }
+
+    /// Minimal STEP body around handcrafted entity records.
+    fn step_doc(entities: &str) -> String {
+        format!("ISO-10303-21;\nDATA;\n{}\nENDSEC;\nEND-ISO-10303-21;\n", entities)
+    }
+
+    #[test]
+    fn read_step_trimesh_refines_a_spherical_face_onto_the_sphere() {
+        // A triangle whose corners lie on the unit sphere, referencing
+        // SPHERICAL_SURFACE(r=1) — vertices must be subdivided + projected.
+        let entities = "\
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=DIRECTION('',(0.,0.,1.));
+#3=DIRECTION('',(1.,0.,0.));
+#4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+#5=SPHERICAL_SURFACE('',#4,1.0);
+#10=CARTESIAN_POINT('',(1.,0.,0.));
+#11=VERTEX_POINT('',#10);
+#12=CARTESIAN_POINT('',(0.,1.,0.));
+#13=VERTEX_POINT('',#12);
+#14=CARTESIAN_POINT('',(0.,0.,1.));
+#15=VERTEX_POINT('',#14);
+#20=EDGE_CURVE('',#11,#13,$,.T.);
+#21=EDGE_CURVE('',#13,#15,$,.T.);
+#22=EDGE_CURVE('',#15,#11,$,.T.);
+#23=EDGE_LOOP('',(#20,#21,#22));
+#24=FACE_OUTER_BOUND('',#23,.T.);
+#25=ADVANCED_FACE('',(#24),#5,.T.);";
+        let path = std::env::temp_dir().join(format!("gfd_step_sph_{}.stp",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::write(&path, step_doc(entities)).unwrap();
+        let mesh = read_step_trimesh(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        // 1 flat triangle, 2 subdivision levels → 16 triangles.
+        assert_eq!(mesh.indices.len() / 3, 16, "expected 16 refined triangles");
+        for p in &mesh.positions {
+            let r = ((p[0] as f64).powi(2) + (p[1] as f64).powi(2) + (p[2] as f64).powi(2)).sqrt();
+            assert!((r - 1.0).abs() < 1e-4, "vertex {:?} not on the unit sphere (r={})", p, r);
+        }
+    }
+
+    #[test]
+    fn read_step_trimesh_refines_a_cylindrical_face_onto_the_cylinder() {
+        // A quarter-cylinder patch (axis Z, r=1): vertices at 0° and 90°,
+        // z ∈ {0, 1}. The flat quad's interior must be pushed out to radius 1.
+        let entities = "\
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=DIRECTION('',(0.,0.,1.));
+#3=DIRECTION('',(1.,0.,0.));
+#4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+#5=CYLINDRICAL_SURFACE('',#4,1.0);
+#10=CARTESIAN_POINT('',(1.,0.,0.));
+#11=VERTEX_POINT('',#10);
+#12=CARTESIAN_POINT('',(0.,1.,0.));
+#13=VERTEX_POINT('',#12);
+#14=CARTESIAN_POINT('',(0.,1.,1.));
+#15=VERTEX_POINT('',#14);
+#16=CARTESIAN_POINT('',(1.,0.,1.));
+#17=VERTEX_POINT('',#16);
+#20=EDGE_CURVE('',#11,#13,$,.T.);
+#21=EDGE_CURVE('',#13,#15,$,.T.);
+#22=EDGE_CURVE('',#15,#17,$,.T.);
+#23=EDGE_CURVE('',#17,#11,$,.T.);
+#24=EDGE_LOOP('',(#20,#21,#22,#23));
+#25=FACE_OUTER_BOUND('',#24,.T.);
+#26=ADVANCED_FACE('',(#25),#5,.T.);";
+        let path = std::env::temp_dir().join(format!("gfd_step_cyl_{}.stp",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::write(&path, step_doc(entities)).unwrap();
+        let mesh = read_step_trimesh(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(mesh.indices.len() / 3 > 4, "expected refined triangles, got {}", mesh.indices.len() / 3);
+        for p in &mesh.positions {
+            let r = ((p[0] as f64).powi(2) + (p[1] as f64).powi(2)).sqrt();
+            assert!((r - 1.0).abs() < 1e-4, "vertex {:?} not on the unit cylinder (r={})", p, r);
+            assert!(p[2] >= -1e-4 && p[2] <= 1.0 + 1e-4, "vertex z out of patch range");
+        }
     }
 
     #[test]
