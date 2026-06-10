@@ -142,10 +142,56 @@ export const measureDistance: CommandDef<MeasureDistanceParams, MeasureDistanceR
   },
 };
 
+export interface MeasureAngleParams {
+  a: string;
+  b?: string;
+  direction?: [number, number, number];
+}
+
+export interface MeasureAngleResult {
+  angle_deg: number;
+  axis_a: number[];
+  axis_b: number[];
+  a: string;
+  b: string;
+}
+
+export const measureAngle: CommandDef<MeasureAngleParams, MeasureAngleResult> = {
+  id: 'measure.angle',
+  category: 'measure',
+  group: 'Extent',
+  title: 'Angle',
+  titleKo: '각도',
+  description:
+    "Angle (0–90°, orientation-free) between two shapes' principal axes, or between shape `a`'s principal axis and an explicit direction [x,y,z]. Works for imported meshes too (PCA on the tessellated vertices). Use it to check part alignment/orientation.",
+  capability: 'read',
+  paramsSchema: {
+    type: 'object',
+    properties: {
+      a: { type: 'string' },
+      b: { type: 'string' },
+      direction: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+    },
+    required: ['a'],
+  },
+  async run(params, ctx) {
+    if (!params.b && !params.direction) {
+      return { ok: false, error: { code: 'BAD_PARAMS', message: "need shape 'b' or a 'direction'" } };
+    }
+    const r = await ctx.rpc.request<MeasureAngleResult>('cad.measure.shape_angle', {
+      a: params.a,
+      ...(params.b ? { b: params.b } : {}),
+      ...(params.direction ? { direction: params.direction } : {}),
+    });
+    return { ok: true, result: r };
+  },
+};
+
 export function registerMeasureCommands(registry: CommandRegistry): void {
   registry.register(measureVolume);
   registry.register(measureSurfaceArea);
   registry.register(measureCenterOfMass);
   registry.register(measureBoundingBox);
   registry.register(measureDistance);
+  registry.register(measureAngle);
 }

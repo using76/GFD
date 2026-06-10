@@ -563,6 +563,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.measure.mesh_quality" => handle_cad_measure_mesh_quality(state, req.id, &req.params),
         "cad.measure.bbox_volume"  => handle_cad_measure_bbox_volume(state, req.id, &req.params),
         "cad.measure.distance"     => handle_cad_measure_distance(state, req.id, &req.params),
+        "cad.measure.shape_angle"  => handle_cad_measure_shape_angle(state, req.id, &req.params),
         "cad.measure.segment_segment" => handle_cad_measure_segment_segment(req.id, &req.params),
         "cad.measure.point_plane"     => handle_cad_measure_point_plane(req.id, &req.params),
         "cad.measure.ray_plane"       => handle_cad_measure_ray_plane(req.id, &req.params),
@@ -2150,6 +2151,119 @@ fn handle_cad_import_step_mesh(state: &mut ServerState, id: u64, params: &Value)
             "min": [min[0] as f64, min[1] as f64, min[2] as f64],
             "max": [max[0] as f64, max[1] as f64, max[2] as f64],
         },
+    }))
+}
+
+/// TriMesh for any GUI shape id — imported meshes verbatim, arena shapes by
+/// tessellation. The common "give me triangles for shape_N" lookup.
+fn shape_trimesh(state: &ServerState, str_id: &str) -> Result<TriMesh, String> {
+    if let Some(m) = state.imported_meshes.get(str_id) {
+        return Ok(m.clone());
+    }
+    let Some(arena_id) = state.cad_shape_map.get(str_id).copied() else {
+        return Err(format!("unknown shape_id: {}", str_id));
+    };
+    tessellate(&state.cad_doc.arena, arena_id, TessellationOptions::default())
+        .map_err(|e| format!("tessellate failed: {}", e))
+}
+
+/// Dominant PCA axis of a vertex cloud (power iteration on the covariance
+/// matrix). Returns a unit vector along the largest spatial extent — the
+/// shape's principal direction. None for degenerate clouds.
+fn trimesh_principal_axis(positions: &[[f32; 3]]) -> Option<[f64; 3]> {
+    let n = positions.len();
+    if n < 2 {
+        return None;
+    }
+    let mut mean = [0.0f64; 3];
+    for p in positions {
+        for k in 0..3 {
+            mean[k] += p[k] as f64;
+        }
+    }
+    for m in &mut mean {
+        *m /= n as f64;
+    }
+    let mut cov = [[0.0f64; 3]; 3];
+    for p in positions {
+        let d = [p[0] as f64 - mean[0], p[1] as f64 - mean[1], p[2] as f64 - mean[2]];
+        for r in 0..3 {
+            for c in 0..3 {
+                cov[r][c] += d[r] * d[c];
+            }
+        }
+    }
+    // Power iteration; generic start avoids axis-aligned eigenvector traps.
+    let mut v = [0.577, 0.577, 0.578];
+    for _ in 0..64 {
+        let w = [
+            cov[0][0] * v[0] + cov[0][1] * v[1] + cov[0][2] * v[2],
+            cov[1][0] * v[0] + cov[1][1] * v[1] + cov[1][2] * v[2],
+            cov[2][0] * v[0] + cov[2][1] * v[1] + cov[2][2] * v[2],
+        ];
+        let len = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt();
+        if len < 1e-30 {
+            return None;
+        }
+        v = [w[0] / len, w[1] / len, w[2] / len];
+    }
+    Some(v)
+}
+
+/// Unsigned angle between two axes (orientation-free), in degrees ∈ [0, 90].
+fn axis_angle_deg(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let dot = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]).abs().clamp(0.0, 1.0);
+    dot.acos().to_degrees()
+}
+
+/// Angle between the principal axes of two shapes, or between one shape's
+/// principal axis and an explicit direction. Works for arena shapes AND
+/// imported meshes (PCA on the tessellated vertex cloud).
+fn handle_cad_measure_shape_angle(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(a_id) = params.get("a").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing shape id 'a'");
+    };
+    let mesh_a = match shape_trimesh(state, a_id) {
+        Ok(m) => m,
+        Err(e) => return RpcResponse::err(id, e),
+    };
+    let Some(axis_a) = trimesh_principal_axis(&mesh_a.positions) else {
+        return RpcResponse::err(id, format!("shape '{}' is degenerate (no principal axis)", a_id));
+    };
+
+    let (axis_b, b_label) = if let Some(b_id) = params.get("b").and_then(|v| v.as_str()) {
+        let mesh_b = match shape_trimesh(state, b_id) {
+            Ok(m) => m,
+            Err(e) => return RpcResponse::err(id, e),
+        };
+        match trimesh_principal_axis(&mesh_b.positions) {
+            Some(ax) => (ax, b_id.to_string()),
+            None => return RpcResponse::err(id, format!("shape '{}' is degenerate (no principal axis)", b_id)),
+        }
+    } else if let Some(dir) = params.get("direction").and_then(|v| v.as_array()) {
+        if dir.len() < 3 {
+            return RpcResponse::err(id, "direction must be [x,y,z]");
+        }
+        let d = [
+            dir[0].as_f64().unwrap_or(0.0),
+            dir[1].as_f64().unwrap_or(0.0),
+            dir[2].as_f64().unwrap_or(0.0),
+        ];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if len < 1e-30 {
+            return RpcResponse::err(id, "direction must be non-zero");
+        }
+        ([d[0] / len, d[1] / len, d[2] / len], "direction".to_string())
+    } else {
+        return RpcResponse::err(id, "need shape id 'b' or a 'direction' [x,y,z]");
+    };
+
+    RpcResponse::ok(id, serde_json::json!({
+        "angle_deg": axis_angle_deg(axis_a, axis_b),
+        "axis_a": axis_a,
+        "axis_b": axis_b,
+        "a": a_id,
+        "b": b_label,
     }))
 }
 
@@ -6436,6 +6550,37 @@ mod tests {
         for v in vort {
             assert!((v - 2.0).abs() < 1e-9, "expected |ω| = 2, got {}", v);
         }
+    }
+
+    /// Axis-aligned box vertex cloud spanning the given extents.
+    fn box_cloud(lx: f32, ly: f32, lz: f32) -> Vec<[f32; 3]> {
+        let mut v = Vec::new();
+        for &x in &[0.0, lx] {
+            for &y in &[0.0, ly] {
+                for &z in &[0.0, lz] {
+                    v.push([x, y, z]);
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn principal_axis_finds_the_long_direction() {
+        let ax = trimesh_principal_axis(&box_cloud(10.0, 1.0, 1.0)).unwrap();
+        assert!(ax[0].abs() > 0.99, "expected X-dominant axis, got {:?}", ax);
+        let ay = trimesh_principal_axis(&box_cloud(1.0, 10.0, 1.0)).unwrap();
+        assert!(ay[1].abs() > 0.99, "expected Y-dominant axis, got {:?}", ay);
+    }
+
+    #[test]
+    fn axis_angle_between_perpendicular_boxes_is_90() {
+        let ax = trimesh_principal_axis(&box_cloud(10.0, 1.0, 1.0)).unwrap();
+        let ay = trimesh_principal_axis(&box_cloud(1.0, 10.0, 1.0)).unwrap();
+        let angle = axis_angle_deg(ax, ay);
+        assert!((angle - 90.0).abs() < 1.0, "expected ~90°, got {}", angle);
+        // Same axis (or flipped) → 0°, since axes are orientation-free.
+        assert!(axis_angle_deg(ax, [-ax[0], -ax[1], -ax[2]]) < 1.0e-6);
     }
 
     #[test]

@@ -50,3 +50,35 @@ describe('measure.distance', () => {
     expect(r.error?.code).toBe('UNKNOWN_SHAPE');
   });
 });
+
+describe('measure.angle', () => {
+  it('measures the angle between two shapes via the backend RPC', async () => {
+    const rpc = createMockRpcClient((method: string, params: Record<string, unknown>) => {
+      if (method === 'cad.measure.shape_angle') {
+        expect(params.a).toBe('shape_1');
+        expect(params.b).toBe('shape_2');
+        return { angle_deg: 90, axis_a: [1, 0, 0], axis_b: [0, 1, 0], a: 'shape_1', b: 'shape_2' };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const r = await core.dispatcher.dispatch({ commandId: 'measure.angle', params: { a: 'shape_1', b: 'shape_2' }, source: 'agent' });
+    expect(r.ok).toBe(true);
+    expect((r.result as { angle_deg: number }).angle_deg).toBe(90);
+  });
+
+  it('supports measuring against an explicit direction and rejects missing b/direction', async () => {
+    const rpc = createMockRpcClient((method: string, params: Record<string, unknown>) => {
+      if (method === 'cad.measure.shape_angle') {
+        expect(params.direction).toEqual([0, 0, 1]);
+        return { angle_deg: 0, axis_a: [0, 0, 1], axis_b: [0, 0, 1], a: 'shape_1', b: 'direction' };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const ok = await core.dispatcher.dispatch({ commandId: 'measure.angle', params: { a: 'shape_1', direction: [0, 0, 1] }, source: 'agent' });
+    expect(ok.ok).toBe(true);
+    const bad = await core.dispatcher.dispatch({ commandId: 'measure.angle', params: { a: 'shape_1' }, source: 'agent' });
+    expect(bad.ok).toBe(false);
+  });
+});
