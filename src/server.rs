@@ -104,6 +104,8 @@ struct ServerState {
     next_cad_shape_id: u64,
     /// Applied pluggable physics manifest (Phase 7), as received from the GUI.
     physics_manifest: Option<Value>,
+    /// Imported triangle meshes registered as shape ids (beside the B-Rep arena).
+    imported_meshes: HashMap<String, ImportedMesh>,
     /// Persistent Gmsh session (professional OCC CAD + meshing), feature-gated.
     #[cfg(feature = "gmsh")]
     gmsh: Option<gfd_gmsh::GmshSession>,
@@ -116,6 +118,15 @@ struct PrimitiveBody {
     vertices: Vec<f64>,
     indices: Vec<u32>,
     normals: Vec<f64>,
+}
+
+/// An imported triangle mesh (STL/OBJ/...) registered in the document tree as a
+/// shape id, alongside the B-Rep arena (the kernel is B-Rep, so imported soups
+/// live beside the arena and are served directly for tessellation/measurement).
+struct ImportedMesh {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    indices: Vec<u32>,
 }
 
 struct JobHandle {
@@ -148,6 +159,7 @@ impl ServerState {
             cad_shape_map: HashMap::new(),
             next_cad_shape_id: 0,
             physics_manifest: None,
+            imported_meshes: HashMap::new(),
             #[cfg(feature = "gmsh")]
             gmsh: None,
             #[cfg(feature = "gmsh")]
@@ -530,6 +542,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.extract_edges"       => handle_cad_extract_edges(state, req.id, &req.params),
         "cad.tree.get"          => handle_cad_tree_get(state, req.id),
         "cad.import.stl"        => handle_cad_import_stl(req.id, &req.params),
+        "cad.import.stl_to_doc" => handle_cad_import_stl_to_doc(state, req.id, &req.params),
         "cad.import.obj"        => handle_cad_import_mesh(req.id, &req.params, "obj"),
         "cad.import.off"        => handle_cad_import_mesh(req.id, &req.params, "off"),
         "cad.import.ply"        => handle_cad_import_mesh(req.id, &req.params, "ply"),
@@ -626,6 +639,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "field.get" => handle_field_get(state, req.id, &req.params),
         "field.contour" => handle_field_contour(state, req.id, &req.params),
         "field.export_vdb" => handle_field_export_vdb(state, req.id, &req.params),
+        "field.export_nvdb" => handle_field_export_nvdb(state, req.id, &req.params),
         "field.vectors" => handle_field_vectors(state, req.id, &req.params),
         "field.streamlines" => handle_field_streamlines(state, req.id, &req.params),
 
@@ -1327,6 +1341,13 @@ fn handle_cad_tessellate_adaptive(state: &mut ServerState, id: u64, params: &Val
         Some(s) => s,
         None => return RpcResponse::err(id, "missing shape_id"),
     };
+    if let Some(im) = state.imported_meshes.get(str_id) {
+        let positions: Vec<f32> = im.positions.iter().flat_map(|p| p.iter().copied()).collect();
+        let normals: Vec<f32> = im.normals.iter().flat_map(|n| n.iter().copied()).collect();
+        return RpcResponse::ok(id, serde_json::json!({
+            "positions": positions, "normals": normals, "indices": im.indices,
+        }));
+    }
     let Some(arena_id) = state.cad_shape_map.get(str_id).copied() else {
         return RpcResponse::err(id, format!("unknown shape_id: {}", str_id));
     };
@@ -1998,6 +2019,34 @@ fn handle_cad_import_mesh(id: u64, params: &Value, kind: &str) -> RpcResponse {
     }
 }
 
+/// Import an STL and register it in the document tree as a shape id (renderable,
+/// measurable, AI-referenceable) — unlike cad.import.stl which returns a loose mesh.
+fn handle_cad_import_stl_to_doc(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let path = match params.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => return RpcResponse::err(id, "missing path"),
+    };
+    let mesh = match read_stl(std::path::Path::new(path)) {
+        Ok(m) => m,
+        Err(e) => return RpcResponse::err(id, format!("stl read failed: {}", e)),
+    };
+    let bbox = trimesh_bounding_box(&mesh.positions);
+    state.next_cad_shape_id += 1;
+    let shape_id = format!("shape_{}", state.next_cad_shape_id);
+    let tri_count = mesh.triangle_count();
+    state.imported_meshes.insert(
+        shape_id.clone(),
+        ImportedMesh { positions: mesh.positions, normals: mesh.normals, indices: mesh.indices },
+    );
+    let (mn, mx) = bbox.unwrap_or(([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]));
+    RpcResponse::ok(id, serde_json::json!({
+        "shape_id": shape_id,
+        "kind": "imported",
+        "triangle_count": tri_count,
+        "bbox": { "min": mn, "max": mx },
+    }))
+}
+
 fn handle_cad_import_stl(id: u64, params: &Value) -> RpcResponse {
     let path = match params.get("path").and_then(|v| v.as_str()) {
         Some(p) => p,
@@ -2266,6 +2315,9 @@ fn handle_cad_arena_delete_shape(state: &mut ServerState, id: u64, params: &Valu
     let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
         return RpcResponse::err(id, "missing shape_id");
     };
+    if state.imported_meshes.remove(str_id).is_some() {
+        return RpcResponse::ok(id, serde_json::json!({ "deleted": str_id }));
+    }
     let Some(aid) = state.cad_shape_map.remove(str_id) else {
         return RpcResponse::err(id, format!("unknown shape_id: {}", str_id));
     };
@@ -3616,6 +3668,12 @@ fn handle_cad_measure_com(state: &ServerState, id: u64, params: &Value) -> RpcRe
     let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
         return RpcResponse::err(id, "missing shape_id");
     };
+    if let Some(im) = state.imported_meshes.get(str_id) {
+        if let Some(c) = trimesh_center_of_mass(&im.positions, &im.indices) {
+            return RpcResponse::ok(id, serde_json::json!({ "x": c[0], "y": c[1], "z": c[2] }));
+        }
+        return RpcResponse::err(id, "center_of_mass failed: empty mesh");
+    }
     let Some(aid) = state.cad_shape_map.get(str_id).copied() else {
         return RpcResponse::err(id, format!("unknown shape_id: {}", str_id));
     };
@@ -3629,6 +3687,9 @@ fn handle_cad_measure_volume(state: &ServerState, id: u64, params: &Value) -> Rp
     let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
         return RpcResponse::err(id, "missing shape_id");
     };
+    if let Some(im) = state.imported_meshes.get(str_id) {
+        return RpcResponse::ok(id, serde_json::json!({ "volume": trimesh_volume(&im.positions, &im.indices) }));
+    }
     let Some(arena_id) = state.cad_shape_map.get(str_id).copied() else {
         return RpcResponse::err(id, format!("unknown shape_id: {}", str_id));
     };
@@ -4264,6 +4325,9 @@ fn handle_cad_measure_surface_area(state: &ServerState, id: u64, params: &Value)
     let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
         return RpcResponse::err(id, "missing shape_id");
     };
+    if let Some(im) = state.imported_meshes.get(str_id) {
+        return RpcResponse::ok(id, serde_json::json!({ "area": trimesh_surface_area(&im.positions, &im.indices) }));
+    }
     let Some(arena_id) = state.cad_shape_map.get(str_id).copied() else {
         return RpcResponse::err(id, format!("unknown shape_id: {}", str_id));
     };
@@ -5527,6 +5591,35 @@ fn handle_field_streamlines(state: &mut ServerState, id: u64, params: &Value) ->
         }
     }
     RpcResponse::ok(id, serde_json::json!({ "lines": lines, "count": lines.len() }))
+}
+
+/// Export a solved scalar field as NanoVDB (.nvdb, header-compatible dense
+/// container; see gfd_vdb::nanovdb for the validation caveat).
+fn handle_field_export_nvdb(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let field_name = params.get("field").and_then(|v| v.as_str()).unwrap_or("pressure");
+    let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing path");
+    };
+    collect_finished_job_fields(state);
+    let Some(values) = state.fields.get(field_name).cloned() else {
+        return RpcResponse::err(id, format!("Field '{}' not found", field_name));
+    };
+    let (dims, vsize) = match state.mesh_params {
+        Some((nx, ny, nz, lx, ly, lz)) => {
+            let nxx = nx.max(1) as u32;
+            let nyy = ny.max(1) as u32;
+            let nzz = nz.max(1) as u32;
+            ([nxx, nyy, nzz], [lx / nxx as f64, ly / nyy as f64, lz.max(0.0) / nzz as f64])
+        }
+        None => ([values.len() as u32, 1, 1], [1.0, 1.0, 1.0]),
+    };
+    let data: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+    match gfd_vdb::nanovdb::write_nanovdb(path, field_name, dims, vsize, &data) {
+        Ok(()) => RpcResponse::ok(id, serde_json::json!({
+            "ok": true, "path": path, "voxels": data.len(), "dims": dims, "format": "nanovdb_dense",
+        })),
+        Err(e) => RpcResponse::err(id, format!("NanoVDB write failed: {}", e)),
+    }
 }
 
 fn handle_field_export_vdb(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {

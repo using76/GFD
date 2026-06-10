@@ -388,8 +388,53 @@ export const linearArray: CommandDef<LinearArrayParams, PrimitiveResponse> = {
   },
 };
 
+interface ImportResponse {
+  shape_id: string;
+  kind: string;
+  triangle_count: number;
+  bbox: { min: Vec3; max: Vec3 };
+}
+
+export interface ImportStlParams {
+  path: string;
+  name?: string;
+}
+
+export const importStl: CommandDef<ImportStlParams, ImportResponse> = {
+  id: 'geometry.import_stl',
+  category: 'geometry',
+  group: 'Create',
+  title: 'Import STL',
+  titleKo: 'STL 가져오기',
+  description: 'Import an STL file as a shape in the document tree (renderable, measurable, referenceable).',
+  capability: 'mutate-scene',
+  paramsSchema: {
+    type: 'object',
+    properties: { path: { type: 'string' }, name: { type: 'string' } },
+    required: ['path'],
+  },
+  async run(params, ctx) {
+    const resp = await ctx.rpc.request<ImportResponse>('cad.import.stl_to_doc', { path: params.path });
+    const node: GeometryNode = {
+      id: resp.shape_id,
+      arenaId: -1,
+      name: params.name ?? `imported_${resp.shape_id}`,
+      kind: 'imported',
+      parentId: null,
+      featureParams: { triangles: resp.triangle_count },
+      transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+      bbox: resp.bbox,
+      faceIds: [],
+      visible: true,
+      tessellationRev: 0,
+    };
+    return { ok: true, result: resp, statePatch: addNodePatch(ctx, node) };
+  },
+};
+
 export function registerGeometryCommands(registry: CommandRegistry): void {
   registry.register(createPrimitive);
+  registry.register(importStl);
   registry.register(translateShape);
   registry.register(rotateShape);
   registry.register(scaleShape);

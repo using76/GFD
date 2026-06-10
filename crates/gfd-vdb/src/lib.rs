@@ -8,6 +8,7 @@ pub mod tree;
 pub mod grid;
 pub mod io;
 pub mod codec;
+pub mod nanovdb;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
