@@ -5285,6 +5285,21 @@ fn run_fluid_solve(
     if let Some(src) = momentum_source {
         solver.set_external_momentum_source(src);
     }
+    // Immersed-boundary blockage: a Brinkman/Darcy momentum sink on every solid
+    // cell adds a huge term to its momentum-equation diagonal, so the SIMPLE
+    // solve drives velocity to ~0 there and flow goes AROUND the body — a true
+    // in-solve blockage, not just the post-solve output mask below. 1e6 strongly
+    // dominates the local a_p (~rho|U|A + muA/d) without wrecking BiCGSTAB
+    // conditioning the way 1e12+ would.
+    if !blocked_cells.is_empty() {
+        let mut damping = vec![0.0_f64; n];
+        for &c in &blocked_cells {
+            if c < n {
+                damping[c] = 1.0e6;
+            }
+        }
+        solver.set_external_momentum_damping(damping);
+    }
 
     // Parse boundary conditions
     let (boundary_velocities, boundary_pressure, wall_patches) =
@@ -5371,10 +5386,10 @@ fn run_fluid_solve(
         }
     }
 
-    // Immersed-boundary blanking: zero velocity in cells inside a solid body so
-    // the reported field shows no flow through solids. NOTE: this masks the
-    // OUTPUT only — the SIMPLE assembly still passes flux through these cells, so
-    // it is a display-level blockage, not a true cut-cell/immersed boundary.
+    // Immersed-boundary cleanup: the Brinkman damping above already drives solid-
+    // cell velocity to ~0 in the solve; snap those residuals to exactly 0 so the
+    // reported field shows no flow through solids. (Damping is the physical
+    // blockage; this is just a clean-zero of the near-zero remainder.)
     if !blocked_cells.is_empty() {
         let vel = state.velocity.values_mut();
         for &c in &blocked_cells {
