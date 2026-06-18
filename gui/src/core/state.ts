@@ -55,6 +55,10 @@ export interface MeshState {
   badCells?: number;
   /** The grid resolution used to generate this mesh (so a refine fix can scale it). */
   gen?: { nx: number; ny: number; nz: number };
+  /** Cells blanked because they fall inside a solid body (when maskSolids). */
+  solidCells?: number;
+  /** Active fluid cells after solid masking. */
+  fluidCells?: number;
 }
 
 export interface SolverStatus {

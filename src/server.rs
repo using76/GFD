@@ -105,6 +105,11 @@ struct ServerState {
     /// directly by the tessellate handlers so an imported CAD file can live in
     /// the feature tree and render like any other shape.
     imported_meshes: HashMap<String, TriMesh>,
+    /// Structured-grid cell indices classified as solid (inside a solid body) by
+    /// the last `mesh.generate` with `mask_solids`. Used as an immersed-boundary
+    /// blanking set: the fluid solver zeros velocity in these cells. Empty = no
+    /// masking. Indexed i + j*nx + k*nx*ny, matching mesh cell order.
+    solid_cells: Vec<usize>,
     /// Counter for cad shape string ids.
     next_cad_shape_id: u64,
     /// Applied pluggable physics manifest (Phase 7), as received from the GUI.
@@ -155,6 +160,7 @@ impl ServerState {
             cad_doc: Document::new(),
             cad_shape_map: HashMap::new(),
             imported_meshes: HashMap::new(),
+            solid_cells: Vec::new(),
             next_cad_shape_id: 0,
             physics_manifest: None,
             #[cfg(feature = "gmsh")]
@@ -779,6 +785,7 @@ fn handle_cad_document_new(state: &mut ServerState, id: u64) -> RpcResponse {
     state.cad_doc = Document::new();
     state.cad_shape_map.clear();
     state.imported_meshes.clear();
+    state.solid_cells.clear();
     state.next_cad_shape_id = 0;
     RpcResponse::ok(id, serde_json::json!({ "ok": true }))
 }
@@ -823,6 +830,7 @@ fn handle_cad_document_from_string(state: &mut ServerState, id: u64, params: &Va
     state.cad_doc = gfd_cad::Document::default();
     state.cad_shape_map.clear();
     state.imported_meshes.clear();
+    state.solid_cells.clear();
     state.next_cad_shape_id = 0;
     let Some(arr) = doc.get("shapes").and_then(|v| v.as_array()) else {
         return RpcResponse::err(id, "doc missing 'shapes'");
@@ -899,6 +907,7 @@ fn handle_cad_document_load_json(state: &mut ServerState, id: u64, params: &Valu
     state.cad_doc = gfd_cad::Document::default();
     state.cad_shape_map.clear();
     state.imported_meshes.clear();
+    state.solid_cells.clear();
     state.next_cad_shape_id = 0;
     let Some(arr) = doc.get("shapes").and_then(|v| v.as_array()) else {
         return RpcResponse::err(id, "doc missing 'shapes'");
@@ -2167,6 +2176,48 @@ fn shape_trimesh(state: &ServerState, str_id: &str) -> Result<TriMesh, String> {
         .map_err(|e| format!("tessellate failed: {}", e))
 }
 
+/// Concatenate several shapes' triangle meshes into one (positions/normals
+/// pushed, indices re-emitted with a running vertex offset since TriMesh keeps
+/// three parallel Vecs). Used to build the union of solid bodies for immersed-
+/// boundary cell classification. If `ids` is empty, every shape the server
+/// knows (imported meshes + arena shapes) is included.
+fn combined_solid_trimesh(state: &ServerState, ids: &[String]) -> TriMesh {
+    let mut owned: Vec<String> = Vec::new();
+    let id_iter: Vec<&String> = if ids.is_empty() {
+        owned.extend(state.imported_meshes.keys().cloned());
+        owned.extend(state.cad_shape_map.keys().cloned());
+        owned.iter().collect()
+    } else {
+        ids.iter().collect()
+    };
+    let mut out = TriMesh::default();
+    for sid in id_iter {
+        let Ok(m) = shape_trimesh(state, sid) else { continue };
+        let base = out.positions.len() as u32;
+        out.positions.extend_from_slice(&m.positions);
+        out.normals.extend_from_slice(&m.normals);
+        out.indices.extend(m.indices.iter().map(|i| i + base));
+    }
+    out
+}
+
+/// Classify structured-grid cells as solid (cell center inside the given solid
+/// mesh). Returns the sorted list of solid cell indices (i + j*nx + k*nx*ny).
+/// Empty if the solid mesh is empty or not a closed manifold (inside tests are
+/// unreliable on open meshes, so we conservatively mask nothing).
+fn classify_solid_cells(mesh: &UnstructuredMesh, solid: &TriMesh) -> Vec<usize> {
+    if solid.indices.len() < 3 || !trimesh_is_closed(&solid.indices) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (i, cell) in mesh.cells.iter().enumerate() {
+        if trimesh_point_inside(cell.center, &solid.positions, &solid.indices) {
+            out.push(i);
+        }
+    }
+    out
+}
+
 /// Dominant PCA axis of a vertex cloud (power iteration on the covariance
 /// matrix). Returns a unit vector along the largest spatial extent — the
 /// shape's principal direction. None for degenerate clouds.
@@ -2673,8 +2724,6 @@ fn handle_cad_measure_trimesh_sdf(id: u64, params: &Value) -> RpcResponse {
             closest_x.push(f64::NAN); closest_y.push(f64::NAN); closest_z.push(f64::NAN);
         }
     }
-    // Cheap second use of trimesh_point_inside (suppresses dead-code warning).
-    let _ = trimesh_point_inside;
     RpcResponse::ok(id, serde_json::json!({
         "sdf":       sdf,
         "closest_x": closest_x,
@@ -4670,8 +4719,38 @@ fn handle_mesh_generate(state: &mut ServerState, id: u64, params: &Value) -> Rpc
     // Compute quality
     let quality = compute_mesh_quality(&mesh);
 
+    // Immersed-boundary masking: classify each cell as solid (inside a solid
+    // body) or fluid. The GUI passes `solid_shape_ids` (its geometry minus any
+    // enclosure box); if omitted, every known shape is treated as solid.
+    let mask_solids = params.get("mask_solids").and_then(|v| v.as_bool()).unwrap_or(false);
+    let solid_ids: Vec<String> = params
+        .get("solid_shape_ids")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let mut solid_cells: Vec<usize> = Vec::new();
+    if mask_solids {
+        let solid = combined_solid_trimesh(state, &solid_ids);
+        solid_cells = classify_solid_cells(&mesh, &solid);
+    }
+    let n_solid = solid_cells.len();
+    let n_fluid = n_cells.saturating_sub(n_solid);
+
+    // Expose a 0/1 per-cell zone field for contour visualization (1 = solid).
+    state.fields.remove("cell_zone");
+    if mask_solids {
+        let mut zone = vec![0.0_f64; n_cells];
+        for &c in &solid_cells {
+            if c < n_cells {
+                zone[c] = 1.0;
+            }
+        }
+        state.fields.insert("cell_zone".to_string(), zone);
+    }
+
     state.mesh_params = Some((nx, ny, nz, lx, ly, lz));
     state.mesh = Some(mesh);
+    state.solid_cells = solid_cells;
 
     // Return enhanced response with domain info
     RpcResponse::ok(
@@ -4683,6 +4762,8 @@ fn handle_mesh_generate(state: &mut ServerState, id: u64, params: &Value) -> Rpc
             "nx": nx,
             "ny": ny,
             "nz": nz,
+            "solid_cells": n_solid,
+            "fluid_cells": n_fluid,
             "domain": {
                 "xmin": origin_x,
                 "xmax": origin_x + lx,
@@ -4827,6 +4908,8 @@ fn handle_solve_start(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
     // manifest's expression source terms. Changing the expression (e.g. via the
     // AI physics.set_term command) changes this force → changes the solved field.
     let momentum_source = build_momentum_source(&state.physics_manifest, &mesh);
+    // Immersed-boundary blanking set from the last solid-aware mesh.generate.
+    let blocked_cells = state.solid_cells.clone();
 
     thread::spawn(move || {
         if physics == "thermal" {
@@ -4858,6 +4941,7 @@ fn handle_solve_start(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
                 &residual_t,
                 &result_t,
                 momentum_source,
+                blocked_cells,
             );
         }
         running_t.store(false, Ordering::SeqCst);
@@ -5116,6 +5200,7 @@ fn run_fluid_solve(
     residual: &Mutex<f64>,
     result_holder: &Mutex<Option<JobResult>>,
     momentum_source: Option<Vec<[f64; 3]>>,
+    blocked_cells: Vec<usize>,
 ) {
     let n = mesh.num_cells();
 
@@ -5218,6 +5303,19 @@ fn run_fluid_solve(
                 final_status = "diverged".to_string();
                 final_iter = iter + 1;
                 break;
+            }
+        }
+    }
+
+    // Immersed-boundary blanking: zero velocity in cells inside a solid body so
+    // the reported field shows no flow through solids. NOTE: this masks the
+    // OUTPUT only — the SIMPLE assembly still passes flux through these cells, so
+    // it is a display-level blockage, not a true cut-cell/immersed boundary.
+    if !blocked_cells.is_empty() {
+        let vel = state.velocity.values_mut();
+        for &c in &blocked_cells {
+            if c < n {
+                vel[c] = [0.0, 0.0, 0.0];
             }
         }
     }
@@ -6581,6 +6679,68 @@ mod tests {
         assert!((angle - 90.0).abs() < 1.0, "expected ~90°, got {}", angle);
         // Same axis (or flipped) → 0°, since axes are orientation-free.
         assert!(axis_angle_deg(ax, [-ax[0], -ax[1], -ax[2]]) < 1.0e-6);
+    }
+
+    /// Watertight axis-aligned cube TriMesh (8 verts, 12 tris) over [min,max]^3.
+    fn cube_trimesh(mn: [f32; 3], mx: [f32; 3]) -> TriMesh {
+        let v = [
+            [mn[0], mn[1], mn[2]], [mx[0], mn[1], mn[2]], [mx[0], mx[1], mn[2]], [mn[0], mx[1], mn[2]],
+            [mn[0], mn[1], mx[2]], [mx[0], mn[1], mx[2]], [mx[0], mx[1], mx[2]], [mn[0], mx[1], mx[2]],
+        ];
+        let tris: [[u32; 3]; 12] = [
+            [0, 3, 2], [0, 2, 1], // bottom
+            [4, 5, 6], [4, 6, 7], // top
+            [0, 1, 5], [0, 5, 4], // front
+            [3, 7, 6], [3, 6, 2], // back
+            [0, 4, 7], [0, 7, 3], // left
+            [1, 2, 6], [1, 6, 5], // right
+        ];
+        let mut indices = Vec::new();
+        for t in tris {
+            indices.extend_from_slice(&t);
+        }
+        TriMesh { positions: v.to_vec(), normals: vec![], indices }
+    }
+
+    #[test]
+    fn classify_solid_cells_marks_cells_inside_the_cube() {
+        // 4x4x4 grid over [0,4]^3 (cell centers at 0.5,1.5,2.5,3.5); a cube over
+        // [1,3]^3 contains the centers at 1.5 and 2.5 on each axis → 2^3 = 8 cells.
+        let mesh = StructuredMesh::uniform(4, 4, 4, 4.0, 4.0, 4.0).to_unstructured();
+        let cube = cube_trimesh([1.0, 1.0, 1.0], [3.0, 3.0, 3.0]);
+        assert!(trimesh_is_closed(&cube.indices), "cube must be watertight");
+        let solid = classify_solid_cells(&mesh, &cube);
+        assert_eq!(solid.len(), 8, "expected 8 solid cells, got {}", solid.len());
+        // Every solid cell center must actually be inside [1,3]^3.
+        for &c in &solid {
+            let ctr = mesh.cells[c].center;
+            for k in 0..3 {
+                assert!(ctr[k] > 1.0 && ctr[k] < 3.0, "solid cell center {:?} not inside cube", ctr);
+            }
+        }
+    }
+
+    #[test]
+    fn classify_solid_cells_returns_empty_for_open_mesh() {
+        let mesh = StructuredMesh::uniform(2, 2, 2, 2.0, 2.0, 2.0).to_unstructured();
+        // A single triangle is not closed → masking is suppressed (conservative).
+        let open = TriMesh { positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], normals: vec![], indices: vec![0, 1, 2] };
+        assert!(classify_solid_cells(&mesh, &open).is_empty());
+    }
+
+    #[test]
+    fn combined_solid_trimesh_offsets_indices_without_double_count() {
+        let mut state = ServerState::new();
+        state.imported_meshes.insert("shape_1".into(), cube_trimesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]));
+        state.imported_meshes.insert("shape_2".into(), cube_trimesh([2.0, 2.0, 2.0], [3.0, 3.0, 3.0]));
+        let combined = combined_solid_trimesh(&state, &[]);
+        assert_eq!(combined.positions.len(), 16, "two cubes → 16 vertices");
+        assert_eq!(combined.indices.len(), 72, "two cubes → 24 triangles × 3 indices");
+        let max_idx = *combined.indices.iter().max().unwrap();
+        assert!((max_idx as usize) < combined.positions.len(), "indices must stay in range after offset");
+        // Explicit id list selects a single shape.
+        let one = combined_solid_trimesh(&state, &["shape_1".to_string()]);
+        assert_eq!(one.positions.len(), 8);
     }
 
     #[test]

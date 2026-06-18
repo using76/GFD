@@ -330,13 +330,26 @@
 
 **branch `feat/ai-sim-loop` (23 commits) — 리뷰/머지 준비 완료.**
 
-## 향후 후보 (남은 deep/niche backlog)
-- imported 형상이 구조격자 mesh.generate에 반영(immersed boundary/cut-cell) — deep
-  (단, gmsh tet-mesh 경로가 geometry-conforming 메싱을 이미 대체).
-- STEP 곡면(원통/구면) 세분(현재 면 폴리곤 근사).
-- measure.angle / face 단위 공간참조.
-- diagnose 결과를 AppState/UI 패널에 표시(현재 명령 결과로만 반환).
-- mesh 품질/설정 패널(size/prism/quality) command + UI.
-- 공간 엔티티 참조(ray/screen/nearest) 구현(현재 stub).
-- Distance/angle 2-pick measure.
-- import한 STEP의 topology 복원(현재 points-only).
+---
+
+## 🔧 backlog 후속 작업 (branch `feat/loop-backlog`, PR #8 적층)
+
+### measure.angle — 형상 간 주축 각도 ✅ (`808f9d4`)
+- 백엔드 `cad.measure.shape_angle{a, b|direction}` — TriMesh 정점 클라우드의 PCA 주축
+  (`trimesh_principal_axis`, power iteration) 간 방향-무관 각도(0–90°). arena/imported 모두 지원.
+- command-core `measure.angle`. 검증: cargo test, vitest.
+
+### STEP 곡면 세분 — 원통/구면 면을 진짜 곡면으로 복원 ✅ (`bebfa95`)
+- `gfd-cad-io/step.rs`: DIRECTION/AXIS2_PLACEMENT_3D/SPHERICAL_SURFACE/CYLINDRICAL_SURFACE
+  파싱 → 곡면 참조 면은 평면 삼각화를 midpoint 2회 세분 후 정점을 진짜 곡면(구/원통)에 투영.
+  평면 면은 불변. 검증: cargo test -p gfd-cad-io (구면 16삼각형 전부 r=1, 원통 패치 r=1).
+
+### immersed boundary — solid-cell 블랭킹 ✅ (이번 작업)
+- (위 iter 29 항목 참조) `mesh.generate maskSolids` → solid 셀 분류·cell_zone·카운트,
+  `run_fluid_solve`가 solid 셀 속도 블랭킹.
+
+## 향후 후보 (남은 deep/niche)
+- 진짜 cut-cell/immersed boundary(SIMPLE assembly에서 solid 셀 flux 차단) — deep.
+- STEP 일반 NURBS/B-spline 곡면(현재 sphere/cylinder만).
+- nearest/semantic의 face/edge 단위(백엔드 tessellation 기반).
+- import한 STEP의 위상(topology) 복원(현재 면 TriMesh만, B-Rep arena 미복원).

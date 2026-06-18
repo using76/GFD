@@ -51,13 +51,26 @@ export interface MeshGenerateParams {
   ny: number;
   nz: number;
   domain?: { xmin: number; xmax: number; ymin: number; ymax: number; zmin: number; zmax: number };
+  /** Blank cells inside solid bodies (immersed boundary). Solid shapes are all
+   *  visible geometry except enclosures; the solver zeros velocity in them. */
+  maskSolids?: boolean;
 }
 
 interface MeshGenerateResponse {
   cells: number;
   faces: number;
   nodes: number;
+  solid_cells?: number;
+  fluid_cells?: number;
   quality: { min_ortho: number; max_skew: number; max_ar: number; bad_cells: number };
+}
+
+/** Visible geometry shape ids that represent solids (everything except the
+ *  fluid-domain enclosure), for immersed-boundary masking. */
+function solidShapeIds(state: { doc: { geometry: { nodes: Record<string, { id: string; kind: string; visible: boolean }> } } }): string[] {
+  return Object.values(state.doc.geometry.nodes)
+    .filter((n) => n.visible && n.kind !== 'enclosure')
+    .map((n) => n.id);
 }
 
 export const meshGenerate: CommandDef<MeshGenerateParams, MeshGenerateResponse> = {
@@ -83,6 +96,7 @@ export const meshGenerate: CommandDef<MeshGenerateParams, MeshGenerateResponse> 
           zmin: { type: 'number' }, zmax: { type: 'number' },
         },
       },
+      maskSolids: { type: 'boolean', default: false },
     },
     required: ['nx', 'ny', 'nz'],
   },
@@ -90,6 +104,10 @@ export const meshGenerate: CommandDef<MeshGenerateParams, MeshGenerateResponse> 
     const rpcParams: JsonObject = { nx: params.nx, ny: params.ny, nz: params.nz };
     const domain = params.domain ?? autoDomain(ctx.getState());
     if (domain) rpcParams.domain = domain as unknown as JsonValue;
+    if (params.maskSolids) {
+      rpcParams.mask_solids = true;
+      rpcParams.solid_shape_ids = solidShapeIds(ctx.getState());
+    }
     const res = await ctx.rpc.request<MeshGenerateResponse>('mesh.generate', rpcParams);
 
     const meshState: MeshState = {
@@ -103,6 +121,8 @@ export const meshGenerate: CommandDef<MeshGenerateParams, MeshGenerateResponse> 
       },
       badCells: res.quality.bad_cells,
       gen: { nx: params.nx, ny: params.ny, nz: params.nz },
+      ...(res.solid_cells !== undefined ? { solidCells: res.solid_cells } : {}),
+      ...(res.fluid_cells !== undefined ? { fluidCells: res.fluid_cells } : {}),
     };
     const patch: PatchOp[] = [{ op: 'replace', path: ['mesh'], value: meshState as unknown as JsonObject }];
     return { ok: true, result: res, statePatch: patch };

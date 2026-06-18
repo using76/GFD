@@ -65,3 +65,45 @@ describe('mesh.generate auto-domain (geometry → mesh)', () => {
     expect(captured.domain).toBeUndefined();
   });
 });
+
+describe('mesh.generate solid masking (immersed boundary)', () => {
+  const MASK_RESP = { cells: 400, faces: 840, nodes: 441, solid_cells: 37, fluid_cells: 363, quality: { min_ortho: 0.95, max_skew: 0.1, max_ar: 1.0, bad_cells: 0 } };
+
+  function coreCapturingMask(state: AppState, captured: { params?: JsonObject }) {
+    const rpc = createMockRpcClient((method: string, params: JsonObject) => {
+      if (method === 'mesh.generate') {
+        captured.params = params;
+        return MASK_RESP;
+      }
+      return {};
+    });
+    return createCore({ rpc, initialState: state });
+  }
+
+  it('forwards mask_solids + solid_shape_ids (excluding the enclosure) and stores counts', async () => {
+    const s = createInitialState();
+    s.doc.geometry.nodes['enc'] = node('enc', 'enclosure', [-1, -1, -1], [3, 3, 3]);
+    s.doc.geometry.nodes['part'] = node('part', 'imported_step', [0, 0, 0], [1, 1, 1]);
+    s.doc.geometry.roots = ['enc', 'part'];
+    const captured: { params?: JsonObject } = {};
+    const core = coreCapturingMask(s, captured);
+    await core.dispatcher.dispatch({ commandId: 'mesh.generate', params: { nx: 10, ny: 10, nz: 10, maskSolids: true }, source: 'agent' });
+    expect(captured.params?.mask_solids).toBe(true);
+    // enclosure is excluded; only the part is a solid.
+    expect(captured.params?.solid_shape_ids).toEqual(['part']);
+    const mesh = core.store.getState().mesh;
+    expect(mesh?.solidCells).toBe(37);
+    expect(mesh?.fluidCells).toBe(363);
+  });
+
+  it('does not forward masking params when maskSolids is omitted', async () => {
+    const s = createInitialState();
+    s.doc.geometry.nodes['part'] = node('part', 'box', [0, 0, 0], [1, 1, 1]);
+    s.doc.geometry.roots = ['part'];
+    const captured: { params?: JsonObject } = {};
+    const core = coreCapturingMask(s, captured);
+    await core.dispatcher.dispatch({ commandId: 'mesh.generate', params: { nx: 5, ny: 5, nz: 0 }, source: 'agent' });
+    expect(captured.params?.mask_solids).toBeUndefined();
+    expect(captured.params?.solid_shape_ids).toBeUndefined();
+  });
+});
