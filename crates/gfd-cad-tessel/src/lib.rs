@@ -504,7 +504,15 @@ fn walk_adaptive(arena: &ShapeArena, id: ShapeId, chord_tol: f64, out: &mut TriM
         Shape::Solid { shells }      => for s in shells   { walk_adaptive(arena, *s, chord_tol, out)?; },
         Shape::Shell { faces }       => for (f, _) in faces { walk_adaptive(arena, *f, chord_tol, out)?; },
         Shape::Face { surface, wires, .. }  => {
-            let (u, v) = auto_uv_steps(surface, chord_tol);
+            let (mut u, v) = auto_uv_steps(surface, chord_tol);
+            // A circular cap is a planar face, so auto_uv_steps gives it the coarse
+            // Plane default. Size its rim from the circle radius (same formula the
+            // curved wall uses) so the welded rims coincide → watertight here too.
+            if matches!(surface, SurfaceGeom::Plane(_)) {
+                if let Some(c) = planar_circle_loop(arena, wires) {
+                    u = (std::f64::consts::PI / (chord_tol / c.radius).max(1e-3)).clamp(8.0, 128.0) as usize;
+                }
+            }
             let opts = TessellationOptions { u_steps: u, v_steps: v, chord_tolerance: chord_tol, ..Default::default() };
             let face_mesh = tessellate_face(arena, surface, wires, opts)?;
             out.merge(face_mesh);
@@ -592,6 +600,11 @@ fn planar_circle_loop(arena: &ShapeArena, wires: &[ShapeId]) -> Option<Circle> {
 /// (n = u_steps), so after a weld the cap and wall share rim vertices → the
 /// solid is watertight. Winding follows the circle normal (== plane normal).
 fn tessellate_disc(circle: &Circle, n: usize) -> TriMesh {
+    // Degenerate (radius 0 / NaN) → emit nothing rather than NaN vertices
+    // (Circle::eval divides by radius). The `!(>)` form also rejects NaN.
+    if !(circle.radius > f64::EPSILON) {
+        return TriMesh::default();
+    }
     let n = n.max(8);
     let c = circle.center;
     let nrm = circle.normal.as_vec();

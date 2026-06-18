@@ -266,11 +266,13 @@ pub fn cone_solid(arena: &mut ShapeArena, r1: f64, r2: f64, height: f64) -> Topo
         wires: vec![],
         orient: Orientation::Forward,
     });
-    let bottom = circle_cap_face(arena, Point3::ORIGIN, Direction3 { x: 0.0, y: 0.0, z: -1.0 }, Direction3::X, r1)?;
-    let mut faces = vec![
-        (lateral, Orientation::Forward),
-        (bottom, Orientation::Forward),
-    ];
+    let mut faces = vec![(lateral, Orientation::Forward)];
+    // Bottom cap only when r1 > 0 (a full cone with apex at the bottom has no
+    // bottom disc; a radius-0 cap would otherwise produce NaN vertices).
+    if r1.abs() > f64::EPSILON {
+        let bottom = circle_cap_face(arena, Point3::ORIGIN, Direction3 { x: 0.0, y: 0.0, z: -1.0 }, Direction3::X, r1)?;
+        faces.push((bottom, Orientation::Forward));
+    }
     if r2.abs() > f64::EPSILON {
         let top = circle_cap_face(arena, Point3::new(0.0, 0.0, height), Direction3::Z, Direction3::X, r2)?;
         faces.push((top, Orientation::Forward));
@@ -319,4 +321,15 @@ mod tests {
         let faces = collect_by_kind(&a, id, ShapeKind::Face);
         assert_eq!(faces.len(), 3);
     }
+
+    #[test]
+    fn full_cone_apex_at_bottom_has_only_top_cap() {
+        // r1=0 (apex at the bottom): no bottom disc (a radius-0 cap would NaN),
+        // so faces = lateral + top cap = 2.
+        let mut a = ShapeArena::new();
+        let id = cone_solid(&mut a, 0.0, 0.5, 2.0).unwrap();
+        let faces = collect_by_kind(&a, id, ShapeKind::Face);
+        assert_eq!(faces.len(), 2, "full cone (r1=0) should have lateral + 1 cap");
+    }
+
 }

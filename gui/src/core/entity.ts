@@ -136,11 +136,15 @@ export function createEntityResolver(getState: () => Readonly<AppState>, rpc: Rp
           // Face granularity: pick the nearest face of the nearest shape via the
           // backend (per-face tessellation). Edge/vertex still need a backend.
           if (ref.entity === 'face' && rpc.isLive()) {
-            const res = await rpc.request<{ face_id?: number } | null>('cad.pick.face', {
-              shape_id: best.id,
-              point: [...ref.point],
-            });
-            return res?.face_id !== undefined ? { entityType: 'face', ids: [String(res.face_id)] } : null;
+            try {
+              const res = await rpc.request<{ face_id?: number } | null>('cad.pick.face', {
+                shape_id: best.id,
+                point: [...ref.point],
+              });
+              return res?.face_id !== undefined ? { entityType: 'face', ids: [String(res.face_id)] } : null;
+            } catch {
+              return null; // no pickable face / shape has no faces → unresolved, not an error
+            }
           }
           return null;
         }

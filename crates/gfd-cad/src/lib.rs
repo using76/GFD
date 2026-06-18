@@ -22,9 +22,9 @@ pub use document::Document;
 mod integration_tests {
     use super::*;
     use bool_::compound_merge;
-    use feature::{box_solid, cylinder_solid, pad_polygon_xy, revolve_profile_z, sphere_solid};
+    use feature::{box_solid, cone_solid, cylinder_solid, pad_polygon_xy, revolve_profile_z, sphere_solid};
     use heal::check_validity;
-    use measure::{bbox_volume, surface_area, trimesh_is_closed};
+    use measure::{bbox_volume, surface_area, trimesh_is_closed, volume};
     use tessel::{tessellate, TessellationOptions};
     use topo::ShapeArena;
 
@@ -73,6 +73,30 @@ mod integration_tests {
         mesh.prune_unused_vertices();
         assert!(removed > 0, "weld should merge duplicated face-corner vertices");
         assert!(trimesh_is_closed(&mesh.indices), "welded cylinder must be watertight (caps closed)");
+    }
+
+    #[test]
+    fn cylinder_volume_is_analytic() {
+        // Wire-bounded caps used to make divergence_volume silently return 0;
+        // now cylinder/cone report exact closed-form volume.
+        let mut arena = ShapeArena::new();
+        let cyl = cylinder_solid(&mut arena, 0.5, 2.0).unwrap();
+        let v = volume(&arena, cyl).unwrap();
+        let expect = std::f64::consts::PI * 0.5 * 0.5 * 2.0; // πr²h
+        assert!((v - expect).abs() < 1e-9, "cylinder volume {} != {}", v, expect);
+    }
+
+    #[test]
+    fn full_cone_r1_zero_tessellates_without_nan() {
+        // r1=0 (apex at bottom) must not emit a radius-0 NaN disc cap.
+        let mut arena = ShapeArena::new();
+        let id = cone_solid(&mut arena, 0.0, 0.5, 2.0).unwrap();
+        let mesh = tessellate(&arena, id, TessellationOptions::default()).unwrap();
+        assert!(!mesh.positions.is_empty());
+        assert!(
+            mesh.positions.iter().all(|p| p.iter().all(|c| c.is_finite())),
+            "cone r1=0 tessellation must not contain NaN vertices"
+        );
     }
 
     #[test]

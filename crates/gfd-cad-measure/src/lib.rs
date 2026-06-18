@@ -798,8 +798,76 @@ pub fn polygon_centroid(points: &[(f64, f64)]) -> (f64, f64) {
 pub fn bounding_box(arena: &ShapeArena, id: ShapeId) -> MeasureResult<BoundingBox> {
     let mut bb = BoundingBox::EMPTY;
     walk_vertices(arena, id, &mut |p| bb.expand(p))?;
+    // Curved surfaces (cylinder/cone/sphere/torus) carry few/no explicit
+    // vertices, so expand by each curved face's analytic extent — otherwise a
+    // cylinder/cone would collapse to its lone cap-rim vertices (a degenerate
+    // line) and report bbox volume 0.
+    walk_surface_aabb(arena, id, &mut |lo, hi| { bb.expand(lo); bb.expand(hi); })?;
     if bb.is_empty() { return Err(MeasureError::EmptyShape); }
     Ok(bb)
+}
+
+/// Analytic axis-aligned extent of a curved-surface face. A circle of radius `r`
+/// with unit normal `a` has world-axis-k half-extent `r·√(1−a_k²)`.
+fn surface_face_aabb(surface: &gfd_cad_topo::SurfaceGeom) -> Option<(Point3, Point3)> {
+    use gfd_cad_topo::SurfaceGeom;
+    let circle_ext = |a: gfd_cad_geom::Direction3, r: f64| -> [f64; 3] {
+        let av = a.as_vec();
+        [
+            r * (1.0 - av.x * av.x).max(0.0).sqrt(),
+            r * (1.0 - av.y * av.y).max(0.0).sqrt(),
+            r * (1.0 - av.z * av.z).max(0.0).sqrt(),
+        ]
+    };
+    let bb_from = |pts: &[(Point3, [f64; 3])]| -> (Point3, Point3) {
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for (c, e) in pts {
+            for (k, &cv) in [c.x, c.y, c.z].iter().enumerate() {
+                lo[k] = lo[k].min(cv - e[k]);
+                hi[k] = hi[k].max(cv + e[k]);
+            }
+        }
+        (Point3::new(lo[0], lo[1], lo[2]), Point3::new(hi[0], hi[1], hi[2]))
+    };
+    match surface {
+        SurfaceGeom::Cylinder(c) => {
+            let a = c.axis.as_vec();
+            let top = Point3::new(c.origin.x + a.x * c.height, c.origin.y + a.y * c.height, c.origin.z + a.z * c.height);
+            let e = circle_ext(c.axis, c.radius);
+            Some(bb_from(&[(c.origin, e), (top, e)]))
+        }
+        SurfaceGeom::Cone(c) => {
+            let a = c.axis.as_vec();
+            let top = Point3::new(c.origin.x + a.x * c.height, c.origin.y + a.y * c.height, c.origin.z + a.z * c.height);
+            Some(bb_from(&[(c.origin, circle_ext(c.axis, c.r1)), (top, circle_ext(c.axis, c.r2))]))
+        }
+        SurfaceGeom::Sphere(s) => {
+            let r = [s.radius, s.radius, s.radius];
+            Some(bb_from(&[(s.center, r)]))
+        }
+        SurfaceGeom::Torus(t) => {
+            let av = t.axis.as_vec();
+            let e = [
+                t.major * (1.0 - av.x * av.x).max(0.0).sqrt() + t.minor,
+                t.major * (1.0 - av.y * av.y).max(0.0).sqrt() + t.minor,
+                t.major * (1.0 - av.z * av.z).max(0.0).sqrt() + t.minor,
+            ];
+            Some(bb_from(&[(t.origin, e)]))
+        }
+        SurfaceGeom::Plane(_) => None,
+    }
+}
+
+fn walk_surface_aabb<F: FnMut(Point3, Point3)>(arena: &ShapeArena, id: ShapeId, cb: &mut F) -> MeasureResult<()> {
+    match arena.get(id)? {
+        Shape::Compound { children } => { for c in children { walk_surface_aabb(arena, *c, cb)?; } }
+        Shape::Solid { shells }      => { for s in shells { walk_surface_aabb(arena, *s, cb)?; } }
+        Shape::Shell { faces }       => { for (f, _) in faces { walk_surface_aabb(arena, *f, cb)?; } }
+        Shape::Face { surface, .. }  => { if let Some((lo, hi)) = surface_face_aabb(surface) { cb(lo, hi); } }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Approximate volume as the axis-aligned bounding box volume. Exact
@@ -1634,10 +1702,42 @@ pub fn surface_area(arena: &ShapeArena, id: ShapeId) -> MeasureResult<f64> {
 ///
 /// Only correct when every face carries a polygon outer wire. Spheres /
 /// cylinders / tori without wires fall back to `bbox_volume`.
+/// Closed-form volume of a solid bounded by a single curved analytic surface
+/// (cylinder/cone/sphere/torus primitive). Returns None for polygon-only solids
+/// or shapes mixing several curved laterals (handled by the divergence path).
+fn analytic_solid_volume(arena: &ShapeArena, id: ShapeId) -> Option<f64> {
+    use gfd_cad_topo::{collect_by_kind, ShapeKind, SurfaceGeom};
+    use std::f64::consts::PI;
+    let mut found: Option<f64> = None;
+    for f in collect_by_kind(arena, id, ShapeKind::Face) {
+        let Ok(gfd_cad_topo::Shape::Face { surface, .. }) = arena.get(f) else { continue };
+        let v = match surface {
+            SurfaceGeom::Cylinder(c) => Some(PI * c.radius * c.radius * c.height),
+            SurfaceGeom::Cone(c) => Some(PI * c.height / 3.0 * (c.r1 * c.r1 + c.r1 * c.r2 + c.r2 * c.r2)),
+            SurfaceGeom::Sphere(s) => Some(4.0 / 3.0 * PI * s.radius.powi(3)),
+            SurfaceGeom::Torus(t) => Some(2.0 * PI * PI * t.major * t.minor * t.minor),
+            SurfaceGeom::Plane(_) => None,
+        };
+        if let Some(vol) = v {
+            if found.is_some() {
+                return None; // more than one curved lateral — don't guess
+            }
+            found = Some(vol);
+        }
+    }
+    found
+}
+
 pub fn divergence_volume(arena: &ShapeArena, id: ShapeId) -> MeasureResult<f64> {
     use gfd_cad_topo::{collect_by_kind, ShapeKind};
     let faces = collect_by_kind(arena, id, ShapeKind::Face);
     if faces.is_empty() { return Err(MeasureError::EmptyShape); }
+    // Curved primitive (cylinder/cone/sphere/torus): exact closed-form volume —
+    // the divergence fan can't integrate a curved lateral, and the bbox fallback
+    // would over/under-count.
+    if let Some(v) = analytic_solid_volume(arena, id) {
+        return Ok(v);
+    }
     let mut acc = 0.0;
     let mut any_polygon = false;
     for f in faces {
