@@ -345,8 +345,18 @@
   평면 면은 불변. 검증: cargo test -p gfd-cad-io (구면 16삼각형 전부 r=1, 원통 패치 r=1).
 
 ### immersed boundary — solid-cell 블랭킹 ✅ (이번 작업)
-- (위 iter 29 항목 참조) `mesh.generate maskSolids` → solid 셀 분류·cell_zone·카운트,
-  `run_fluid_solve`가 solid 셀 속도 블랭킹.
+- `mesh.generate maskSolids` → solid 셀 분류·cell_zone·카운트, `run_fluid_solve`가 solid
+  셀 속도 블랭킹.
+- **adversarial 리뷰(19 에이전트)가 6개 실제 버그 확정 → 전부 수정**(`e49dfc1`):
+  (1·critical) `trimesh_is_closed` 가드가 un-welded 인덱스에 돌아 모든 실제 solid을 거부 →
+  마스킹 무력화. 수정: weld(상대 tol)+prune 후 폐합 게이트 → watertight 메쉬만 마스킹.
+  (2·high) explicit empty `solid_shape_ids`를 "전체 형상"으로 오인 → enclosure 마스킹 →
+  전체 필드 0. 수정: omitted(None)/empty([]) 구분. (3·medium) O(cells×tris) → solid bbox
+  pre-reject. (4·low) `trimesh_principal_axis`가 대칭 형상에 가짜 축 → 고유값 분리 검사로 None.
+- **정직한 범위**: imported watertight solid(STL/STEP)·구면에서 작동. primitive box/cylinder는
+  기존 테셀레이터가 평면 면을 ±1 클램프 샘플링(1×1×1 box → AABB [-1,1]³, 비폐합)하므로
+  안전하게 마스킹 안 함(틀린 마스킹 대신). 진짜 cut-cell/평면-면 wire-bound 테셀레이션은
+  향후 deep 작업.
 
 ## 향후 후보 (남은 deep/niche)
 - 진짜 cut-cell/immersed boundary(SIMPLE assembly에서 solid 셀 flux 차단) — deep.
