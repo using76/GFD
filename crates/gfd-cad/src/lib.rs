@@ -22,9 +22,9 @@ pub use document::Document;
 mod integration_tests {
     use super::*;
     use bool_::compound_merge;
-    use feature::{box_solid, pad_polygon_xy, revolve_profile_z, sphere_solid};
+    use feature::{box_solid, cylinder_solid, pad_polygon_xy, revolve_profile_z, sphere_solid};
     use heal::check_validity;
-    use measure::{bbox_volume, surface_area};
+    use measure::{bbox_volume, surface_area, trimesh_is_closed};
     use tessel::{tessellate, TessellationOptions};
     use topo::ShapeArena;
 
@@ -47,6 +47,32 @@ mod integration_tests {
         }
         assert_eq!(mn, [-1.0, -1.0, -1.0]);
         assert_eq!(mx, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn cylinder_caps_are_watertight_discs() {
+        // Cylinder caps used to tessellate as clamped ±1 squares; now they are
+        // real discs (a Circle-edge wire → center-fan), so the tessellated solid
+        // is watertight after a weld and bounded to the true radius.
+        let mut arena = ShapeArena::new();
+        let id = cylinder_solid(&mut arena, 0.5, 2.0).unwrap();
+        let mut mesh = tessellate(&arena, id, TessellationOptions::default()).unwrap();
+        // True radial extent: x,y ∈ [-0.5, 0.5] (NOT the old ±1 square caps).
+        let (mut mn, mut mx) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for p in &mesh.positions {
+            for k in 0..3 {
+                if p[k] < mn[k] { mn[k] = p[k]; }
+                if p[k] > mx[k] { mx[k] = p[k]; }
+            }
+        }
+        assert!((mn[0] + 0.5).abs() < 1e-5 && (mx[0] - 0.5).abs() < 1e-5, "x extent {:?}..{:?} != ±0.5", mn[0], mx[0]);
+        assert!((mn[2]).abs() < 1e-5 && (mx[2] - 2.0).abs() < 1e-5, "z extent should be [0,2]");
+        // Watertight after welding coincident rim vertices (cap rim shares the
+        // lateral wall's vertices because both sample u_steps angles).
+        let removed = mesh.weld(1e-4);
+        mesh.prune_unused_vertices();
+        assert!(removed > 0, "weld should merge duplicated face-corner vertices");
+        assert!(trimesh_is_closed(&mesh.indices), "welded cylinder must be watertight (caps closed)");
     }
 
     #[test]

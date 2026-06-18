@@ -52,9 +52,9 @@ export interface MeshGenerateParams {
   nz: number;
   domain?: { xmin: number; xmax: number; ymin: number; ymax: number; zmin: number; zmax: number };
   /** Blank cells inside solid bodies (immersed boundary). Solid shapes are all
-   *  visible geometry except enclosures; the solver zeros velocity in them.
-   *  Needs a watertight solid (imported STL/STEP, box/prism/pad/sphere); masks
-   *  nothing otherwise (e.g. cylinder/cone caps aren't watertight yet). */
+   *  visible geometry except enclosures; the solver penalizes momentum there so
+   *  flow goes around them. Works for imported watertight STL/STEP and every
+   *  primitive (box/cylinder/cone/sphere/prism/pad). */
   maskSolids?: boolean;
 }
 

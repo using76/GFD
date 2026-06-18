@@ -3,9 +3,10 @@
 //! Iteration 2: each `SurfaceGeom` variant emits a UV grid with configurable
 //! resolution. Adaptive chord-tolerance refinement lands in a later iteration.
 
-use gfd_cad_geom::{Surface};
+use gfd_cad_geom::{Surface, Curve};
 use gfd_cad_topo::{shape::{SurfaceGeom, CurveGeom}, Orientation, Shape, ShapeArena, ShapeId, TopoError};
 use gfd_cad_geom::surface::{Plane, Cylinder, Sphere, Cone, Torus};
+use gfd_cad_geom::curve::Circle;
 use gfd_cad_geom::{Point3, Vector3};
 use serde::{Deserialize, Serialize};
 
@@ -569,12 +570,59 @@ fn tessellate_planar_loop(plane: &Plane, loop_pts: &[Point3]) -> TriMesh {
     TriMesh { positions, normals, indices }
 }
 
+/// A planar face whose outer wire is a single full-circle edge (cylinder/cone
+/// cap). Returns that Circle so the cap can be tessellated as a real disc
+/// instead of the clamped ±1 plane window.
+fn planar_circle_loop(arena: &ShapeArena, wires: &[ShapeId]) -> Option<Circle> {
+    let edges = match arena.get(*wires.first()?).ok()? {
+        Shape::Wire { edges } => edges,
+        _ => return None,
+    };
+    if edges.len() != 1 {
+        return None;
+    }
+    match arena.get(edges[0].0).ok()? {
+        Shape::Edge { curve: CurveGeom::Circle(c), .. } => Some(*c),
+        _ => None,
+    }
+}
+
+/// Tessellate a circular cap face as a center-fan disc with `n` rim segments.
+/// The rim is sampled at the same angles a cylinder/cone lateral surface uses
+/// (n = u_steps), so after a weld the cap and wall share rim vertices → the
+/// solid is watertight. Winding follows the circle normal (== plane normal).
+fn tessellate_disc(circle: &Circle, n: usize) -> TriMesh {
+    let n = n.max(8);
+    let c = circle.center;
+    let nrm = circle.normal.as_vec();
+    let normal = [nrm.x as f32, nrm.y as f32, nrm.z as f32];
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n + 1);
+    positions.push([c.x as f32, c.y as f32, c.z as f32]); // center = index 0
+    let circumference = std::f64::consts::TAU * circle.radius;
+    for i in 0..n {
+        let u = i as f64 / n as f64 * circumference; // arc-length parameter
+        let p = circle.eval(u).unwrap_or(c);
+        positions.push([p.x as f32, p.y as f32, p.z as f32]);
+    }
+    let normals = vec![normal; positions.len()];
+    let mut indices = Vec::with_capacity(n * 3);
+    for i in 0..n {
+        let a = 1 + i as u32;
+        let b = 1 + ((i + 1) % n) as u32;
+        indices.extend_from_slice(&[0, a, b]);
+    }
+    TriMesh { positions, normals, indices }
+}
+
 /// Tessellate a face: planar faces with a straight-edged wire are bounded to
-/// their polygon; everything else uses the surface uv-grid.
+/// their polygon, circular caps to a disc; everything else uses the surface grid.
 fn tessellate_face(arena: &ShapeArena, surface: &SurfaceGeom, wires: &[ShapeId], opts: TessellationOptions) -> TessellResult<TriMesh> {
     if let SurfaceGeom::Plane(p) = surface {
         if let Some(loop_pts) = planar_line_loop(arena, wires) {
             return Ok(tessellate_planar_loop(p, &loop_pts));
+        }
+        if let Some(circle) = planar_circle_loop(arena, wires) {
+            return Ok(tessellate_disc(&circle, opts.u_steps));
         }
     }
     tessellate_surface(surface, opts)

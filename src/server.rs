@@ -2212,11 +2212,10 @@ fn classify_solid_cells(mesh: &UnstructuredMesh, solid: &TriMesh) -> Vec<usize> 
     // The ray-cast parity test only gives correct inside/outside on a GEOMETRY-
     // watertight surface. Weld coincident vertices (position-based) + prune, then
     // require trimesh_is_closed: this ACCEPTS real watertight geometry (imported
-    // STL / STEP faces, box/prism/pad primitives whose planar faces are now
-    // wire-bounded, sphere) and conservatively REJECTS surfaces with gaps
-    // (cylinder/cone caps are empty-wire planar faces that fall back to the
-    // clamped ±1 grid → not watertight; masking nothing is safer than masking
-    // the wrong cells).
+    // STL / STEP faces and every primitive — box/prism/pad via wire-bounded
+    // planar faces, cylinder/cone via wire-bounded disc caps, sphere) and
+    // conservatively REJECTS surfaces with gaps (masking nothing is safer than
+    // masking the wrong cells).
     let mut welded = solid.clone();
     let tol = welded
         .aabb()
@@ -6877,6 +6876,26 @@ mod tests {
         translate_mesh(&mut mesh, [-2.0, -2.0, -2.0]);
         let cells = classify_solid_cells(&mesh, &solid);
         assert_eq!(cells.len(), 8, "tessellated box primitive should mask 8 interior cells, got {}", cells.len());
+    }
+
+    #[test]
+    fn classify_solid_cells_masks_a_tessellated_cylinder_primitive() {
+        // Cylinder masking now works because the caps are watertight discs
+        // (wire-bounded). cylinder_solid(0.5, 2.0): radius 0.5 about the z-axis,
+        // z ∈ [0,2]. Domain [-1,1]×[-1,1]×[0,2], 4^3 grid → xy centers ±0.25,±0.75;
+        // only the four ±0.25 columns are within r=0.5 → 4 per layer × 4 = 16.
+        let mut state = ServerState::new();
+        let cid = cylinder_solid(&mut state.cad_doc.arena, 0.5, 2.0).unwrap();
+        state.cad_shape_map.insert("shape_1".into(), cid);
+        let solid = combined_solid_trimesh(&state, &["shape_1".to_string()]);
+        let mut mesh = StructuredMesh::uniform(4, 4, 4, 2.0, 2.0, 2.0).to_unstructured();
+        translate_mesh(&mut mesh, [-1.0, -1.0, 0.0]);
+        let cells = classify_solid_cells(&mesh, &solid);
+        assert_eq!(cells.len(), 16, "cylinder should mask 16 interior cells, got {}", cells.len());
+        for &c in &cells {
+            let ctr = mesh.cells[c].center;
+            assert!((ctr[0] * ctr[0] + ctr[1] * ctr[1]).sqrt() < 0.5, "masked cell outside cylinder radius");
+        }
     }
 
     #[test]
