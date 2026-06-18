@@ -4,9 +4,8 @@
 //! resolution. Adaptive chord-tolerance refinement lands in a later iteration.
 
 use gfd_cad_geom::{Surface};
-use gfd_cad_topo::{shape::SurfaceGeom, Shape, ShapeArena, ShapeId, TopoError};
+use gfd_cad_topo::{shape::{SurfaceGeom, CurveGeom}, Orientation, Shape, ShapeArena, ShapeId, TopoError};
 use gfd_cad_geom::surface::{Plane, Cylinder, Sphere, Cone, Torus};
-#[allow(unused_imports)]
 use gfd_cad_geom::{Point3, Vector3};
 use serde::{Deserialize, Serialize};
 
@@ -503,15 +502,82 @@ fn walk_adaptive(arena: &ShapeArena, id: ShapeId, chord_tol: f64, out: &mut TriM
         Shape::Compound { children } => for c in children { walk_adaptive(arena, *c, chord_tol, out)?; },
         Shape::Solid { shells }      => for s in shells   { walk_adaptive(arena, *s, chord_tol, out)?; },
         Shape::Shell { faces }       => for (f, _) in faces { walk_adaptive(arena, *f, chord_tol, out)?; },
-        Shape::Face { surface, .. }  => {
+        Shape::Face { surface, wires, .. }  => {
             let (u, v) = auto_uv_steps(surface, chord_tol);
             let opts = TessellationOptions { u_steps: u, v_steps: v, chord_tolerance: chord_tol, ..Default::default() };
-            let face_mesh = tessellate_surface(surface, opts)?;
+            let face_mesh = tessellate_face(arena, surface, wires, opts)?;
             out.merge(face_mesh);
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Ordered 3D boundary polygon of a planar face from its outer wire — but ONLY
+/// when every boundary edge is a straight Line (box / prism / pad / polygon
+/// faces). Returns None for empty wires, fewer than 3 points, or any curved
+/// boundary edge, so those faces fall back to the surface uv-grid path.
+///
+/// Honors the per-USE orientation stored in the wire tuple (Forward → the
+/// edge's start vertex, Reversed → its end vertex), matching `build_half_edges`.
+fn planar_line_loop(arena: &ShapeArena, wires: &[ShapeId]) -> Option<Vec<Point3>> {
+    let edges = match arena.get(*wires.first()?).ok()? {
+        Shape::Wire { edges } => edges,
+        _ => return None,
+    };
+    let mut loop_pts: Vec<Point3> = Vec::with_capacity(edges.len());
+    for (eid, orient) in edges {
+        let (curve, verts) = match arena.get(*eid).ok()? {
+            Shape::Edge { curve, vertices, .. } => (curve, vertices),
+            _ => return None,
+        };
+        if !matches!(curve, CurveGeom::Line(_)) {
+            return None; // curved boundary → fall back to the surface grid
+        }
+        let start = if matches!(orient, Orientation::Forward) { verts[0] } else { verts[1] };
+        match arena.get(start).ok()? {
+            Shape::Vertex { point } => loop_pts.push(*point),
+            _ => return None,
+        }
+    }
+    if loop_pts.len() < 3 { None } else { Some(loop_pts) }
+}
+
+/// Tessellate a planar face from its wire polygon: project the loop onto the
+/// plane's orthonormal (u,v) basis, ear-clip, and emit triangles with the exact
+/// 3D loop positions + the plane normal. This bounds the face to its real
+/// extent instead of the infinite plane's clamped ±1 sampling window.
+fn tessellate_planar_loop(plane: &Plane, loop_pts: &[Point3]) -> TriMesh {
+    let o = plane.origin;
+    let xd = plane.x_axis.as_vec();
+    let yd = plane.normal.as_vec().cross(plane.x_axis.as_vec());
+    let uv: Vec<(f64, f64)> = loop_pts
+        .iter()
+        .map(|p| {
+            let d = Vector3::new(p.x - o.x, p.y - o.y, p.z - o.z);
+            (d.dot(xd), d.dot(yd))
+        })
+        .collect();
+    let n = plane.normal.as_vec();
+    let normal = [n.x as f32, n.y as f32, n.z as f32];
+    let positions: Vec<[f32; 3]> = loop_pts.iter().map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect();
+    let normals = vec![normal; positions.len()];
+    let mut indices = Vec::new();
+    for t in triangulate_polygon(&uv) {
+        indices.extend_from_slice(&t);
+    }
+    TriMesh { positions, normals, indices }
+}
+
+/// Tessellate a face: planar faces with a straight-edged wire are bounded to
+/// their polygon; everything else uses the surface uv-grid.
+fn tessellate_face(arena: &ShapeArena, surface: &SurfaceGeom, wires: &[ShapeId], opts: TessellationOptions) -> TessellResult<TriMesh> {
+    if let SurfaceGeom::Plane(p) = surface {
+        if let Some(loop_pts) = planar_line_loop(arena, wires) {
+            return Ok(tessellate_planar_loop(p, &loop_pts));
+        }
+    }
+    tessellate_surface(surface, opts)
 }
 
 fn walk(arena: &ShapeArena, id: ShapeId, opts: TessellationOptions, out: &mut TriMesh) -> TessellResult<()> {
@@ -525,8 +591,8 @@ fn walk(arena: &ShapeArena, id: ShapeId, opts: TessellationOptions, out: &mut Tr
         Shape::Shell { faces } => {
             for (f, _) in faces { walk(arena, *f, opts, out)?; }
         }
-        Shape::Face { surface, .. } => {
-            let face_mesh = tessellate_surface(surface, opts)?;
+        Shape::Face { surface, wires, .. } => {
+            let face_mesh = tessellate_face(arena, surface, wires, opts)?;
             out.merge(face_mesh);
         }
         _ => { /* Vertex / Edge / Wire do not contribute triangles */ }
@@ -621,6 +687,60 @@ pub fn sample<S: Surface>(s: &S, opts: TessellationOptions, _u_scale: f64, _v_sc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn planar_face_is_bounded_to_its_wire_not_the_clamped_plane() {
+        use gfd_cad_geom::{curve::Line, Direction3};
+        use gfd_cad_topo::shape::CurveGeom;
+        // A 1×1 square face in the z=0 plane, corners (0,0)→(1,0)→(1,1)→(0,1).
+        let mut arena = ShapeArena::new();
+        let pts = [
+            Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0),
+        ];
+        let v: Vec<ShapeId> = pts.iter().map(|p| arena.push(Shape::Vertex { point: *p })).collect();
+        let mut edges = Vec::new();
+        for i in 0..4 {
+            let j = (i + 1) % 4;
+            let line = Line::from_points(pts[i], pts[j]).unwrap();
+            let e = arena.push(Shape::Edge { curve: CurveGeom::Line(line), vertices: [v[i], v[j]], orient: Orientation::Forward });
+            edges.push((e, Orientation::Forward));
+        }
+        let wire = arena.push(Shape::Wire { edges });
+        let face = arena.push(Shape::Face {
+            surface: SurfaceGeom::Plane(Plane::new(Point3::ORIGIN, Direction3::Z, Direction3::X)),
+            wires: vec![wire],
+            orient: Orientation::Forward,
+        });
+        let mesh = tessellate(&arena, face, TessellationOptions::default()).unwrap();
+        // Wire-bounded: a quad → exactly 2 triangles (NOT a 32×16 clamped grid).
+        assert_eq!(mesh.indices.len() / 3, 2, "square face should be 2 triangles");
+        // Bounded to the real [0,1]×[0,1] extent, not the ±1 plane window.
+        let (mut mn, mut mx) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for p in &mesh.positions {
+            for k in 0..3 {
+                if p[k] < mn[k] { mn[k] = p[k]; }
+                if p[k] > mx[k] { mx[k] = p[k]; }
+            }
+        }
+        assert_eq!(mn, [0.0, 0.0, 0.0]);
+        assert_eq!(mx, [1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn planar_loop_falls_back_for_empty_wires() {
+        // A planar face with no wire (e.g. a cylinder cap) must NOT vanish — it
+        // falls back to the surface uv-grid path and still emits triangles.
+        let mut arena = ShapeArena::new();
+        use gfd_cad_geom::Direction3;
+        let face = arena.push(Shape::Face {
+            surface: SurfaceGeom::Plane(Plane::new(Point3::ORIGIN, Direction3::Z, Direction3::X)),
+            wires: vec![],
+            orient: Orientation::Forward,
+        });
+        let mesh = tessellate(&arena, face, TessellationOptions::default()).unwrap();
+        assert!(!mesh.indices.is_empty(), "wireless planar face must still tessellate (fallback)");
+    }
 
     #[test]
     fn prune_drops_unreferenced_vertices() {

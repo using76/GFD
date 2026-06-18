@@ -2212,10 +2212,11 @@ fn classify_solid_cells(mesh: &UnstructuredMesh, solid: &TriMesh) -> Vec<usize> 
     // The ray-cast parity test only gives correct inside/outside on a GEOMETRY-
     // watertight surface. Weld coincident vertices (position-based) + prune, then
     // require trimesh_is_closed: this ACCEPTS real watertight geometry (imported
-    // STL / STEP faces, sphere primitives) and conservatively REJECTS surfaces
-    // with gaps (the planar-face tessellator samples box/cylinder faces over a
-    // clamped ±1 window so they are not watertight — masking nothing is safer
-    // than masking the wrong cells).
+    // STL / STEP faces, box/prism/pad primitives whose planar faces are now
+    // wire-bounded, sphere) and conservatively REJECTS surfaces with gaps
+    // (cylinder/cone caps are empty-wire planar faces that fall back to the
+    // clamped ±1 grid → not watertight; masking nothing is safer than masking
+    // the wrong cells).
     let mut welded = solid.clone();
     let tol = welded
         .aabb()
@@ -6844,6 +6845,23 @@ mod tests {
         }));
         assert_eq!(empty, 0, "explicit empty solid_shape_ids must mask nothing");
         assert!(state.solid_cells.is_empty());
+    }
+
+    #[test]
+    fn classify_solid_cells_masks_a_tessellated_box_primitive() {
+        // The REAL arena → tessellate → weld → classify path. Before the
+        // wire-bounded planar tessellation fix this was a silent no-op (the box
+        // tessellated non-watertight); now box_solid(2,2,2) → [-1,1]^3 watertight.
+        let mut state = ServerState::new();
+        let bid = box_solid(&mut state.cad_doc.arena, 2.0, 2.0, 2.0).unwrap();
+        state.cad_shape_map.insert("shape_1".into(), bid);
+        let solid = combined_solid_trimesh(&state, &["shape_1".to_string()]);
+        // 4x4x4 grid translated to [-2,2]^3 → centers at ±1.5,±0.5; box [-1,1]^3
+        // contains the ±0.5 centers → 2^3 = 8 cells.
+        let mut mesh = StructuredMesh::uniform(4, 4, 4, 4.0, 4.0, 4.0).to_unstructured();
+        translate_mesh(&mut mesh, [-2.0, -2.0, -2.0]);
+        let cells = classify_solid_cells(&mesh, &solid);
+        assert_eq!(cells.len(), 8, "tessellated box primitive should mask 8 interior cells, got {}", cells.len());
     }
 
     #[test]

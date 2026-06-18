@@ -358,8 +358,26 @@
   안전하게 마스킹 안 함(틀린 마스킹 대신). 진짜 cut-cell/평면-면 wire-bound 테셀레이션은
   향후 deep 작업.
 
+### wire-bound 평면-면 테셀레이션 — foundational 버그 수정 ✅ (이번 작업)
+- 문제(리뷰 중 발견): 테셀레이터가 평면 면의 wire를 무시하고 무한 평면을 ±1로 클램프 샘플링
+  → **1×1×1 box가 [-1,1]³(2배 과대, 비폐합)으로 테셀레이션**. 렌더·`trimesh_volume`(≈8)·
+  `is_point_inside_solid`·immersed-boundary masking을 모두 손상시키는 기존 깊은 버그.
+- 실증: 두 경로(`tessellate`/`tessellate_adaptive`) 모두 box→[-1,1]³, cylinder cap→±1 사각형.
+- 구현(`gfd-cad-tessel/src/lib.rs`): `walk`/`walk_adaptive`의 Face arm이 `tessellate_face`를 호출 —
+  **Plane 면 + 전부 Line edge인 wire → wire 폴리곤을 plane (u,v)로 투영 후 ear-clip**
+  (`planar_line_loop` + `tessellate_planar_loop`); 곡면/빈-wire(cylinder cap)/곡선-edge → 기존
+  uv-grid fallback(무회귀). 결과: 1×1×1 box → 12 triangles, AABB [-0.5,0.5]³, weld 시 watertight,
+  `trimesh_volume`=1.0.
+- blast radius: 정확히 1개 테스트(`box_round_trip` 6144→12, AABB 검증으로 강화) + doc/comment.
+  나머지 1000+ CAD 테스트·B-Rep 측정(이미 topology 기반이라 정확)·곡면 무영향.
+- **immersed-boundary masking이 이제 box/prism/pad/sphere primitive에도 작동**(이전엔 imported만).
+  cylinder/cone cap만 빈-wire라 미지원. `is_point_inside_solid`도 자동 수정.
+- 검증: cargo test 전 CAD 크레이트 green(gfd-cad 6, tessel 6, measure 43, feature 22, bool 64,
+  io 22, server bin 15), tsc 0, vitest 128, vite build OK.
+  새 테스트: wire-bound 평면 면(2 tris, 실제 extent), 빈-wire fallback, tessellated box 마스킹(8셀).
+
 ## 향후 후보 (남은 deep/niche)
-- 진짜 cut-cell/immersed boundary(SIMPLE assembly에서 solid 셀 flux 차단) — deep.
+- 진짜 cut-cell(SIMPLE assembly에서 solid 셀 flux 차단) — deep.
+- cylinder/cone cap에 원형 wire 부여(현재 빈-wire → masking 미지원).
 - STEP 일반 NURBS/B-spline 곡면(현재 sphere/cylinder만).
-- nearest/semantic의 face/edge 단위(백엔드 tessellation 기반).
-- import한 STEP의 위상(topology) 복원(현재 면 TriMesh만, B-Rep arena 미복원).
+- 평면 면의 inner wire(hole) 지원(현재 outer loop만 ear-clip).

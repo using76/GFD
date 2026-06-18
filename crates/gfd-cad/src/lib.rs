@@ -33,9 +33,20 @@ mod integration_tests {
         let mut arena = ShapeArena::new();
         let id = box_solid(&mut arena, 2.0, 2.0, 2.0).unwrap();
         let mesh = tessellate(&arena, id, TessellationOptions::default()).unwrap();
-        // 6 faces × (32 × 16 × 2) triangles by default.
-        assert_eq!(mesh.indices.len() / 3, 6 * 32 * 16 * 2);
-        assert!(!mesh.positions.is_empty());
+        // Planar faces are now bounded to their wire polygon (ear-clipped), so a
+        // box is 6 quad faces × 2 triangles = 12, with the TRUE extent — not the
+        // old clamped-±1 surface grid (6 × 32 × 16 × 2).
+        assert_eq!(mesh.indices.len() / 3, 6 * 2);
+        // True extent: a 2×2×2 box spans [-1,1]^3 (not the old oversized shell).
+        let (mut mn, mut mx) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for p in &mesh.positions {
+            for k in 0..3 {
+                if p[k] < mn[k] { mn[k] = p[k]; }
+                if p[k] > mx[k] { mx[k] = p[k]; }
+            }
+        }
+        assert_eq!(mn, [-1.0, -1.0, -1.0]);
+        assert_eq!(mx, [1.0, 1.0, 1.0]);
     }
 
     #[test]
