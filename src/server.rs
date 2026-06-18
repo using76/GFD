@@ -570,6 +570,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.measure.bbox_volume"  => handle_cad_measure_bbox_volume(state, req.id, &req.params),
         "cad.measure.distance"     => handle_cad_measure_distance(state, req.id, &req.params),
         "cad.measure.shape_angle"  => handle_cad_measure_shape_angle(state, req.id, &req.params),
+        "cad.pick.face"            => handle_cad_pick_face(state, req.id, &req.params),
         "cad.measure.segment_segment" => handle_cad_measure_segment_segment(req.id, &req.params),
         "cad.measure.point_plane"     => handle_cad_measure_point_plane(req.id, &req.params),
         "cad.measure.ray_plane"       => handle_cad_measure_ray_plane(req.id, &req.params),
@@ -4612,6 +4613,76 @@ fn handle_cad_import_brep(state: &mut ServerState, id: u64, params: &Value) -> R
     }
 }
 
+/// Pick the face of an arena shape nearest to a 3D point: tessellates each face
+/// independently and returns the closest one's arena id + distance + centroid +
+/// surface kind. Lets the AI address a specific face ("the top face") rather
+/// than the whole shape. Arena shapes only (imported meshes have no B-Rep faces).
+fn handle_cad_pick_face(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    use gfd_cad::topo::{collect_by_kind, ShapeKind};
+    let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing shape_id");
+    };
+    let Some(arena_id) = state.cad_shape_map.get(str_id).copied() else {
+        return RpcResponse::err(id, format!("unknown shape_id (imported meshes have no faces): {}", str_id));
+    };
+    let Some(arr) = params.get("point").and_then(|v| v.as_array()) else {
+        return RpcResponse::err(id, "missing point [x,y,z]");
+    };
+    if arr.len() < 3 {
+        return RpcResponse::err(id, "point must be [x,y,z]");
+    }
+    let q = [
+        arr[0].as_f64().unwrap_or(0.0),
+        arr[1].as_f64().unwrap_or(0.0),
+        arr[2].as_f64().unwrap_or(0.0),
+    ];
+    let arena = &state.cad_doc.arena;
+    let faces = collect_by_kind(arena, arena_id, ShapeKind::Face);
+    if faces.is_empty() {
+        return RpcResponse::err(id, "shape has no faces");
+    }
+    let mut best: Option<(f64, gfd_cad::topo::ShapeId, [f64; 3], [f64; 3])> = None; // (dist, face, closest, centroid)
+    for f in faces {
+        let Ok(mesh) = tessellate(arena, f, TessellationOptions::default()) else { continue };
+        if mesh.positions.is_empty() {
+            continue;
+        }
+        let Some((cp, _tri, dist)) = trimesh_closest_point(q, &mesh.positions, &mesh.indices) else { continue };
+        if best.map_or(true, |(bd, ..)| dist < bd) {
+            // Centroid = mean of the face's vertices (sufficient for placement).
+            let mut ctr = [0.0f64; 3];
+            for p in &mesh.positions {
+                ctr[0] += p[0] as f64;
+                ctr[1] += p[1] as f64;
+                ctr[2] += p[2] as f64;
+            }
+            let inv = 1.0 / mesh.positions.len() as f64;
+            ctr = [ctr[0] * inv, ctr[1] * inv, ctr[2] * inv];
+            best = Some((dist, f, cp, ctr));
+        }
+    }
+    let Some((dist, face_id, cp, ctr)) = best else {
+        return RpcResponse::err(id, "no pickable face");
+    };
+    let kind = match arena.get(face_id) {
+        Ok(gfd_cad::topo::Shape::Face { surface, .. }) => match surface {
+            gfd_cad::topo::SurfaceGeom::Plane(_) => "plane",
+            gfd_cad::topo::SurfaceGeom::Cylinder(_) => "cylinder",
+            gfd_cad::topo::SurfaceGeom::Sphere(_) => "sphere",
+            gfd_cad::topo::SurfaceGeom::Cone(_) => "cone",
+            gfd_cad::topo::SurfaceGeom::Torus(_) => "torus",
+        },
+        _ => "unknown",
+    };
+    RpcResponse::ok(id, serde_json::json!({
+        "face_id": face_id.0,
+        "surface_kind": kind,
+        "distance": dist,
+        "closest_point": cp,
+        "centroid": ctr,
+    }))
+}
+
 fn handle_cad_measure_surface_area(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
     let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
         return RpcResponse::err(id, "missing shape_id");
@@ -6896,6 +6967,23 @@ mod tests {
             let ctr = mesh.cells[c].center;
             assert!((ctr[0] * ctr[0] + ctr[1] * ctr[1]).sqrt() < 0.5, "masked cell outside cylinder radius");
         }
+    }
+
+    #[test]
+    fn pick_face_returns_the_nearest_face_of_a_box() {
+        // box_solid(2,2,2) → [-1,1]^3. A point well above the top picks the +Z
+        // face: a plane whose centroid sits at z = 1.
+        let mut state = ServerState::new();
+        let bid = box_solid(&mut state.cad_doc.arena, 2.0, 2.0, 2.0).unwrap();
+        state.cad_shape_map.insert("shape_1".into(), bid);
+        let resp = handle_cad_pick_face(&state, 1, &serde_json::json!({
+            "shape_id": "shape_1", "point": [0.0, 0.0, 5.0],
+        }));
+        let r = resp.result.expect("pick.face should succeed");
+        assert_eq!(r["surface_kind"].as_str().unwrap(), "plane");
+        let ctr = r["centroid"].as_array().unwrap();
+        assert!((ctr[2].as_f64().unwrap() - 1.0).abs() < 1e-6, "top face centroid z should be 1");
+        assert!((r["distance"].as_f64().unwrap() - 4.0).abs() < 1e-6, "distance from z=5 to z=1 is 4");
     }
 
     #[test]

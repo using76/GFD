@@ -118,10 +118,9 @@ export function createEntityResolver(getState: () => Readonly<AppState>, rpc: Rp
           return res?.shape_id ? { entityType: 'shape', ids: [res.shape_id] } : null;
         }
         case 'nearest': {
-          // Shape granularity resolves from bboxes; finer entities need backend.
-          if (ref.entity !== 'shape') return null;
           const ns = nodes();
           if (!ns.length) return null;
+          // Nearest shape by point-to-bbox distance.
           let best = ns[0];
           let bestD = Infinity;
           for (const n of ns) {
@@ -131,7 +130,19 @@ export function createEntityResolver(getState: () => Readonly<AppState>, rpc: Rp
               best = n;
             }
           }
-          return { entityType: 'shape', ids: [best.id] };
+          if (ref.entity === 'shape') {
+            return { entityType: 'shape', ids: [best.id] };
+          }
+          // Face granularity: pick the nearest face of the nearest shape via the
+          // backend (per-face tessellation). Edge/vertex still need a backend.
+          if (ref.entity === 'face' && rpc.isLive()) {
+            const res = await rpc.request<{ face_id?: number } | null>('cad.pick.face', {
+              shape_id: best.id,
+              point: [...ref.point],
+            });
+            return res?.face_id !== undefined ? { entityType: 'face', ids: [String(res.face_id)] } : null;
+          }
+          return null;
         }
         case 'semantic': {
           const ns = nodes();

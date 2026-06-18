@@ -41,10 +41,24 @@ describe('entity resolver — spatial references', () => {
     expect(near2?.ids).toEqual(['a']);
   });
 
-  it('returns null for sub-shape nearest queries (needs backend geometry)', async () => {
+  it('resolves a nearest FACE via the backend pick on the nearest shape', async () => {
+    const s = stateWith([box('a', 'a', [0, 0, 0], [1, 1, 1])]);
+    const live = createMockRpcClient((method: string, params: Record<string, unknown>) => {
+      if (method === 'cad.pick.face') {
+        expect(params.shape_id).toBe('a');
+        return { face_id: 7, surface_kind: 'plane', distance: 4, closest_point: [0.5, 0.5, 1], centroid: [0.5, 0.5, 1] };
+      }
+      return {};
+    });
+    const r = createEntityResolver(() => s, live);
+    const res = await r.resolve({ by: 'nearest', point: [0.5, 0.5, 5], entity: 'face' });
+    expect(res).toEqual({ entityType: 'face', ids: ['7'] });
+  });
+
+  it('returns null for edge/vertex nearest queries (not yet backed)', async () => {
     const s = stateWith([box('a', 'a', [0, 0, 0], [1, 1, 1])]);
     const r = createEntityResolver(() => s, rpc);
-    expect(await r.resolve({ by: 'nearest', point: [0, 0, 0], entity: 'face' })).toBeNull();
+    expect(await r.resolve({ by: 'nearest', point: [0, 0, 0], entity: 'edge' })).toBeNull();
   });
 
   it('resolves the directional extreme shape (top/bottom along +Z)', async () => {
