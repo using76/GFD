@@ -8,6 +8,28 @@
 검증 게이트(매 iteration): `cargo build --bin gfd-server`, `cd gui && npx tsc
 --noEmit` (0 errors), `cd gui && npm test`.
 
+## Tier 1·2 backlog 심화 (branch `feat/loop-backlog`, PR #8 적층)
+
+사용자 "다해줘" 요청으로 plan의 Tier 1·2 구현. (#3 평면 holes는 producing feature가
+없어 죽은 코드 → 보류; #4의 edge/vertex picking은 untagged-merge라 보류.)
+
+- **#1 진짜 immersed boundary (Brinkman 페널라이제이션)**: `run_fluid_solve`가 solid 셀
+  diagonal에 1e6 momentum sink → 유동이 부품을 *돌아감*(출력 마스킹이 아니라 실제 solve
+  차단). 기존 `set_external_momentum_damping` 재사용.
+- **#2 cylinder/cone watertight disc cap**: `circle_cap_face`(Circle-edge wire) +
+  `tessellate_disc`(center-fan, rim=u_steps). cap 렌더 정확·watertight → cylinder/cone
+  masking도 작동. adaptive 경로도 rim을 radius 기반으로 맞춰 watertight.
+- **#4 face picking**: `cad.pick.face{shape_id,point}` → 최근접 face arena id+kind+centroid;
+  entity resolver `nearest{entity:'face'}` 연결.
+- **adversarial 리뷰(21 에이전트)가 14개 실제 이슈 확정 → 전부 수정**(`b7e696a`):
+  cap의 `[v0,v0]` closed circle edge를 heal이 degenerate로 오판(check_validity 오탐 +
+  fix_shape가 cap 삭제) → heal이 closed-loop edge 제외; cone r1=0 → NaN → cap guard +
+  tessellate_disc radius guard; measure cylinder/cone bbox·volume silent-0 → analytic
+  bbox+closed-form volume(πr²h 등); adaptive cap rim 불일치 → radius 기반 step; topo
+  self-loop double-count; pick.face 에러 → null.
+- 검증: cargo test 전 CAD 크레이트 green(heal 12·feature 44·tessel 6·cad 9·measure 43·
+  topo 5), server bin 17, tsc 0, vitest 129, vite build OK.
+
 ## Loop spine — 끊긴 링크 분석 (iter 1 기준 실제 코드 확인)
 
 | # | 단계 | 상태 | 비고 |
