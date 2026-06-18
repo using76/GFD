@@ -41,8 +41,9 @@ THE SIMULATION LOOP — drive it end to end:
    import a CAD file with io.import_mesh (STL/OBJ/OFF/PLY/XYZ), io.import_step,
    or io.import_brep — each adds a renderable shape to the tree.
 2. MESH: mesh.generate (or the gmsh.* chain above). Coarse mesh → fast iteration.
-   For external/internal flow around a solid part, pass maskSolids:true so cells
-   inside the part are blanked (immersed boundary); it reports solid/fluid cells.
+   For flow around an IMPORTED watertight part (STL/STEP), pass maskSolids:true so
+   cells inside the part are blanked (immersed boundary); it reports solid/fluid
+   cells. (Masking needs a watertight solid; it safely masks nothing otherwise.)
 3. SETUP: setup.set_model (flow/turbulence/energy), setup.set_material
    (density/viscosity), setup.add_boundary (inlet/outlet/wall + parameters),
    setup.set_solver (method/iterations/relaxation).

@@ -2206,12 +2206,41 @@ fn combined_solid_trimesh(state: &ServerState, ids: &[String]) -> TriMesh {
 /// Empty if the solid mesh is empty or not a closed manifold (inside tests are
 /// unreliable on open meshes, so we conservatively mask nothing).
 fn classify_solid_cells(mesh: &UnstructuredMesh, solid: &TriMesh) -> Vec<usize> {
-    if solid.indices.len() < 3 || !trimesh_is_closed(&solid.indices) {
+    if solid.indices.len() < 3 || solid.positions.is_empty() {
         return Vec::new();
     }
+    // The ray-cast parity test only gives correct inside/outside on a GEOMETRY-
+    // watertight surface. Weld coincident vertices (position-based) + prune, then
+    // require trimesh_is_closed: this ACCEPTS real watertight geometry (imported
+    // STL / STEP faces, sphere primitives) and conservatively REJECTS surfaces
+    // with gaps (the planar-face tessellator samples box/cylinder faces over a
+    // clamped ±1 window so they are not watertight — masking nothing is safer
+    // than masking the wrong cells).
+    let mut welded = solid.clone();
+    let tol = welded
+        .aabb()
+        .map(|(mn, mx)| {
+            let d = (((mx[0] - mn[0]).powi(2) + (mx[1] - mn[1]).powi(2) + (mx[2] - mn[2]).powi(2)) as f32).sqrt();
+            (d * 1e-4).max(1e-6)
+        })
+        .unwrap_or(1e-6);
+    welded.weld(tol);
+    welded.prune_unused_vertices();
+    if welded.indices.len() < 3 || !trimesh_is_closed(&welded.indices) {
+        return Vec::new();
+    }
+    // Bounding box of the solid for an O(1) reject of far-away cells.
+    let (bmn, bmx) = welded.aabb().unwrap_or(([0.0; 3], [0.0; 3]));
+    let eps = 1e-6_f64;
+    let lo = [bmn[0] as f64 - eps, bmn[1] as f64 - eps, bmn[2] as f64 - eps];
+    let hi = [bmx[0] as f64 + eps, bmx[1] as f64 + eps, bmx[2] as f64 + eps];
     let mut out = Vec::new();
     for (i, cell) in mesh.cells.iter().enumerate() {
-        if trimesh_point_inside(cell.center, &solid.positions, &solid.indices) {
+        let c = cell.center;
+        if c[0] < lo[0] || c[0] > hi[0] || c[1] < lo[1] || c[1] > hi[1] || c[2] < lo[2] || c[2] > hi[2] {
+            continue;
+        }
+        if trimesh_point_inside(c, &welded.positions, &welded.indices) {
             out.push(i);
         }
     }
@@ -2220,7 +2249,10 @@ fn classify_solid_cells(mesh: &UnstructuredMesh, solid: &TriMesh) -> Vec<usize> 
 
 /// Dominant PCA axis of a vertex cloud (power iteration on the covariance
 /// matrix). Returns a unit vector along the largest spatial extent — the
-/// shape's principal direction. None for degenerate clouds.
+/// shape's principal direction. None for degenerate clouds AND for rotationally
+/// symmetric shapes (cube/sphere/square plate) whose top eigenvalue is not
+/// strictly separated — for those a "principal axis" is geometrically
+/// ill-defined, so we report None rather than a seed-dependent fake direction.
 fn trimesh_principal_axis(positions: &[[f32; 3]]) -> Option<[f64; 3]> {
     let n = positions.len();
     if n < 2 {
@@ -2257,6 +2289,24 @@ fn trimesh_principal_axis(positions: &[[f32; 3]]) -> Option<[f64; 3]> {
             return None;
         }
         v = [w[0] / len, w[1] / len, w[2] / len];
+    }
+    // Reject degenerate eigenspaces: the dominant eigenvalue λ1 = vᵀ·cov·v must
+    // be strictly larger than the average of the other two ((trace−λ1)/2). For an
+    // isotropic shape (cube/sphere) all three are equal → λ1 == that average → the
+    // converged v is just the seed, geometrically meaningless.
+    let trace = cov[0][0] + cov[1][1] + cov[2][2];
+    if trace <= 1e-30 {
+        return None;
+    }
+    let mv = [
+        cov[0][0] * v[0] + cov[0][1] * v[1] + cov[0][2] * v[2],
+        cov[1][0] * v[0] + cov[1][1] * v[1] + cov[1][2] * v[2],
+        cov[2][0] * v[0] + cov[2][1] * v[1] + cov[2][2] * v[2],
+    ];
+    let lambda1 = mv[0] * v[0] + mv[1] * v[1] + mv[2] * v[2];
+    let others_avg = ((trace - lambda1) / 2.0).max(0.0);
+    if lambda1 - others_avg <= 1e-4 * trace {
+        return None; // no well-defined principal axis
     }
     Some(v)
 }
@@ -4720,18 +4770,31 @@ fn handle_mesh_generate(state: &mut ServerState, id: u64, params: &Value) -> Rpc
     let quality = compute_mesh_quality(&mesh);
 
     // Immersed-boundary masking: classify each cell as solid (inside a solid
-    // body) or fluid. The GUI passes `solid_shape_ids` (its geometry minus any
-    // enclosure box); if omitted, every known shape is treated as solid.
+    // body) or fluid. The GUI passes `solid_shape_ids` = its geometry minus any
+    // enclosure box. An EXPLICIT empty list means "no solids" (mask nothing) —
+    // it must NOT fall back to "all shapes", which would mask against the
+    // fluid-domain enclosure and blank the whole field. Only a genuinely OMITTED
+    // key uses the "all known shapes" fallback.
     let mask_solids = params.get("mask_solids").and_then(|v| v.as_bool()).unwrap_or(false);
-    let solid_ids: Vec<String> = params
+    let solid_ids: Option<Vec<String>> = params
         .get("solid_shape_ids")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
-        .unwrap_or_default();
+        .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect());
     let mut solid_cells: Vec<usize> = Vec::new();
     if mask_solids {
-        let solid = combined_solid_trimesh(state, &solid_ids);
-        solid_cells = classify_solid_cells(&mesh, &solid);
+        match &solid_ids {
+            // Explicit list (even empty): mask exactly those shapes.
+            Some(ids) if !ids.is_empty() => {
+                let solid = combined_solid_trimesh(state, ids);
+                solid_cells = classify_solid_cells(&mesh, &solid);
+            }
+            Some(_) => { /* explicit empty → nothing is solid */ }
+            // Key omitted: fall back to every known shape.
+            None => {
+                let solid = combined_solid_trimesh(state, &[]);
+                solid_cells = classify_solid_cells(&mesh, &solid);
+            }
+        }
     }
     let n_solid = solid_cells.len();
     let n_fluid = n_cells.saturating_sub(n_solid);
@@ -6741,6 +6804,54 @@ mod tests {
         // Explicit id list selects a single shape.
         let one = combined_solid_trimesh(&state, &["shape_1".to_string()]);
         assert_eq!(one.positions.len(), 8);
+    }
+
+    #[test]
+    fn classify_solid_cells_rejects_a_non_watertight_mesh() {
+        // A cube missing one triangle has open boundary edges → not watertight
+        // → masking is suppressed (we must not mask the wrong cells).
+        let mesh = StructuredMesh::uniform(4, 4, 4, 4.0, 4.0, 4.0).to_unstructured();
+        let mut holed = cube_trimesh([1.0, 1.0, 1.0], [3.0, 3.0, 3.0]);
+        holed.indices.truncate(holed.indices.len() - 3); // drop the last triangle
+        assert!(classify_solid_cells(&mesh, &holed).is_empty(), "non-watertight mesh must mask nothing");
+    }
+
+    #[test]
+    fn mesh_generate_masks_imported_solid_and_respects_explicit_empty() {
+        // Imported watertight cube over [1,3]^3 inside a [0,4]^3 4x4x4 domain.
+        let domain = serde_json::json!({ "xmin": 0.0, "xmax": 4.0, "ymin": 0.0, "ymax": 4.0, "zmin": 0.0, "zmax": 4.0 });
+        let solid_count = |state: &mut ServerState, params: serde_json::Value| -> u64 {
+            let resp = handle_mesh_generate(state, 1, &params);
+            resp.result.unwrap()["solid_cells"].as_u64().unwrap()
+        };
+
+        let mut state = ServerState::new();
+        state.imported_meshes.insert("shape_1".into(), cube_trimesh([1.0, 1.0, 1.0], [3.0, 3.0, 3.0]));
+
+        // Explicit shape id → masks the 8 interior cells.
+        let listed = solid_count(&mut state, serde_json::json!({
+            "nx": 4, "ny": 4, "nz": 4, "domain": domain,
+            "mask_solids": true, "solid_shape_ids": ["shape_1"],
+        }));
+        assert_eq!(listed, 8, "imported watertight cube should mask 8 cells");
+        assert_eq!(state.solid_cells.len(), 8);
+
+        // Explicit EMPTY list → masks NOTHING (must not fall back to "all shapes",
+        // which would treat the cube — or a fluid enclosure — as solid).
+        let empty = solid_count(&mut state, serde_json::json!({
+            "nx": 4, "ny": 4, "nz": 4, "domain": domain,
+            "mask_solids": true, "solid_shape_ids": [],
+        }));
+        assert_eq!(empty, 0, "explicit empty solid_shape_ids must mask nothing");
+        assert!(state.solid_cells.is_empty());
+    }
+
+    #[test]
+    fn principal_axis_is_none_for_symmetric_shapes() {
+        // A cube's covariance is isotropic → no well-defined principal axis.
+        assert!(trimesh_principal_axis(&box_cloud(2.0, 2.0, 2.0)).is_none(), "cube must have no principal axis");
+        // An elongated box still resolves a clear axis.
+        assert!(trimesh_principal_axis(&box_cloud(10.0, 1.0, 1.0)).is_some());
     }
 
     #[test]
