@@ -133,17 +133,20 @@ export function createEntityResolver(getState: () => Readonly<AppState>, rpc: Rp
           if (ref.entity === 'shape') {
             return { entityType: 'shape', ids: [best.id] };
           }
-          // Face granularity: pick the nearest face of the nearest shape via the
-          // backend (per-face tessellation). Edge/vertex still need a backend.
-          if (ref.entity === 'face' && rpc.isLive()) {
+          // Face/edge/vertex granularity: pick the nearest sub-entity of the
+          // nearest shape via the backend (per-face/edge/vertex queries).
+          if (rpc.isLive() && (ref.entity === 'face' || ref.entity === 'edge' || ref.entity === 'vertex')) {
+            const method = { face: 'cad.pick.face', edge: 'cad.pick.edge', vertex: 'cad.pick.vertex' }[ref.entity];
+            const idKey = { face: 'face_id', edge: 'edge_id', vertex: 'vertex_id' }[ref.entity];
             try {
-              const res = await rpc.request<{ face_id?: number } | null>('cad.pick.face', {
+              const res = await rpc.request<Record<string, number> | null>(method, {
                 shape_id: best.id,
                 point: [...ref.point],
               });
-              return res?.face_id !== undefined ? { entityType: 'face', ids: [String(res.face_id)] } : null;
+              const picked = res?.[idKey];
+              return picked !== undefined ? { entityType: ref.entity, ids: [String(picked)] } : null;
             } catch {
-              return null; // no pickable face / shape has no faces → unresolved, not an error
+              return null; // no pickable sub-entity → unresolved, not an error
             }
           }
           return null;

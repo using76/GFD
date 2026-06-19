@@ -571,6 +571,8 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.measure.distance"     => handle_cad_measure_distance(state, req.id, &req.params),
         "cad.measure.shape_angle"  => handle_cad_measure_shape_angle(state, req.id, &req.params),
         "cad.pick.face"            => handle_cad_pick_face(state, req.id, &req.params),
+        "cad.pick.edge"            => handle_cad_pick_edge(state, req.id, &req.params),
+        "cad.pick.vertex"          => handle_cad_pick_vertex(state, req.id, &req.params),
         "cad.measure.segment_segment" => handle_cad_measure_segment_segment(req.id, &req.params),
         "cad.measure.point_plane"     => handle_cad_measure_point_plane(req.id, &req.params),
         "cad.measure.ray_plane"       => handle_cad_measure_ray_plane(req.id, &req.params),
@@ -4684,6 +4686,111 @@ fn handle_cad_pick_face(state: &ServerState, id: u64, params: &Value) -> RpcResp
     }))
 }
 
+/// Parse a `point: [x,y,z]` param.
+fn parse_point3(params: &Value) -> Result<[f64; 3], String> {
+    let arr = params.get("point").and_then(|v| v.as_array()).ok_or("missing point [x,y,z]")?;
+    if arr.len() < 3 {
+        return Err("point must be [x,y,z]".into());
+    }
+    Ok([
+        arr[0].as_f64().unwrap_or(0.0),
+        arr[1].as_f64().unwrap_or(0.0),
+        arr[2].as_f64().unwrap_or(0.0),
+    ])
+}
+
+/// Sample a curve into ~24 points along its parameter range (Line endpoints,
+/// Circle/BSpline along the arc) for nearest-edge distance.
+fn sample_curve_points(curve: &gfd_cad::topo::shape::CurveGeom) -> Vec<[f64; 3]> {
+    use gfd_cad::geom::Curve;
+    fn linspace<C: Curve>(c: &C) -> Vec<[f64; 3]> {
+        let (u0, u1) = c.u_range();
+        let n = 24usize;
+        (0..=n)
+            .filter_map(|i| {
+                let u = u0 + (u1 - u0) * i as f64 / n as f64;
+                c.eval(u).ok().map(|p| [p.x, p.y, p.z])
+            })
+            .collect()
+    }
+    match curve {
+        gfd_cad::topo::shape::CurveGeom::Line(c) => linspace(c),
+        gfd_cad::topo::shape::CurveGeom::Circle(c) => linspace(c),
+        gfd_cad::topo::shape::CurveGeom::BSpline(c) => linspace(c),
+    }
+}
+
+/// Pick the edge of an arena shape nearest to a 3D point.
+fn handle_cad_pick_edge(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    use gfd_cad::topo::{collect_by_kind, ShapeKind};
+    let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing shape_id");
+    };
+    let Some(arena_id) = state.cad_shape_map.get(str_id).copied() else {
+        return RpcResponse::err(id, format!("unknown shape_id (imported meshes have no edges): {}", str_id));
+    };
+    let q = match parse_point3(params) { Ok(q) => q, Err(e) => return RpcResponse::err(id, e) };
+    let arena = &state.cad_doc.arena;
+    let edges = collect_by_kind(arena, arena_id, ShapeKind::Edge);
+    if edges.is_empty() {
+        return RpcResponse::err(id, "shape has no edges");
+    }
+    let mut best: Option<(f64, gfd_cad::topo::ShapeId, [f64; 3])> = None; // (dist, edge, midpoint)
+    for e in edges {
+        let Ok(gfd_cad::topo::Shape::Edge { curve, .. }) = arena.get(e) else { continue };
+        let pts = sample_curve_points(curve);
+        if pts.is_empty() {
+            continue;
+        }
+        let mut emin = f64::MAX;
+        for p in &pts {
+            let d = ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt();
+            if d < emin { emin = d; }
+        }
+        if best.map_or(true, |(bd, ..)| emin < bd) {
+            best = Some((emin, e, pts[pts.len() / 2]));
+        }
+    }
+    match best {
+        Some((dist, edge_id, mid)) => RpcResponse::ok(id, serde_json::json!({
+            "edge_id": edge_id.0, "distance": dist, "midpoint": mid,
+        })),
+        None => RpcResponse::err(id, "no pickable edge"),
+    }
+}
+
+/// Pick the vertex of an arena shape nearest to a 3D point.
+fn handle_cad_pick_vertex(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    use gfd_cad::topo::{collect_by_kind, ShapeKind};
+    let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing shape_id");
+    };
+    let Some(arena_id) = state.cad_shape_map.get(str_id).copied() else {
+        return RpcResponse::err(id, format!("unknown shape_id (imported meshes have no vertices): {}", str_id));
+    };
+    let q = match parse_point3(params) { Ok(q) => q, Err(e) => return RpcResponse::err(id, e) };
+    let arena = &state.cad_doc.arena;
+    let verts = collect_by_kind(arena, arena_id, ShapeKind::Vertex);
+    if verts.is_empty() {
+        return RpcResponse::err(id, "shape has no vertices");
+    }
+    let mut best: Option<(f64, gfd_cad::topo::ShapeId, [f64; 3])> = None;
+    for v in verts {
+        let Ok(gfd_cad::topo::Shape::Vertex { point }) = arena.get(v) else { continue };
+        let p = [point.x, point.y, point.z];
+        let d = ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt();
+        if best.map_or(true, |(bd, ..)| d < bd) {
+            best = Some((d, v, p));
+        }
+    }
+    match best {
+        Some((dist, vert_id, p)) => RpcResponse::ok(id, serde_json::json!({
+            "vertex_id": vert_id.0, "distance": dist, "point": p,
+        })),
+        None => RpcResponse::err(id, "no pickable vertex"),
+    }
+}
+
 fn handle_cad_measure_surface_area(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
     let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
         return RpcResponse::err(id, "missing shape_id");
@@ -6984,6 +7091,26 @@ mod tests {
         let ctr = r["centroid"].as_array().unwrap();
         assert!((ctr[2].as_f64().unwrap() - 1.0).abs() < 1e-6, "top face centroid z should be 1");
         assert!((r["distance"].as_f64().unwrap() - 4.0).abs() < 1e-6, "distance from z=5 to z=1 is 4");
+    }
+
+    #[test]
+    fn pick_edge_and_vertex_return_nearest() {
+        // box_solid(2,2,2) → [-1,1]^3. A query near the (1,1,1) corner picks the
+        // nearest vertex there; a query near a top edge picks an edge.
+        let mut state = ServerState::new();
+        let bid = box_solid(&mut state.cad_doc.arena, 2.0, 2.0, 2.0).unwrap();
+        state.cad_shape_map.insert("shape_1".into(), bid);
+
+        let vr = handle_cad_pick_vertex(&state, 1, &serde_json::json!({ "shape_id": "shape_1", "point": [1.2, 1.1, 1.05] }));
+        let v = vr.result.expect("pick.vertex ok");
+        let p = v["point"].as_array().unwrap();
+        assert!((p[0].as_f64().unwrap() - 1.0).abs() < 1e-9 && (p[1].as_f64().unwrap() - 1.0).abs() < 1e-9 && (p[2].as_f64().unwrap() - 1.0).abs() < 1e-9,
+            "nearest vertex should be the (1,1,1) corner, got {:?}", p);
+
+        let er = handle_cad_pick_edge(&state, 1, &serde_json::json!({ "shape_id": "shape_1", "point": [0.0, 1.1, 1.1] }));
+        let e = er.result.expect("pick.edge ok");
+        assert!(e["edge_id"].as_u64().is_some(), "edge pick should return an edge id");
+        assert!(e["distance"].as_f64().unwrap() < 0.5, "nearest top edge should be close to the query");
     }
 
     #[test]

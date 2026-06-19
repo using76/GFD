@@ -55,10 +55,16 @@ describe('entity resolver — spatial references', () => {
     expect(res).toEqual({ entityType: 'face', ids: ['7'] });
   });
 
-  it('returns null for edge/vertex nearest queries (not yet backed)', async () => {
+  it('resolves nearest edge and vertex via the backend pick', async () => {
     const s = stateWith([box('a', 'a', [0, 0, 0], [1, 1, 1])]);
-    const r = createEntityResolver(() => s, rpc);
-    expect(await r.resolve({ by: 'nearest', point: [0, 0, 0], entity: 'edge' })).toBeNull();
+    const live = createMockRpcClient((method: string) => {
+      if (method === 'cad.pick.edge') return { edge_id: 3, distance: 0.1, midpoint: [0, 0.5, 1] };
+      if (method === 'cad.pick.vertex') return { vertex_id: 5, distance: 0.2, point: [1, 1, 1] };
+      return {};
+    });
+    const r = createEntityResolver(() => s, live);
+    expect(await r.resolve({ by: 'nearest', point: [0, 0.5, 1], entity: 'edge' })).toEqual({ entityType: 'edge', ids: ['3'] });
+    expect(await r.resolve({ by: 'nearest', point: [1, 1, 1], entity: 'vertex' })).toEqual({ entityType: 'vertex', ids: ['5'] });
   });
 
   it('resolves the directional extreme shape (top/bottom along +Z)', async () => {
