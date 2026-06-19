@@ -14,7 +14,7 @@ use std::path::Path;
 
 use gfd_cad_topo::{Shape, ShapeArena, ShapeId};
 use gfd_cad_tessel::{sample, triangulate_polygon, TessellationOptions, TriMesh};
-use gfd_cad_geom::{surface::BSplineSurface, Point3};
+use gfd_cad_geom::{surface::BSplineSurface, surface::NurbsSurface, Point3};
 
 use crate::{IoError, IoResult};
 
@@ -520,6 +520,9 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
     // bspline surface id -> (u_deg, v_deg, n_u, n_v, cp_refs row-major, u_knots_full, v_knots_full)
     #[allow(clippy::type_complexity)]
     let mut surf_bspline: HashMap<u32, (usize, usize, usize, usize, Vec<u32>, Vec<f64>, Vec<f64>)> = HashMap::new();
+    // rational bspline (NURBS) surface id -> bspline record + row-major weights
+    #[allow(clippy::type_complexity)]
+    let mut surf_nurbs: HashMap<u32, (usize, usize, usize, usize, Vec<u32>, Vec<f64>, Vec<f64>, Vec<f64>)> = HashMap::new();
 
     for record in text.split(';') {
         let record = record.trim();
@@ -619,7 +622,19 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
                     let w = split_top_level(&wk); // [u_mult, v_mult, u_knots, v_knots, spec]
                     if b.len() >= 3 && w.len() >= 4 {
                         if let Some(rec) = parse_bspline_record(&b[0], &b[1], &b[2], &w[0], &w[1], &w[2], &w[3]) {
-                            surf_bspline.insert(id, rec);
+                            // RATIONAL_B_SPLINE_SURFACE((w11,w12,..),(w21,..),..) → NURBS.
+                            // Weights grid is row-major like the control net.
+                            let weights = find_entity_args(rhs, "RATIONAL_B_SPLINE_SURFACE(")
+                                .map(|ra| {
+                                    let rows = split_top_level(&ra);
+                                    rows.iter().flat_map(|r| extract_floats(r)).collect::<Vec<f64>>()
+                                });
+                            match weights {
+                                Some(ws) if ws.len() == rec.4.len() && ws.iter().all(|w| *w > 0.0) => {
+                                    surf_nurbs.insert(id, (rec.0, rec.1, rec.2, rec.3, rec.4, rec.5, rec.6, ws));
+                                }
+                                _ => { surf_bspline.insert(id, rec); }
+                            }
                         }
                     }
                 }
@@ -661,18 +676,40 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
         }
         BSplineSurface::new(*u_deg, *v_deg, *n_u, *n_v, cp, u_knots.clone(), v_knots.clone()).ok()
     };
+    // Build a NurbsSurface (rational) from a parsed record + weights.
+    let build_nurbs = |rec: &(usize, usize, usize, usize, Vec<u32>, Vec<f64>, Vec<f64>, Vec<f64>)| -> Option<NurbsSurface> {
+        let (u_deg, v_deg, n_u, n_v, cp_refs, u_knots, v_knots, weights) = rec;
+        let mut cp: Vec<Point3> = Vec::with_capacity(cp_refs.len());
+        for r in cp_refs {
+            let p = cps.get(r)?;
+            cp.push(Point3::new(p[0] as f64, p[1] as f64, p[2] as f64));
+        }
+        NurbsSurface::new(*u_deg, *v_deg, *n_u, *n_v, cp, weights.clone(), u_knots.clone(), v_knots.clone()).ok()
+    };
+
+    let append_patch = |mesh: &mut TriMesh, patch: &TriMesh| {
+        // Match the polygon path: leave normals empty (consumer recomputes), so
+        // positions/normals stay consistent across mixed faces.
+        let base = mesh.positions.len() as u32;
+        mesh.positions.extend_from_slice(&patch.positions);
+        mesh.indices.extend(patch.indices.iter().map(|i| i + base));
+    };
 
     let mut mesh = TriMesh::default();
     for frefs in &faces {
-        // NURBS face: sample the full surface patch into the mesh.
+        // Rational NURBS face: sample the full surface patch into the mesh.
+        if let Some(surf) = frefs.iter().find_map(|r| surf_nurbs.get(r)).and_then(build_nurbs) {
+            let opts = TessellationOptions { u_steps: (surf.u_control_count * 6).clamp(8, 64), v_steps: (surf.v_control_count * 6).clamp(8, 64), ..Default::default() };
+            if let Ok(patch) = sample(&surf, opts, 1.0, 1.0) {
+                append_patch(&mut mesh, &patch);
+            }
+            continue;
+        }
+        // Non-rational B-spline face.
         if let Some(surf) = frefs.iter().find_map(|r| surf_bspline.get(r)).and_then(build_bspline) {
             let opts = TessellationOptions { u_steps: (surf.u_control_count * 6).clamp(8, 64), v_steps: (surf.v_control_count * 6).clamp(8, 64), ..Default::default() };
             if let Ok(patch) = sample(&surf, opts, 1.0, 1.0) {
-                // Match the polygon path: leave normals empty (consumer recomputes),
-                // so positions/normals stay consistent across mixed faces.
-                let base = mesh.positions.len() as u32;
-                mesh.positions.extend_from_slice(&patch.positions);
-                mesh.indices.extend(patch.indices.iter().map(|i| i + base));
+                append_patch(&mut mesh, &patch);
             }
             continue;
         }
@@ -889,6 +926,29 @@ mod tests {
         assert!(mesh.indices.len() >= 3, "complex-instance bspline must reconstruct (got {} indices)", mesh.indices.len());
         for p in &mesh.positions {
             assert!(p[2].abs() < 1e-4, "flat patch vertex off z=0: {:?}", p);
+        }
+    }
+
+    #[test]
+    fn read_step_trimesh_reconstructs_rational_nurbs_surface() {
+        // A rational (NURBS) bilinear patch via the AP214 complex instance with a
+        // RATIONAL_B_SPLINE_SURFACE weights grid. Flat in z=0, weights all 2.0
+        // (uniform → still planar). Must reconstruct (sampled, on z=0).
+        let entities = "\
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(1.,0.,0.));
+#3=CARTESIAN_POINT('',(0.,1.,0.));
+#4=CARTESIAN_POINT('',(1.,1.,0.));
+#5=(BOUNDED_SURFACE()B_SPLINE_SURFACE(1,1,((#1,#2),(#3,#4)),.UNSPECIFIED.,.F.,.F.,.F.)B_SPLINE_SURFACE_WITH_KNOTS((2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.)RATIONAL_B_SPLINE_SURFACE(((1.,2.),(2.,4.)))GEOMETRIC_REPRESENTATION_ITEM()REPRESENTATION_ITEM('')SURFACE());
+#6=ADVANCED_FACE('',(),#5,.T.);";
+        let path = std::env::temp_dir().join(format!("gfd_step_nurbs_{}.stp",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::write(&path, step_doc(entities)).unwrap();
+        let mesh = read_step_trimesh(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(mesh.indices.len() >= 3, "rational nurbs patch should reconstruct (got {} indices)", mesh.indices.len());
+        for p in &mesh.positions {
+            assert!(p[2].abs() < 1e-4, "flat rational patch vertex off z=0: {:?}", p);
         }
     }
 

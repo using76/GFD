@@ -106,6 +106,29 @@ pub fn mirror_shape(arena: &mut ShapeArena, id: ShapeId, plane: MirrorPlane) -> 
                             Err(_) => SurfaceGeom::BSpline(b),
                         }
                     }
+                    // NURBS: same v-reversal handedness fix, also reversing the
+                    // parallel weights array so weight[i][j] tracks its control point.
+                    SurfaceGeom::Nurbs(nrb) => {
+                        let (n_u, n_v) = (nrb.u_control_count, nrb.v_control_count);
+                        let reflected: Vec<Point3> = nrb.control_points.iter().map(|p| reflect(*p)).collect();
+                        let mut cps = Vec::with_capacity(reflected.len());
+                        let mut ws = Vec::with_capacity(nrb.weights.len());
+                        for i in 0..n_u {
+                            for j in 0..n_v {
+                                cps.push(reflected[i * n_v + (n_v - 1 - j)]);
+                                ws.push(nrb.weights[i * n_v + (n_v - 1 - j)]);
+                            }
+                        }
+                        let vk = &nrb.v_knots;
+                        let (vmin, vmax) = (vk.first().copied().unwrap_or(0.0), vk.last().copied().unwrap_or(1.0));
+                        let v_knots: Vec<f64> = (0..vk.len()).map(|k| vmin + vmax - vk[vk.len() - 1 - k]).collect();
+                        match gfd_cad_geom::surface::NurbsSurface::new(
+                            nrb.u_degree, nrb.v_degree, n_u, n_v, cps, ws, nrb.u_knots.clone(), v_knots,
+                        ) {
+                            Ok(s) => SurfaceGeom::Nurbs(s),
+                            Err(_) => SurfaceGeom::Nurbs(nrb),
+                        }
+                    }
                     other => other,
                 };
                 let mut new_wires = Vec::with_capacity(wires.len());

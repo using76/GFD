@@ -13,7 +13,7 @@ pub mod vec;
 pub use bbox::BoundingBox;
 pub use curve::{Bezier, BSplineCurve, Circle, Curve, Hermite, Line, NurbsCurve};
 pub use point::Point3;
-pub use surface::{BSplineSurface, Cone, Cylinder, Plane, Sphere, Surface, Torus};
+pub use surface::{BSplineSurface, Cone, Cylinder, NurbsSurface, Plane, Sphere, Surface, Torus};
 pub use vec::{Direction3, Vector3};
 
 /// Default angular tolerance for geometric predicates (radians).

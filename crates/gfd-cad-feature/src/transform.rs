@@ -78,6 +78,17 @@ where
                         Err(_) => SurfaceGeom::BSpline(b),
                     }
                 }
+                // NURBS: transform control points; weights/knots are invariant.
+                SurfaceGeom::Nurbs(nrb) => {
+                    let cps = nrb.control_points.iter().map(|p| xform(*p)).collect();
+                    match gfd_cad_geom::surface::NurbsSurface::new(
+                        nrb.u_degree, nrb.v_degree, nrb.u_control_count, nrb.v_control_count,
+                        cps, nrb.weights.clone(), nrb.u_knots.clone(), nrb.v_knots.clone(),
+                    ) {
+                        Ok(s) => SurfaceGeom::Nurbs(s),
+                        Err(_) => SurfaceGeom::Nurbs(nrb),
+                    }
+                }
                 other => other,
             };
             let mut nw = Vec::with_capacity(wires.len());

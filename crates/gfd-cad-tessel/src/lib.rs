@@ -706,6 +706,7 @@ pub fn auto_uv_steps(surface: &SurfaceGeom, chord_tolerance: f64) -> (usize, usi
         }
         // Free-form patch: ~4 samples per control span on each axis, clamped.
         SurfaceGeom::BSpline(b) => (clamp(b.u_control_count as f64 * 4.0), clamp(b.v_control_count as f64 * 4.0)),
+        SurfaceGeom::Nurbs(n) => (clamp(n.u_control_count as f64 * 4.0), clamp(n.v_control_count as f64 * 4.0)),
     }
 }
 
@@ -723,6 +724,7 @@ pub fn tessellate_surface(surface: &SurfaceGeom, opts: TessellationOptions) -> T
         SurfaceGeom::Cone(c)     => sample(c, opts, 1.0, 1.0),
         SurfaceGeom::Torus(t)    => sample(t, opts, 1.0, 1.0),
         SurfaceGeom::BSpline(b)  => sample(b, opts, 1.0, 1.0),
+        SurfaceGeom::Nurbs(n)    => sample(n, opts, 1.0, 1.0),
     }
 }
 
@@ -832,6 +834,25 @@ mod tests {
         // Adaptive path must also handle the BSpline arm without panicking.
         let adaptive = tessellate_adaptive(&arena, face, 0.05).unwrap();
         assert!(!adaptive.indices.is_empty());
+    }
+
+    #[test]
+    fn nurbs_surface_face_tessellates() {
+        use gfd_cad_geom::surface::NurbsSurface;
+        // Flat rational patch (uniform weights → planar) as an arena face.
+        let cps = vec![
+            Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0), Point3::new(1.0, 1.0, 0.0),
+        ];
+        let knots = vec![0.0, 0.0, 1.0, 1.0];
+        let surf = NurbsSurface::new(1, 1, 2, 2, cps, vec![1.0, 2.0, 2.0, 4.0], knots.clone(), knots).unwrap();
+        let mut arena = ShapeArena::new();
+        let face = arena.push(Shape::Face { surface: SurfaceGeom::Nurbs(surf), wires: vec![], orient: Orientation::Forward });
+        let mesh = tessellate(&arena, face, TessellationOptions::default()).unwrap();
+        assert!(mesh.indices.len() >= 3, "nurbs face should tessellate");
+        for p in &mesh.positions {
+            assert!(p[2].abs() < 1e-4, "flat rational patch vertex off z=0");
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use gfd_cad_geom::{
     curve::BSplineCurve, curve::Circle, curve::Line, surface::BSplineSurface, surface::Cone,
-    surface::Cylinder, surface::Plane, surface::Sphere, surface::Torus, Point3,
+    surface::Cylinder, surface::NurbsSurface, surface::Plane, surface::Sphere, surface::Torus, Point3,
 };
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +36,9 @@ pub enum SurfaceGeom {
     /// Free-form tensor-product B-spline surface (e.g. reconstructed from a STEP
     /// B_SPLINE_SURFACE_WITH_KNOTS). Tessellated by sampling its uv parameter grid.
     BSpline(BSplineSurface),
+    /// Rational B-spline (NURBS) surface — B-spline + per-control-point weights,
+    /// from STEP RATIONAL_B_SPLINE_SURFACE. Represents exact quadrics.
+    Nurbs(NurbsSurface),
 }
 
 /// Vertex ↔ edge connectivity. `next`/`prev` walk around a face wire; `twin`
