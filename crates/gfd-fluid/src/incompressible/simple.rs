@@ -95,6 +95,12 @@ pub struct SimpleSolver {
     /// External momentum damping coefficient per cell [N*s/m^4].
     /// Used by solidification (Carman-Kozeny damping) and other couplings.
     external_momentum_damping: Option<Vec<f64>>,
+    /// Immersed-boundary solid mask (true = cell is inside a solid body). Unlike
+    /// `external_momentum_damping` (a physical coefficient), this is a geometric
+    /// blockage: the penalty is auto-scaled to dominate each cell's own momentum
+    /// diagonal (K·a_p), so velocity is driven to ~0 there regardless of cell
+    /// size / material / Reynolds number, with bounded matrix conditioning.
+    immersed_solid_mask: Option<Vec<bool>>,
     /// External per-cell momentum body force [N/m^3], (fx,fy,fz) per cell.
     /// Used by pluggable expression source terms (Phase 7): S_i += f[i][comp] * V.
     external_momentum_source: Option<Vec<[f64; 3]>>,
@@ -150,6 +156,7 @@ impl SimpleSolver {
             pc_diag_csr_idx: Vec::new(),
             boussinesq: None,
             external_momentum_damping: None,
+            immersed_solid_mask: None,
             external_momentum_source: None,
         }
     }
@@ -184,6 +191,19 @@ impl SimpleSolver {
     /// Clears external momentum damping.
     pub fn clear_external_momentum_damping(&mut self) {
         self.external_momentum_damping = None;
+    }
+
+    /// Mark cells as solid (immersed boundary). The momentum solve penalizes
+    /// each marked cell's diagonal so velocity is driven to ~0 and flow routes
+    /// around the body. The penalty auto-scales to the local diagonal, so it
+    /// works for any cell size / material without manual tuning.
+    pub fn set_immersed_solid_mask(&mut self, mask: Vec<bool>) {
+        self.immersed_solid_mask = Some(mask);
+    }
+
+    /// Clears the immersed-boundary solid mask.
+    pub fn clear_immersed_solid_mask(&mut self) {
+        self.immersed_solid_mask = None;
     }
 
     /// Set a per-cell momentum body force [N/m^3] (fx,fy,fz), e.g. from a
@@ -496,6 +516,23 @@ impl SimpleSolver {
             let len = damping.len().min(n);
             for i in 0..len {
                 self.ws_a_p[i] += damping[i] * self.cached_volumes[i];
+            }
+        }
+
+        // Immersed-boundary blockage: penalize each solid cell's momentum
+        // diagonal by a large MULTIPLE of its own just-assembled value
+        // (ws_a_p[i] already holds the local D+F+transient sum). Penalty =
+        // K·max(a_p, ρV) drives solid velocity to ~1/K of the local scale —
+        // scale/material-independent, with condition number bounded by K.
+        if let Some(ref mask) = self.immersed_solid_mask {
+            const K: f64 = 1.0e4;
+            let len = mask.len().min(n);
+            for i in 0..len {
+                if mask[i] {
+                    let floor = self.density * self.cached_volumes[i]; // ρV: never zero
+                    let a_local = self.ws_a_p[i].max(floor);
+                    self.ws_a_p[i] += K * a_local;
+                }
             }
         }
 
@@ -1548,5 +1585,33 @@ mod tests {
         let mag_d: f64 = vel_d.iter().map(|v| v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sum();
         assert!(mag_d < mag_no * 0.5,
             "Large damping should reduce velocity: no_damp={}, damp={}", mag_no.sqrt(), mag_d.sqrt());
+    }
+
+    #[test]
+    fn test_immersed_solid_mask_blocks_marked_cells() {
+        // Marking cells solid (auto-scaled K·a_p penalty) drives their velocity to
+        // ~0 over a few iterations, regardless of the absolute material scale.
+        let (mesh, bv, bp, wp) = make_3x3x1_lid_driven_cavity();
+        let n = mesh.num_cells();
+        let (density, viscosity) = (1.0, 0.1);
+        let mut state = FluidState::new(n);
+        for i in 0..n { let _ = state.density.set(i, density); let _ = state.viscosity.set(i, viscosity); }
+        let mut solver = SimpleSolver::new(density, viscosity);
+        solver.alpha_u = 0.7; solver.alpha_p = 0.3;
+        // Mark the center cell solid.
+        let solid = n / 2;
+        let mut mask = vec![false; n];
+        mask[solid] = true;
+        solver.set_immersed_solid_mask(mask);
+        for _ in 0..30 {
+            let _ = solver.solve_step_with_bcs(&mut state, &mesh, &bv, &bp, &wp).unwrap();
+        }
+        let vel = state.velocity.values();
+        let solid_speed = (vel[solid][0].powi(2) + vel[solid][1].powi(2) + vel[solid][2].powi(2)).sqrt();
+        // Reference: max speed anywhere (the lid drives the flow).
+        let max_speed = vel.iter().map(|v| (v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt()).fold(0.0, f64::max);
+        assert!(max_speed > 1e-6, "flow should develop somewhere");
+        assert!(solid_speed < max_speed * 1e-2,
+            "solid cell speed {} should be «  max {}", solid_speed, max_speed);
     }
 }

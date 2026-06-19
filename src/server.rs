@@ -5355,20 +5355,19 @@ fn run_fluid_solve(
     if let Some(src) = momentum_source {
         solver.set_external_momentum_source(src);
     }
-    // Immersed-boundary blockage: a Brinkman/Darcy momentum sink on every solid
-    // cell adds a huge term to its momentum-equation diagonal, so the SIMPLE
-    // solve drives velocity to ~0 there and flow goes AROUND the body — a true
-    // in-solve blockage, not just the post-solve output mask below. 1e6 strongly
-    // dominates the local a_p (~rho|U|A + muA/d) without wrecking BiCGSTAB
-    // conditioning the way 1e12+ would.
+    // Immersed-boundary blockage: mark solid cells so the SIMPLE solve penalizes
+    // their momentum diagonal (auto-scaled to K·a_p inside the solver) and drives
+    // velocity to ~0 — flow goes AROUND the body, not just the post-solve output
+    // mask below. Using the dedicated mask channel (not external_momentum_damping)
+    // keeps the auto-scaling separate from physical Carman-Kozeny damping.
     if !blocked_cells.is_empty() {
-        let mut damping = vec![0.0_f64; n];
+        let mut mask = vec![false; n];
         for &c in &blocked_cells {
             if c < n {
-                damping[c] = 1.0e6;
+                mask[c] = true;
             }
         }
-        solver.set_external_momentum_damping(damping);
+        solver.set_immersed_solid_mask(mask);
     }
 
     // Parse boundary conditions
