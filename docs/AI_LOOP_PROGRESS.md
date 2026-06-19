@@ -8,6 +8,30 @@
 검증 게이트(매 iteration): `cargo build --bin gfd-server`, `cd gui && npx tsc
 --noEmit` (0 errors), `cd gui && npm test`.
 
+## Deep backlog 전량 구현 (branch `feat/loop-backlog`, PR #8 적층, "전부 구현")
+
+plan의 보류 항목 4종 + SurfaceGeom 확장을 모두 구현. understand 워크플로(6 reader,
+SurfaceGeom blast-radius 매핑) → 구현 → 16-에이전트 adversarial 리뷰 → 확정 5버그 수정.
+
+- **진짜에 가까운 cut-cell (Brinkman 자동 스케일)**: `simple.rs`에 전용
+  `immersed_solid_mask` 채널 — solid 셀 penalty를 그 셀의 assembled diagonal 배수
+  `K·max(a_p, ρV)`로 자동 스케일(K=1e4). 절대 1e6과 달리 셀 크기/물성/Re 무관하게
+  누설 ∝ 1/K. Carman-Kozeny와 분리. (face-flux 완전 cut-cell은 momentum+pressure
+  loop 재작성이라 문서화 후 보류.)
+- **NURBS 곡면(SurfaceGeom::BSpline)**: 기존 `BSplineSurface`(Surface 구현)를 topo
+  enum + tessellate(uv 샘플) + measure(control-net AABB) + transform/mirror(control
+  point 매핑) + STEP I/O로 연결. reader는 simple **및** AP214/AP242 complex-instance
+  파싱(실제 CAD 출력), writer는 control net + 압축 knot emit.
+- **평면 holes + plate_with_hole**: earclip `triangulate_polygon_with_holes`
+  (Eberly visible-vertex bridge), planar 면 tessellation/면적/부피가 inner wire 차감.
+  producing feature `plate_with_hole_solid`로 도달·검증(volume == box − hole·height).
+- **edge/vertex picking**: `cad.pick.edge` / `cad.pick.vertex`(face 동형), entity
+  resolver `nearest{entity:'edge'|'vertex'}` 연결.
+- **리뷰 확정 5버그 수정**(`55c60fb`): STEP complex-instance 미파싱(HIGH), 비볼록
+  outer hole bridge 교차(HIGH), mirror NURBS normal 반전(MED), plate guard(MED/LOW).
+- 검증: 전 CAD 크레이트 green(io 25·tessel 10·feature 46·cad 25·measure 25·topo 5),
+  gfd-fluid 146, server bin 18, tsc 0, vitest 129, vite build OK.
+
 ## Tier 1·2 backlog 심화 (branch `feat/loop-backlog`, PR #8 적층)
 
 사용자 "다해줘" 요청으로 plan의 Tier 1·2 구현. (#3 평면 holes는 producing feature가
