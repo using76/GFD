@@ -22,7 +22,7 @@ pub use document::Document;
 mod integration_tests {
     use super::*;
     use bool_::compound_merge;
-    use feature::{box_solid, cone_solid, cylinder_solid, pad_polygon_xy, revolve_profile_z, sphere_solid};
+    use feature::{box_solid, cone_solid, cylinder_solid, pad_polygon_xy, plate_with_hole_solid, revolve_profile_z, sphere_solid};
     use heal::check_validity;
     use measure::{bbox_volume, surface_area, trimesh_is_closed, volume};
     use tessel::{tessellate, TessellationOptions};
@@ -97,6 +97,22 @@ mod integration_tests {
             mesh.positions.iter().all(|p| p.iter().all(|c| c.is_finite())),
             "cone r1=0 tessellation must not contain NaN vertices"
         );
+    }
+
+    #[test]
+    fn plate_with_hole_volume_and_tessellation() {
+        // 4×3×1 plate with a 12-gon hole (r=0.5) → volume = box − hole·height,
+        // and the cap tessellation cuts the hole out (multi-wire planar face).
+        let mut arena = ShapeArena::new();
+        let id = plate_with_hole_solid(&mut arena, 4.0, 3.0, 1.0, 2.0, 1.5, 0.5, 12).unwrap();
+        let v = volume(&arena, id).unwrap();
+        let hole_area = 0.5 * 12.0 * 0.5_f64.powi(2) * (std::f64::consts::TAU / 12.0).sin();
+        let expect = 4.0 * 3.0 * 1.0 - hole_area * 1.0;
+        assert!((v - expect).abs() < 1e-9, "plate volume {} != box−hole {}", v, expect);
+        // Holed caps tessellate (the hole is cut, so a cap has fewer triangles
+        // than a solid quad fan would, but the mesh is non-empty).
+        let mesh = tessellate(&arena, id, TessellationOptions::default()).unwrap();
+        assert!(mesh.indices.len() / 3 > 8, "plate-with-hole should tessellate to many triangles");
     }
 
     #[test]

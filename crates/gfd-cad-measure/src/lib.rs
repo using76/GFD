@@ -1623,23 +1623,34 @@ pub fn face_area(arena: &ShapeArena, id: ShapeId) -> MeasureResult<f64> {
         // Closed surface (sphere/torus) — exact area to be added iter 8.
         return Err(MeasureError::Unimplemented);
     }
-    let outer = wires[0];
-    let poly = extract_line_polygon(arena, outer)?;
+    let poly = extract_line_polygon(arena, wires[0])?;
     if poly.len() < 3 { return Err(MeasureError::Unimplemented); }
-    // Newell's method: signed area vector of a 3D polygon is
-    // 0.5 * Σ (Vi × Vi+1); its magnitude is the face area.
-    let mut nx = 0.0;
-    let mut ny = 0.0;
-    let mut nz = 0.0;
+    // Outer area minus each inner-wire (hole) area — a planar face with pockets
+    // / through-holes contributes outer − Σ holes.
+    let mut area = newell_area(&poly);
+    for hole in &wires[1..] {
+        if let Ok(hpoly) = extract_line_polygon(arena, *hole) {
+            if hpoly.len() >= 3 {
+                area -= newell_area(&hpoly);
+            }
+        }
+    }
+    Ok(area.max(0.0))
+}
+
+/// Newell's method: magnitude of the signed area vector 0.5·Σ(Vi×Vi+1) of a
+/// 3D polygon = its planar area.
+fn newell_area(poly: &[Point3]) -> f64 {
+    if poly.len() < 3 { return 0.0; }
+    let (mut nx, mut ny, mut nz) = (0.0, 0.0, 0.0);
     for i in 0..poly.len() {
         let j = (i + 1) % poly.len();
-        let a = poly[i];
-        let b = poly[j];
+        let (a, b) = (poly[i], poly[j]);
         nx += (a.y - b.y) * (a.z + b.z);
         ny += (a.z - b.z) * (a.x + b.x);
         nz += (a.x - b.x) * (a.y + b.y);
     }
-    Ok(0.5 * (nx * nx + ny * ny + nz * nz).sqrt())
+    0.5 * (nx * nx + ny * ny + nz * nz).sqrt()
 }
 
 fn extract_line_polygon(arena: &ShapeArena, wire_id: ShapeId) -> MeasureResult<Vec<Point3>> {
@@ -1750,21 +1761,24 @@ pub fn divergence_volume(arena: &ShapeArena, id: ShapeId) -> MeasureResult<f64> 
     for f in faces {
         let Ok(gfd_cad_topo::Shape::Face { wires, .. }) = arena.get(f) else { continue; };
         if wires.is_empty() { continue; }
-        let outer = wires[0];
-        let poly = extract_line_polygon(arena, outer)?;
-        if poly.len() < 3 { continue; }
-        // Fan-triangulate from poly[0].
-        let p0 = poly[0];
-        for i in 1..poly.len() - 1 {
-            let p1 = poly[i];
-            let p2 = poly[i + 1];
-            // Signed volume of tetrahedron (origin, p0, p1, p2) = (1/6) p0·(p1×p2)
-            let cx = p1.y * p2.z - p1.z * p2.y;
-            let cy = p1.z * p2.x - p1.x * p2.z;
-            let cz = p1.x * p2.y - p1.y * p2.x;
-            acc += p0.x * cx + p0.y * cy + p0.z * cz;
+        // Fan-triangulate EVERY wire of the face. A hole wire is wound opposite
+        // to the outer one (for the same face normal), so its signed-tetra sum
+        // subtracts the hole's prismatic column — giving outer − holes volume.
+        for w in wires {
+            let Ok(poly) = extract_line_polygon(arena, *w) else { continue };
+            if poly.len() < 3 { continue; }
+            let p0 = poly[0];
+            for i in 1..poly.len() - 1 {
+                let p1 = poly[i];
+                let p2 = poly[i + 1];
+                // Signed tetra volume (origin, p0, p1, p2) = (1/6) p0·(p1×p2)
+                let cx = p1.y * p2.z - p1.z * p2.y;
+                let cy = p1.z * p2.x - p1.x * p2.z;
+                let cz = p1.x * p2.y - p1.y * p2.x;
+                acc += p0.x * cx + p0.y * cy + p0.z * cz;
+            }
+            any_polygon = true;
         }
-        any_polygon = true;
     }
     if !any_polygon { return bbox_volume(arena, id); }
     Ok(acc.abs() / 6.0)

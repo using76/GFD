@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 pub mod earclip;
 pub mod grid;
 
-pub use earclip::triangulate_polygon;
+pub use earclip::{triangulate_polygon, triangulate_polygon_with_holes};
 use grid::uv_grid;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -529,8 +529,8 @@ fn walk_adaptive(arena: &ShapeArena, id: ShapeId, chord_tol: f64, out: &mut TriM
 ///
 /// Honors the per-USE orientation stored in the wire tuple (Forward → the
 /// edge's start vertex, Reversed → its end vertex), matching `build_half_edges`.
-fn planar_line_loop(arena: &ShapeArena, wires: &[ShapeId]) -> Option<Vec<Point3>> {
-    let edges = match arena.get(*wires.first()?).ok()? {
+fn line_loop_for_wire(arena: &ShapeArena, wire_id: ShapeId) -> Option<Vec<Point3>> {
+    let edges = match arena.get(wire_id).ok()? {
         Shape::Wire { edges } => edges,
         _ => return None,
     };
@@ -552,27 +552,47 @@ fn planar_line_loop(arena: &ShapeArena, wires: &[ShapeId]) -> Option<Vec<Point3>
     if loop_pts.len() < 3 { None } else { Some(loop_pts) }
 }
 
-/// Tessellate a planar face from its wire polygon: project the loop onto the
-/// plane's orthonormal (u,v) basis, ear-clip, and emit triangles with the exact
-/// 3D loop positions + the plane normal. This bounds the face to its real
-/// extent instead of the infinite plane's clamped ±1 sampling window.
-fn tessellate_planar_loop(plane: &Plane, loop_pts: &[Point3]) -> TriMesh {
+/// Outer + hole loops of a planar face, each a straight-edge polygon. `[0]` is
+/// the outer boundary, `[1..]` are holes. None if any wire has a curved edge.
+fn planar_line_loops(arena: &ShapeArena, wires: &[ShapeId]) -> Option<Vec<Vec<Point3>>> {
+    if wires.is_empty() {
+        return None;
+    }
+    let mut loops = Vec::with_capacity(wires.len());
+    for w in wires {
+        loops.push(line_loop_for_wire(arena, *w)?);
+    }
+    Some(loops)
+}
+
+/// Tessellate a planar face from its wire polygons (outer = loops[0], holes =
+/// loops[1..]): project every loop onto the plane's orthonormal (u,v) basis,
+/// ear-clip with holes, and emit triangles with exact 3D positions + the plane
+/// normal. Bounds the face to its real extent (not the clamped ±1 window) and
+/// cuts out holes (pockets / through-holes).
+fn tessellate_planar_loops(plane: &Plane, loops: &[Vec<Point3>]) -> TriMesh {
     let o = plane.origin;
     let xd = plane.x_axis.as_vec();
     let yd = plane.normal.as_vec().cross(plane.x_axis.as_vec());
-    let uv: Vec<(f64, f64)> = loop_pts
-        .iter()
-        .map(|p| {
-            let d = Vector3::new(p.x - o.x, p.y - o.y, p.z - o.z);
-            (d.dot(xd), d.dot(yd))
-        })
-        .collect();
+    let to_uv = |p: &Point3| {
+        let d = Vector3::new(p.x - o.x, p.y - o.y, p.z - o.z);
+        (d.dot(xd), d.dot(yd))
+    };
+    let outer_uv: Vec<(f64, f64)> = loops[0].iter().map(to_uv).collect();
+    let holes_uv: Vec<Vec<(f64, f64)>> = loops[1..].iter().map(|h| h.iter().map(to_uv).collect()).collect();
     let n = plane.normal.as_vec();
     let normal = [n.x as f32, n.y as f32, n.z as f32];
-    let positions: Vec<[f32; 3]> = loop_pts.iter().map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect();
+    // Combined 3D positions in the SAME order earclip uses (outer ++ holes).
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    for lp in loops {
+        for p in lp {
+            positions.push([p.x as f32, p.y as f32, p.z as f32]);
+        }
+    }
     let normals = vec![normal; positions.len()];
-    let mut indices = Vec::new();
-    for t in triangulate_polygon(&uv) {
+    let (_pts, tris) = triangulate_polygon_with_holes(&outer_uv, &holes_uv);
+    let mut indices = Vec::with_capacity(tris.len() * 3);
+    for t in tris {
         indices.extend_from_slice(&t);
     }
     TriMesh { positions, normals, indices }
@@ -631,8 +651,8 @@ fn tessellate_disc(circle: &Circle, n: usize) -> TriMesh {
 /// their polygon, circular caps to a disc; everything else uses the surface grid.
 fn tessellate_face(arena: &ShapeArena, surface: &SurfaceGeom, wires: &[ShapeId], opts: TessellationOptions) -> TessellResult<TriMesh> {
     if let SurfaceGeom::Plane(p) = surface {
-        if let Some(loop_pts) = planar_line_loop(arena, wires) {
-            return Ok(tessellate_planar_loop(p, &loop_pts));
+        if let Some(loops) = planar_line_loops(arena, wires) {
+            return Ok(tessellate_planar_loops(p, &loops));
         }
         if let Some(circle) = planar_circle_loop(arena, wires) {
             return Ok(tessellate_disc(&circle, opts.u_steps));
