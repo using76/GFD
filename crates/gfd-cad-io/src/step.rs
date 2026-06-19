@@ -45,6 +45,32 @@ fn split_top_level(args: &str) -> Vec<String> {
     fields
 }
 
+/// Remove single-quoted STEP string literals so digits inside a label (e.g.
+/// `'Point12'`) are not mistaken for numeric data by `extract_floats`. STEP
+/// escapes a literal quote by doubling it (`''`).
+fn strip_quoted(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\'' {
+            i += 1;
+            while i < b.len() {
+                if b[i] == b'\'' {
+                    if i + 1 < b.len() && b[i + 1] == b'\'' { i += 2; continue; }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+        } else {
+            out.push(b[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// In a STEP record body, find `name(` and return its balanced `(...)` argument
 /// substring (including the outer parens). Used to pull a sub-entity out of an
 /// AP214/AP242 complex (multi-supertype) instance. `name_with_paren` MUST end in
@@ -136,10 +162,27 @@ struct StepCtx {
     next_id: u32,
     /// Map from arena vertex ids to STEP entity ids so edges can back-reference.
     vertex_entity: std::collections::HashMap<u32, u32>,
-    /// Entity ids of all emitted EDGE_CURVE entries (used to build EDGE_LOOP).
+    /// Coincident-point → VERTEX_POINT dedup (quantized at the 1e-6 print
+    /// precision). Lets faces share vertices even when feature builders give each
+    /// face its own arena vertex id, so the round-trip B-Rep is watertight.
+    point_entity: std::collections::HashMap<(i64, i64, i64), u32>,
+    /// Shared-edge dedup keyed by the (sorted) VERTEX_POINT pair → (EDGE_CURVE
+    /// entity, its stored first VERTEX_POINT). Two faces' coincident edges map to
+    /// ONE EDGE_CURVE so adjacency pairs correctly.
+    edge_entity: std::collections::HashMap<(u32, u32), (u32, u32)>,
+    /// arena edge id → (EDGE_CURVE entity, its stored first VERTEX_POINT), so the
+    /// wire walk can emit an ORIENTED_EDGE with the correct sense per face.
+    edge_curve_by_arena: std::collections::HashMap<u32, (u32, u32)>,
+    /// Entity ids of the current face's ORIENTED_EDGE entries (cleared per face).
     edge_entities: Vec<u32>,
     /// Entity ids of all emitted ADVANCED_FACE entries.
     face_entities: Vec<u32>,
+}
+
+/// Quantize a coordinate to the writer's 1e-6 print precision for dedup keys.
+fn quant_point(p: gfd_cad_geom::Point3) -> (i64, i64, i64) {
+    let q = |x: f64| (x * 1.0e6).round() as i64;
+    (q(p.x), q(p.y), q(p.z))
 }
 
 impl StepCtx {
@@ -154,27 +197,60 @@ fn walk(arena: &ShapeArena, id: ShapeId, buf: &mut String, ctx: &mut StepCtx) {
     match shape {
         Shape::Vertex { point } => {
             if ctx.vertex_entity.contains_key(&id.0) { return; }
-            let cp = ctx.alloc();
-            buf.push_str(&format!(
-                "#{}=CARTESIAN_POINT('',({:.6},{:.6},{:.6}));\n",
-                cp, point.x, point.y, point.z
-            ));
-            let vp = ctx.alloc();
-            buf.push_str(&format!("#{}=VERTEX_POINT('',#{});\n", vp, cp));
+            // Reuse a coincident point's VERTEX_POINT so faces share vertices.
+            let key = quant_point(*point);
+            let vp = if let Some(&existing) = ctx.point_entity.get(&key) {
+                existing
+            } else {
+                let cp = ctx.alloc();
+                buf.push_str(&format!(
+                    "#{}=CARTESIAN_POINT('',({:.6},{:.6},{:.6}));\n",
+                    cp, point.x, point.y, point.z
+                ));
+                let vp = ctx.alloc();
+                buf.push_str(&format!("#{}=VERTEX_POINT('',#{});\n", vp, cp));
+                ctx.point_entity.insert(key, vp);
+                vp
+            };
             ctx.vertex_entity.insert(id.0, vp);
         }
         Shape::Edge { vertices, .. } => {
             for v in vertices { walk(arena, *v, buf, ctx); }
+            if ctx.edge_curve_by_arena.contains_key(&id.0) { return; }
             let va = ctx.vertex_entity.get(&vertices[0].0).copied();
             let vb = ctx.vertex_entity.get(&vertices[1].0).copied();
             if let (Some(a), Some(b)) = (va, vb) {
-                let ec = ctx.alloc();
-                buf.push_str(&format!("#{}=EDGE_CURVE('',#{},#{},$,.T.);\n", ec, a, b));
-                ctx.edge_entities.push(ec);
+                // Share one EDGE_CURVE (stored direction a→b) between the faces
+                // meeting at this edge; per-face direction is set by ORIENTED_EDGE.
+                let key = if a <= b { (a, b) } else { (b, a) };
+                let (ec, first) = if let Some(&existing) = ctx.edge_entity.get(&key) {
+                    existing
+                } else {
+                    let ec = ctx.alloc();
+                    buf.push_str(&format!("#{}=EDGE_CURVE('',#{},#{},$,.T.);\n", ec, a, b));
+                    ctx.edge_entity.insert(key, (ec, a));
+                    (ec, a)
+                };
+                ctx.edge_curve_by_arena.insert(id.0, (ec, first));
             }
         }
         Shape::Wire { edges } => {
-            for (e, _) in edges { walk(arena, *e, buf, ctx); }
+            // Emit an ORIENTED_EDGE per use so a shared EDGE_CURVE is traversed in
+            // each face's correct direction (else adjacent faces reverse-wind and
+            // the reconstructed volume is wrong).
+            for (e, orient) in edges {
+                walk(arena, *e, buf, ctx);
+                if let Ok(Shape::Edge { vertices, .. }) = arena.get(*e) {
+                    if let Some(&(ec, first_vp)) = ctx.edge_curve_by_arena.get(&e.0) {
+                        let start_arena = if matches!(orient, gfd_cad_topo::Orientation::Forward) { vertices[0] } else { vertices[1] };
+                        let start_vp = ctx.vertex_entity.get(&start_arena.0).copied();
+                        let sense = if start_vp == Some(first_vp) { ".T." } else { ".F." };
+                        let oe = ctx.alloc();
+                        buf.push_str(&format!("#{}=ORIENTED_EDGE('',*,*,#{},{});\n", oe, ec, sense));
+                        ctx.edge_entities.push(oe);
+                    }
+                }
+            }
         }
         Shape::Face { wires, surface, .. } => {
             for w in wires { walk(arena, *w, buf, ctx); }
@@ -537,7 +613,7 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
         let args = &rhs[paren..];
         match typ {
             "CARTESIAN_POINT" => {
-                let f = extract_floats(args);
+                let f = extract_floats(&strip_quoted(args));
                 if f.len() >= 3 {
                     cps.insert(id, [f[0] as f32, f[1] as f32, f[2] as f32]);
                 }
@@ -570,7 +646,7 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
                 faces.push(extract_refs(args));
             }
             "DIRECTION" => {
-                let f = extract_floats(args);
+                let f = extract_floats(&strip_quoted(args));
                 if f.len() >= 3 {
                     let len = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
                     if len > 1e-12 {
@@ -799,6 +875,8 @@ pub fn read_step_brep(path: &Path, arena: &mut ShapeArena) -> IoResult<ShapeId> 
     let mut tori: HashMap<u32, (u32, f64, f64)> = HashMap::new();  // placement, major, minor
     #[allow(clippy::type_complexity)]
     let mut surf_bspline: HashMap<u32, (usize, usize, usize, usize, Vec<u32>, Vec<f64>, Vec<f64>)> = HashMap::new();
+    #[allow(clippy::type_complexity)]
+    let mut surf_nurbs: HashMap<u32, (usize, usize, usize, usize, Vec<u32>, Vec<f64>, Vec<f64>, Vec<f64>)> = HashMap::new();
     let mut curve_bspline: HashMap<u32, (usize, Vec<u32>, Vec<f64>)> = HashMap::new();
     let mut edge_curves: HashMap<u32, (u32, u32, Option<u32>)> = HashMap::new(); // va, vb, curve
     let mut oriented: HashMap<u32, (u32, bool)> = HashMap::new(); // edge_curve, forward
@@ -816,8 +894,14 @@ pub fn read_step_brep(path: &Path, arena: &mut ShapeArena) -> IoResult<ShapeId> 
         out
     };
     let trailing_forward = |args: &str| -> bool {
-        // The same-sense / orientation flag is the last .T./.F. token.
-        args.rfind(".T.").map(|t| args.rfind(".F.").map_or(true, |f| t > f)).unwrap_or(true)
+        // The same-sense / orientation flag is the LAST .T./.F. token: forward iff
+        // that last token is .T. (default true if neither present).
+        match (args.rfind(".T."), args.rfind(".F.")) {
+            (Some(t), Some(f)) => t > f,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => true,
+        }
     };
 
     for record in text.split(';') {
@@ -830,10 +914,10 @@ pub fn read_step_brep(path: &Path, arena: &mut ShapeArena) -> IoResult<ShapeId> 
         let typ = rhs[..paren].trim();
         let args = &rhs[paren..];
         match typ {
-            "CARTESIAN_POINT" => { let f = extract_floats(args); if f.len() >= 3 { cps.insert(id, [f[0], f[1], f[2]]); } }
+            "CARTESIAN_POINT" => { let f = extract_floats(&strip_quoted(args)); if f.len() >= 3 { cps.insert(id, [f[0], f[1], f[2]]); } }
             "VERTEX_POINT" => { if let Some(&cp) = extract_refs(args).first() { vps.insert(id, cp); } }
             "DIRECTION" => {
-                let f = extract_floats(args);
+                let f = extract_floats(&strip_quoted(args));
                 if f.len() >= 3 {
                     let len = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
                     if len > 1e-12 { dirs.insert(id, [f[0] / len, f[1] / len, f[2] / len]); }
@@ -893,13 +977,23 @@ pub fn read_step_brep(path: &Path, arena: &mut ShapeArena) -> IoResult<ShapeId> 
             }
             "CLOSED_SHELL" | "OPEN_SHELL" => { shells.insert(id, extract_refs(args)); }
             "MANIFOLD_SOLID_BREP" | "BREP_WITH_VOIDS" => { if let Some(&sh) = extract_refs(args).first() { solids.push(sh); } }
-            // AP214/AP242 complex instance carrying a B_SPLINE_SURFACE_WITH_KNOTS.
+            // AP214/AP242 complex instance carrying a B_SPLINE_SURFACE_WITH_KNOTS
+            // (optionally RATIONAL → NURBS, mirroring read_step_trimesh).
             "" if rhs.starts_with('(') && rhs.contains("B_SPLINE_SURFACE_WITH_KNOTS") => {
                 if let (Some(bs), Some(wk)) = (find_entity_args(rhs, "B_SPLINE_SURFACE("), find_entity_args(rhs, "B_SPLINE_SURFACE_WITH_KNOTS(")) {
                     let b = split_top_level(&bs);
                     let w = split_top_level(&wk);
                     if b.len() >= 3 && w.len() >= 4 {
-                        if let Some(rec) = parse_bspline_record(&b[0], &b[1], &b[2], &w[0], &w[1], &w[2], &w[3]) { surf_bspline.insert(id, rec); }
+                        if let Some(rec) = parse_bspline_record(&b[0], &b[1], &b[2], &w[0], &w[1], &w[2], &w[3]) {
+                            let weights = find_entity_args(rhs, "RATIONAL_B_SPLINE_SURFACE(")
+                                .map(|ra| split_top_level(&ra).iter().flat_map(|r| extract_floats(r)).collect::<Vec<f64>>());
+                            match weights {
+                                Some(ws) if ws.len() == rec.4.len() && ws.iter().all(|w| *w > 0.0) => {
+                                    surf_nurbs.insert(id, (rec.0, rec.1, rec.2, rec.3, rec.4, rec.5, rec.6, ws));
+                                }
+                                _ => { surf_bspline.insert(id, rec); }
+                            }
+                        }
                     }
                 }
             }
@@ -913,17 +1007,28 @@ pub fn read_step_brep(path: &Path, arena: &mut ShapeArena) -> IoResult<ShapeId> 
         Some(Direction3 { x: d[0], y: d[1], z: d[2] })
     };
     let point_of = |id: u32| -> Option<Point3> { cps.get(&id).map(|p| Point3::new(p[0], p[1], p[2])) };
-    // (origin, z axis, x ref) for a placement, deriving an arbitrary x if absent.
+    // (origin, z axis, x ref) for a placement. The ref_direction is
+    // Gram-Schmidt-orthogonalized against z (ISO 10303-42 semantics: the stored
+    // ref_direction need not be perpendicular to the axis), or an arbitrary
+    // perpendicular is derived if it is absent / parallel to z.
     let frame = |pl: u32| -> Option<(Point3, Direction3, Direction3)> {
         let &(loc, zr, xr) = placements.get(&pl)?;
         let o = point_of(loc)?;
         let z = dir_of(zr).unwrap_or(Direction3::Z);
-        let x = dir_of(xr).unwrap_or_else(|| {
-            // any unit vector perpendicular to z
-            let zv = z.as_vec();
+        let zv = z.as_vec();
+        let arbitrary_perp = || {
             let t = if zv.x.abs() < 0.9 { Vector3::new(1.0, 0.0, 0.0) } else { Vector3::new(0.0, 1.0, 0.0) };
             t.cross(zv).to_direction().unwrap_or(Direction3::X)
-        });
+        };
+        let x = match dir_of(xr) {
+            Some(xr) => {
+                let xv = xr.as_vec();
+                let d = xv.dot(zv);
+                let proj = Vector3::new(xv.x - d * zv.x, xv.y - d * zv.y, xv.z - d * zv.z);
+                proj.to_direction().unwrap_or_else(|_| arbitrary_perp())
+            }
+            None => arbitrary_perp(),
+        };
         Some((o, z, x))
     };
 
@@ -968,23 +1073,56 @@ pub fn read_step_brep(path: &Path, arena: &mut ShapeArena) -> IoResult<ShapeId> 
         if !edges.is_empty() { loop_shape.insert(lid, arena.push(Shape::Wire { edges })); }
     }
 
+    // Axial span [min,max] of the boundary points projected onto an axis through
+    // the origin — gives a finite height for an otherwise-unbounded STEP surface.
+    let axial_span = |o: Point3, z: Direction3, pts: &[Point3]| -> (f64, f64) {
+        let zv = z.as_vec();
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for p in pts {
+            let t = (p.x - o.x) * zv.x + (p.y - o.y) * zv.y + (p.z - o.z) * zv.z;
+            lo = lo.min(t);
+            hi = hi.max(t);
+        }
+        if lo.is_finite() && hi > lo { (lo, hi) } else { (0.0, 1.0) }
+    };
+    let shift = |o: Point3, z: Direction3, t: f64| Point3::new(o.x + z.as_vec().x * t, o.y + z.as_vec().y * t, o.z + z.as_vec().z * t);
+
     // Resolve a STEP surface ref to a SurfaceGeom (plane fit fallback handled by caller).
     let surface_geom = |surf: u32, fallback_pts: &[Point3]| -> Option<SurfaceGeom> {
         if let Some(&pl) = planes.get(&surf) {
             return frame(pl).map(|(o, z, x)| SurfaceGeom::Plane(Plane::new(o, z, x)));
         }
         if let Some(&(pl, rad)) = cyls.get(&surf) {
-            return frame(pl).map(|(o, z, x)| SurfaceGeom::Cylinder(Cylinder::new(o, z, x, rad, 1.0)));
+            // Height from the bounding wire's axial extent (a STEP cylinder is
+            // unbounded); origin shifted to the low end so v ∈ [0, height].
+            return frame(pl).map(|(o, z, x)| {
+                let (lo, hi) = axial_span(o, z, fallback_pts);
+                SurfaceGeom::Cylinder(Cylinder::new(shift(o, z, lo), z, x, rad, hi - lo))
+            });
         }
         if let Some(&(pl, rad)) = sphs.get(&surf) {
             return frame(pl).map(|(o, _z, _x)| SurfaceGeom::Sphere(Sphere::new(o, rad)));
         }
         if let Some(&(pl, rad, semi)) = cones.get(&surf) {
-            // r1 at the placement plane, r2 one unit up along the axis.
-            return frame(pl).map(|(o, z, x)| SurfaceGeom::Cone(Cone::new(o, z, x, rad, rad + semi.tan(), 1.0)));
+            // r grows along the axis as r(t) = rad + t·tan(semi); size from the wire.
+            return frame(pl).map(|(o, z, x)| {
+                let (lo, hi) = axial_span(o, z, fallback_pts);
+                let h = hi - lo;
+                let r1 = rad + lo * semi.tan();
+                let r2 = rad + hi * semi.tan();
+                SurfaceGeom::Cone(Cone::new(shift(o, z, lo), z, x, r1.max(0.0), r2.max(0.0), h))
+            });
         }
         if let Some(&(pl, major, minor)) = tori.get(&surf) {
             return frame(pl).map(|(o, z, x)| SurfaceGeom::Torus(Torus::new(o, z, x, major, minor)));
+        }
+        if let Some(rec) = surf_nurbs.get(&surf) {
+            let (u_deg, v_deg, n_u, n_v, refs, uk, vk, ws) = rec;
+            let cp: Vec<Point3> = refs.iter().filter_map(|r| point_of(*r)).collect();
+            if cp.len() == refs.len() {
+                return NurbsSurface::new(*u_deg, *v_deg, *n_u, *n_v, cp, ws.clone(), uk.clone(), vk.clone()).ok().map(SurfaceGeom::Nurbs);
+            }
         }
         if let Some(rec) = surf_bspline.get(&surf) {
             let (u_deg, v_deg, n_u, n_v, refs, uk, vk) = rec;
@@ -1024,7 +1162,9 @@ pub fn read_step_brep(path: &Path, arena: &mut ShapeArena) -> IoResult<ShapeId> 
         ordered.sort_by_key(|(_, outer)| if *outer { 0 } else { 1 });
         for (lid, _outer) in &ordered {
             if let Some(&ws) = loop_shape.get(lid) { wires.push(ws); }
-            if fallback_pts.is_empty() { fallback_pts = loop_points(*lid); }
+            // Accumulate ALL boundary points (both rims) so a cylinder/cone face's
+            // axial height is derived from its full extent, not just one loop.
+            fallback_pts.extend(loop_points(*lid));
         }
         let Some(sg) = surface_geom(*surf, &fallback_pts) else { continue };
         let fs = arena.push(Shape::Face { surface: sg, wires, orient: Orientation::Forward });
@@ -1173,6 +1313,47 @@ mod tests {
     /// Minimal STEP body around handcrafted entity records.
     fn step_doc(entities: &str) -> String {
         format!("ISO-10303-21;\nDATA;\n{}\nENDSEC;\nEND-ISO-10303-21;\n", entities)
+    }
+
+    #[test]
+    fn read_step_brep_derives_cylinder_height_from_wire() {
+        // A cylindrical face whose boundary spans z=0..10 must reconstruct a
+        // Cylinder of height 10, not the placeholder 1.0.
+        use gfd_cad_topo::{collect_by_kind, Shape, ShapeKind};
+        use gfd_cad_topo::shape::SurfaceGeom;
+        let entities = "\
+#1=CARTESIAN_POINT('',(1.,0.,0.));
+#2=CARTESIAN_POINT('',(1.,0.,10.));
+#3=CARTESIAN_POINT('',(0.,0.,0.));
+#4=DIRECTION('',(0.,0.,1.));
+#5=DIRECTION('',(1.,0.,0.));
+#6=AXIS2_PLACEMENT_3D('',#3,#4,#5);
+#7=CYLINDRICAL_SURFACE('',#6,1.0);
+#8=VERTEX_POINT('',#1);
+#9=VERTEX_POINT('',#2);
+#10=EDGE_CURVE('',#8,#9,$,.T.);
+#11=EDGE_CURVE('',#9,#8,$,.T.);
+#12=ORIENTED_EDGE('',*,*,#10,.T.);
+#13=ORIENTED_EDGE('',*,*,#11,.T.);
+#14=EDGE_LOOP('',(#12,#13));
+#15=FACE_OUTER_BOUND('',#14,.T.);
+#16=ADVANCED_FACE('',(#15),#7,.T.);";
+        let path = std::env::temp_dir().join(format!("gfd_brep_cyl_{}.stp",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::write(&path, step_doc(entities)).unwrap();
+        let mut arena = ShapeArena::new();
+        let root = read_step_brep(&path, &mut arena).unwrap();
+        let _ = fs::remove_file(&path);
+        let faces = collect_by_kind(&arena, root, ShapeKind::Face);
+        let mut found = false;
+        for f in faces {
+            if let Ok(Shape::Face { surface: SurfaceGeom::Cylinder(c), .. }) = arena.get(f) {
+                assert!((c.height - 10.0).abs() < 1e-9, "cylinder height should be 10, got {}", c.height);
+                assert!((c.radius - 1.0).abs() < 1e-9);
+                found = true;
+            }
+        }
+        assert!(found, "should reconstruct a cylindrical face");
     }
 
     #[test]

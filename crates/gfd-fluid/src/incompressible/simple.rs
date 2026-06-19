@@ -792,10 +792,14 @@ impl SimpleSolver {
 
         // Cut-cell: pin p' = 0 in every solid cell. All of a solid cell's faces
         // are now wall faces (skipped above), so its row would otherwise be
-        // all-zero (singular). Identity row keeps the system solvable.
-        if let Some(ref mask) = self.immersed_solid_mask {
-            for i in 0..n.min(mask.len()) {
-                if mask[i] {
+        // all-zero (singular). Identity row keeps the system solvable. Also pin
+        // any FLUID cell left with a zero diagonal (fully enclosed by solids /
+        // walls) — otherwise the linear solve is singular.
+        if self.immersed_solid_mask.is_some() {
+            let mask = self.immersed_solid_mask.clone();
+            let is_solid = |i: usize| mask.as_ref().map_or(false, |m| m.get(i).copied().unwrap_or(false));
+            for i in 0..n {
+                if is_solid(i) || pc_mat.values[self.pc_diag_csr_idx[i]] == 0.0 {
                     let (start, end) = (self.pc_row_ptr[i], self.pc_row_ptr[i + 1]);
                     for idx in start..end {
                         pc_mat.values[idx] = if self.pc_col_idx[idx] == i { 1.0 } else { 0.0 };
@@ -1005,6 +1009,14 @@ impl SimpleSolver {
 
         // Internal faces: use cached geometry (avoids Face struct access)
         for &(fi, owner, neigh, _dist, _d) in &self.cached_internal_geom {
+            // Cut-cell: a fluid↔solid (or solid↔solid) face is a zero-flux wall —
+            // exclude it from the imbalance, matching the momentum / pcorr loops.
+            // Otherwise the residual plateaus at a nonzero floor and masked runs
+            // never report convergence.
+            if let Some(ref mask) = self.immersed_solid_mask {
+                let (so, sn) = (mask.get(owner).copied().unwrap_or(false), mask.get(neigh).copied().unwrap_or(false));
+                if so || sn { continue; }
+            }
             let na = self.cached_normal_area[fi];
             let vo = vel_vals[owner];
             let vn = vel_vals[neigh];
@@ -1713,5 +1725,26 @@ mod tests {
             .map(|(_, v)| (v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt())
             .fold(0.0, f64::max);
         assert!(max_speed > 1e-6, "flow should develop around the body");
+    }
+
+    #[test]
+    fn test_cut_cell_residual_converges() {
+        // The continuity residual (the returned convergence signal) must drop for
+        // a masked run — it excludes the blocked wall-face flux. A bug would leave
+        // it stuck at a nonzero floor.
+        let (mesh, bv, bp, wp) = make_3x3x1_lid_driven_cavity();
+        let n = mesh.num_cells();
+        let mut state = FluidState::new(n);
+        for i in 0..n { let _ = state.density.set(i, 1.0); let _ = state.viscosity.set(i, 0.1); }
+        let mut solver = SimpleSolver::new(1.0, 0.1);
+        solver.alpha_u = 0.7; solver.alpha_p = 0.3;
+        let mut mask = vec![false; n];
+        mask[n / 2] = true;
+        solver.set_immersed_solid_mask(mask);
+        let mut last = f64::INFINITY;
+        for _ in 0..80 {
+            last = solver.solve_step_with_bcs(&mut state, &mesh, &bv, &bp, &wp).unwrap();
+        }
+        assert!(last < 1e-4, "masked continuity residual should converge, got {}", last);
     }
 }

@@ -102,8 +102,11 @@ mod integration_tests {
     #[test]
     fn step_brep_roundtrips_box_topology_and_volume() {
         use io::{export_step, import_step_brep};
-        use topo::{collect_by_kind, ShapeKind};
-        // Write a box solid, reconstruct its real B-Rep, check topology + volume.
+        use topo::{collect_by_kind, EdgeFaceMap, ShapeKind};
+        // Write a box solid, reconstruct its real B-Rep, and validate not just
+        // counts/volume but TOPOLOGY: the writer now shares vertices/edges, so the
+        // reconstruction is watertight (8 verts, 12 edges, every edge shared by 2
+        // faces) — not 24 unshared verts/edges.
         let mut src = ShapeArena::new();
         let bid = box_solid(&mut src, 2.0, 3.0, 4.0).unwrap();
         let path = std::env::temp_dir().join(format!("gfd_cad_brep_{}.stp",
@@ -112,11 +115,21 @@ mod integration_tests {
         let mut dst = ShapeArena::new();
         let root = import_step_brep(&path, &mut dst).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert_eq!(collect_by_kind(&dst, root, ShapeKind::Solid).len(), 1, "one solid");
-        assert_eq!(collect_by_kind(&dst, root, ShapeKind::Face).len(), 6, "six faces");
+        // collect_by_kind counts traversal occurrences; shared topology means the
+        // SAME ShapeId recurs, so unique ids reveal real sharing.
+        let uniq = |k| collect_by_kind(&dst, root, k).into_iter().collect::<std::collections::HashSet<_>>().len();
+        assert_eq!(uniq(ShapeKind::Solid), 1, "one solid");
+        assert_eq!(uniq(ShapeKind::Face), 6, "six faces");
+        assert_eq!(uniq(ShapeKind::Vertex), 8, "eight shared vertices");
+        assert_eq!(uniq(ShapeKind::Edge), 12, "twelve shared edges");
+        // Every face has exactly 4 neighbors across shared edges (watertight box).
+        let map = EdgeFaceMap::build(&dst, root).unwrap();
+        let counts: Vec<usize> = collect_by_kind(&dst, root, ShapeKind::Face)
+            .into_iter().collect::<std::collections::HashSet<_>>()
+            .into_iter().map(|f| map.face_neighbors(f).len()).collect();
+        assert!(counts.iter().all(|&c| c == 4), "each box face should adjoin 4 others, got {:?}", counts);
         let v = volume(&dst, root).unwrap();
         assert!((v - 24.0).abs() < 1e-6, "reconstructed box volume {} != 24", v);
-        // The reconstructed B-Rep tessellates to a non-empty mesh.
         let mesh = tessellate(&dst, root, TessellationOptions::default()).unwrap();
         assert!(mesh.indices.len() >= 12, "box B-Rep should tessellate");
     }

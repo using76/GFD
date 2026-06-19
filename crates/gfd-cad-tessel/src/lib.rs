@@ -723,24 +723,26 @@ pub fn auto_uv_steps(surface: &SurfaceGeom, chord_tolerance: f64) -> (usize, usi
 /// (→ caller uses the full surface) for planes, infinite ranges, or when the
 /// boundary can't be inverted onto the surface.
 fn try_trim_curved(arena: &ShapeArena, surface: &SurfaceGeom, wires: &[ShapeId], opts: TessellationOptions) -> Option<TriMesh> {
-    fn trim_one<S: Surface>(arena: &ShapeArena, s: &S, wires: &[ShapeId], opts: TessellationOptions) -> Option<TriMesh> {
+    fn trim_one<S: Surface>(arena: &ShapeArena, s: &S, wires: &[ShapeId], opts: TessellationOptions, u_periodic: bool, v_periodic: bool) -> Option<TriMesh> {
         let (u0, u1) = s.u_range();
         let (v0, v1) = s.v_range();
         if !(u0.is_finite() && u1.is_finite() && v0.is_finite() && v1.is_finite()) {
             return None;
         }
-        let (outer, holes) = trim_loops_uv(arena, s, wires, u0, u1, v0, v1)?;
-        let m = sample_trimmed(s, opts, &outer, &holes, u0, u1, v0, v1).ok()?;
+        let (outer, holes) = trim_loops_uv(arena, s, wires, u0, u1, v0, v1, u_periodic, v_periodic)?;
+        let m = sample_trimmed(s, opts, &outer, &holes, u0, u1, v0, v1, u_periodic, v_periodic).ok()?;
         if m.indices.is_empty() { None } else { Some(m) }
     }
+    // Periodicity: cylinder/cone/sphere have a periodic u (angle); torus is
+    // periodic in both u and v. Plane/bspline/nurbs are non-periodic.
     match surface {
         SurfaceGeom::Plane(_) => None,
-        SurfaceGeom::Cylinder(s) => trim_one(arena, s, wires, opts),
-        SurfaceGeom::Sphere(s) => trim_one(arena, s, wires, opts),
-        SurfaceGeom::Cone(s) => trim_one(arena, s, wires, opts),
-        SurfaceGeom::Torus(s) => trim_one(arena, s, wires, opts),
-        SurfaceGeom::BSpline(s) => trim_one(arena, s, wires, opts),
-        SurfaceGeom::Nurbs(s) => trim_one(arena, s, wires, opts),
+        SurfaceGeom::Cylinder(s) => trim_one(arena, s, wires, opts, true, false),
+        SurfaceGeom::Sphere(s) => trim_one(arena, s, wires, opts, true, false),
+        SurfaceGeom::Cone(s) => trim_one(arena, s, wires, opts, true, false),
+        SurfaceGeom::Torus(s) => trim_one(arena, s, wires, opts, true, true),
+        SurfaceGeom::BSpline(s) => trim_one(arena, s, wires, opts, false, false),
+        SurfaceGeom::Nurbs(s) => trim_one(arena, s, wires, opts, false, false),
     }
 }
 
@@ -859,11 +861,33 @@ fn invert_surface_uv<S: Surface>(s: &S, p: Point3, u0: f64, u1: f64, v0: f64, v1
     if final_r < 1e-4 * scale + 1e-6 { Some((u, v)) } else { None }
 }
 
+/// Unwrap a loop's periodic coordinate(s) so successive vertices stay within π,
+/// turning e.g. a seam-crossing run [0.5, 5.8] into a contiguous [0.5, -0.48].
+/// Without this, point-in-polygon over [0,2π] keeps the COMPLEMENTARY region for
+/// a boundary that crosses the seam (u=0).
+fn unwrap_periodic(loop_uv: &mut [(f64, f64)], u_periodic: bool, v_periodic: bool) {
+    use std::f64::consts::{PI, TAU};
+    for k in 1..loop_uv.len() {
+        if u_periodic {
+            let prev = loop_uv[k - 1].0;
+            while loop_uv[k].0 - prev > PI { loop_uv[k].0 -= TAU; }
+            while loop_uv[k].0 - prev < -PI { loop_uv[k].0 += TAU; }
+        }
+        if v_periodic {
+            let prev = loop_uv[k - 1].1;
+            while loop_uv[k].1 - prev > PI { loop_uv[k].1 -= TAU; }
+            while loop_uv[k].1 - prev < -PI { loop_uv[k].1 += TAU; }
+        }
+    }
+}
+
 /// Extract trim loops in (u,v) space for a curved face: walk each wire's edges
 /// (orientation-aware, like `line_loop_for_wire`) and invert each start vertex
-/// onto the surface. Returns (outer, holes) or None if any inversion fails.
+/// onto the surface. Periodic axes are unwrapped so seam-crossing boundaries
+/// stay contiguous. Returns (outer, holes) or None if any inversion fails.
 fn trim_loops_uv<S: Surface>(
     arena: &ShapeArena, surf: &S, wires: &[ShapeId], u0: f64, u1: f64, v0: f64, v1: f64,
+    u_periodic: bool, v_periodic: bool,
 ) -> Option<(Vec<(f64, f64)>, Vec<Vec<(f64, f64)>>)> {
     let loop_uv = |wire_id: ShapeId| -> Option<Vec<(f64, f64)>> {
         let Shape::Wire { edges } = arena.get(wire_id).ok()? else { return None };
@@ -875,7 +899,9 @@ fn trim_loops_uv<S: Surface>(
             let Shape::Vertex { point } = arena.get(start).ok()? else { return None };
             uv.push(invert_surface_uv(surf, *point, u0, u1, v0, v1)?);
         }
-        if uv.len() < 3 { None } else { Some(uv) }
+        if uv.len() < 3 { return None; }
+        unwrap_periodic(&mut uv, u_periodic, v_periodic);
+        Some(uv)
     };
     let outer = loop_uv(*wires.first()?)?;
     let mut holes = Vec::new();
@@ -890,15 +916,24 @@ fn trim_loops_uv<S: Surface>(
 /// patch — display-quality, not watertight; see module docs.
 fn sample_trimmed<S: Surface>(
     s: &S, opts: TessellationOptions, outer: &[(f64, f64)], holes: &[Vec<(f64, f64)>],
-    u0: f64, u1: f64, v0: f64, v1: f64,
+    u0: f64, u1: f64, v0: f64, v1: f64, u_periodic: bool, v_periodic: bool,
 ) -> TessellResult<TriMesh> {
+    use std::f64::consts::TAU;
     let (us, vs) = (opts.u_steps.max(1), opts.v_steps.max(1));
     let (nu, nv) = (us + 1, vs + 1);
     let (du, dv) = ((u1 - u0) / us as f64, (v1 - v0) / vs as f64);
     let mut mesh = TriMesh::default();
     // Sample the full node lattice (so kept cells share vertices).
     let mut node_index = vec![u32::MAX; nu * nv];
-    let inside = |u: f64, v: f64| point_in_polygon((u, v), outer) && !holes.iter().any(|h| point_in_polygon((u, v), h));
+    // The trim loop may have been unwrapped past the seam, so test each cell
+    // center at its periodic images (±TAU) on periodic axes.
+    let pip = |u: f64, v: f64, poly: &[(f64, f64)]| -> bool {
+        let us = if u_periodic { vec![u, u - TAU, u + TAU] } else { vec![u] };
+        let vs = if v_periodic { vec![v, v - TAU, v + TAU] } else { vec![v] };
+        for &uu in &us { for &vv in &vs { if point_in_polygon((uu, vv), poly) { return true; } } }
+        false
+    };
+    let inside = |u: f64, v: f64| pip(u, v, outer) && !holes.iter().any(|h| pip(u, v, h));
     let mut push_node = |mesh: &mut TriMesh, node_index: &mut Vec<u32>, i: usize, j: usize| -> TessellResult<u32> {
         let k = j * nu + i;
         if node_index[k] != u32::MAX { return Ok(node_index[k]); }
@@ -1032,6 +1067,39 @@ mod tests {
         // Far fewer triangles than the full 16×16 patch (512).
         assert!(trimmed.indices.len() / 3 < 512, "trim should cull most of the patch");
         assert!(trimmed.indices.len() / 3 > 50, "but keep the interior region");
+    }
+
+    #[test]
+    fn seam_crossing_cylinder_keeps_its_band_not_the_complement() {
+        use gfd_cad_geom::surface::Cylinder;
+        use gfd_cad_geom::{curve::Line, Direction3};
+        use gfd_cad_topo::shape::CurveGeom;
+        // A ±45° band around angle 0 (crossing the u=0 seam) on a unit cylinder,
+        // height 2. The kept region must be the band (x>0), not the far side.
+        let cyl = Cylinder::new(Point3::new(0.0, 0.0, 0.0), Direction3::Z, Direction3::X, 1.0, 2.0);
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        let corners = [
+            Point3::new(s, -s, 0.0), Point3::new(s, s, 0.0),
+            Point3::new(s, s, 2.0), Point3::new(s, -s, 2.0),
+        ];
+        let mut arena = ShapeArena::new();
+        let vids: Vec<ShapeId> = corners.iter().map(|p| arena.push(Shape::Vertex { point: *p })).collect();
+        let mut edges = Vec::new();
+        for i in 0..4 {
+            let j = (i + 1) % 4;
+            let line = Line::from_points(corners[i], corners[j]).unwrap();
+            let e = arena.push(Shape::Edge { curve: CurveGeom::Line(line), vertices: [vids[i], vids[j]], orient: Orientation::Forward });
+            edges.push((e, Orientation::Forward));
+        }
+        let wire = arena.push(Shape::Wire { edges });
+        let face = arena.push(Shape::Face { surface: SurfaceGeom::Cylinder(cyl), wires: vec![wire], orient: Orientation::Forward });
+        let opts = TessellationOptions { u_steps: 32, v_steps: 4, ..Default::default() };
+        let mesh = tessellate(&arena, face, opts).unwrap();
+        assert!(!mesh.indices.is_empty(), "seam-crossing band should tessellate");
+        // Every kept vertex is on the near side (x>0): the band, not the complement.
+        for p in &mesh.positions {
+            assert!(p[0] > -0.2, "kept vertex {:?} is on the far side — seam wrap kept the complement", p);
+        }
     }
 
     #[test]
