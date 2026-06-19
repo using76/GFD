@@ -830,6 +830,12 @@ export const cadClient = {
   importStep: (path: string) =>
     send<{ shape_id: string; arena_id: number }>('cad.import.step', { path }),
 
+  /** Reconstruct real B-Rep topology (faces/edges/solids) from a STEP file —
+   *  measurable and tessellatable, unlike the points-only importStep. */
+  importStepBrep: (path: string) =>
+    send<{ shape_id: string; arena_id: number; solids: number; shells: number; faces: number; edges: number; vertices: number }>(
+      'cad.import.step_brep', { path }),
+
   stepSummary: (path: string) =>
     send<{
       cartesian_points: number; vertex_points: number; edge_curves: number;
