@@ -81,6 +81,54 @@ pub fn mirror_shape(arena: &mut ShapeArena, id: ShapeId, plane: MirrorPlane) -> 
                         reflect_dir(p.normal),
                         reflect_dir(p.x_axis),
                     )),
+                    // Reflect every control point of a B-spline patch. A
+                    // reflection has det −1, which flips the surface handedness
+                    // (∂u×∂v → −R·n) and would invert the geometric normal vs a
+                    // mirrored planar face. Reverse the v parametric direction
+                    // (columns + v knot vector) to restore +R·n, matching the
+                    // plane convention.
+                    SurfaceGeom::BSpline(b) => {
+                        let (n_u, n_v) = (b.u_control_count, b.v_control_count);
+                        let reflected: Vec<Point3> = b.control_points.iter().map(|p| reflect(*p)).collect();
+                        let mut cps = Vec::with_capacity(reflected.len());
+                        for i in 0..n_u {
+                            for j in 0..n_v {
+                                cps.push(reflected[i * n_v + (n_v - 1 - j)]);
+                            }
+                        }
+                        let vk = &b.v_knots;
+                        let (vmin, vmax) = (vk.first().copied().unwrap_or(0.0), vk.last().copied().unwrap_or(1.0));
+                        let v_knots: Vec<f64> = (0..vk.len()).map(|k| vmin + vmax - vk[vk.len() - 1 - k]).collect();
+                        match gfd_cad_geom::surface::BSplineSurface::new(
+                            b.u_degree, b.v_degree, n_u, n_v, cps, b.u_knots.clone(), v_knots,
+                        ) {
+                            Ok(s) => SurfaceGeom::BSpline(s),
+                            Err(_) => SurfaceGeom::BSpline(b),
+                        }
+                    }
+                    // NURBS: same v-reversal handedness fix, also reversing the
+                    // parallel weights array so weight[i][j] tracks its control point.
+                    SurfaceGeom::Nurbs(nrb) => {
+                        let (n_u, n_v) = (nrb.u_control_count, nrb.v_control_count);
+                        let reflected: Vec<Point3> = nrb.control_points.iter().map(|p| reflect(*p)).collect();
+                        let mut cps = Vec::with_capacity(reflected.len());
+                        let mut ws = Vec::with_capacity(nrb.weights.len());
+                        for i in 0..n_u {
+                            for j in 0..n_v {
+                                cps.push(reflected[i * n_v + (n_v - 1 - j)]);
+                                ws.push(nrb.weights[i * n_v + (n_v - 1 - j)]);
+                            }
+                        }
+                        let vk = &nrb.v_knots;
+                        let (vmin, vmax) = (vk.first().copied().unwrap_or(0.0), vk.last().copied().unwrap_or(1.0));
+                        let v_knots: Vec<f64> = (0..vk.len()).map(|k| vmin + vmax - vk[vk.len() - 1 - k]).collect();
+                        match gfd_cad_geom::surface::NurbsSurface::new(
+                            nrb.u_degree, nrb.v_degree, n_u, n_v, cps, ws, nrb.u_knots.clone(), v_knots,
+                        ) {
+                            Ok(s) => SurfaceGeom::Nurbs(s),
+                            Err(_) => SurfaceGeom::Nurbs(nrb),
+                        }
+                    }
                     other => other,
                 };
                 let mut new_wires = Vec::with_capacity(wires.len());
@@ -127,6 +175,27 @@ mod tests {
         let mirrored = mirror_shape(&mut a, pad, MirrorPlane::XY).unwrap();
         let faces = collect_by_kind(&a, mirrored, ShapeKind::Face);
         assert_eq!(faces.len(), 6); // 4 lateral + 2 caps
+    }
+
+    #[test]
+    fn mirror_preserves_bspline_normal_handedness() {
+        use gfd_cad_geom::surface::{BSplineSurface, Surface};
+        // A non-flat (saddle) bilinear-ish patch so the normal is unambiguous.
+        let cps = vec![
+            Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 1.0),
+            Point3::new(0.0, 1.0, 1.0), Point3::new(1.0, 1.0, 0.0),
+        ];
+        let surf = BSplineSurface::new(1, 1, 2, 2, cps, vec![0.0, 0.0, 1.0, 1.0], vec![0.0, 0.0, 1.0, 1.0]).unwrap();
+        let n0 = surf.normal(0.5, 0.5).unwrap();
+        let mut a = ShapeArena::new();
+        let face = a.push(Shape::Face { surface: SurfaceGeom::BSpline(surf), wires: vec![], orient: Orientation::Forward });
+        let m = mirror_shape(&mut a, face, MirrorPlane::YZ).unwrap(); // reflect across x
+        let Shape::Face { surface: SurfaceGeom::BSpline(ms), .. } = a.get(m).unwrap().clone() else { panic!("expected bspline face") };
+        let n1 = ms.normal(0.5, 0.5).unwrap();
+        // Plane convention: a mirrored normal = reflect_dir(n0) = R·n0 (x flipped),
+        // NOT the determinant-flipped −R·n0. So n1 ≈ (−n0.x, n0.y, n0.z).
+        assert!((n1.x + n0.x).abs() < 1e-6 && (n1.y - n0.y).abs() < 1e-6 && (n1.z - n0.z).abs() < 1e-6,
+            "mirrored bspline normal {:?} should be reflect(n0={:?}) = ({},{},{})", n1, n0, -n0.x, n0.y, n0.z);
     }
 
     #[test]

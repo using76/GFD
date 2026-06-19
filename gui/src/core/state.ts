@@ -6,7 +6,7 @@
  * letting an agent detect staleness / do optimistic concurrency.
  */
 
-import type { Vec3 } from './types';
+import type { Vec3, JsonValue } from './types';
 import { applyPatch, type AppliedOp, type PatchOp } from './patch';
 import { buildDefaultManifest, type PhysicsManifest } from './physics/manifest';
 
@@ -51,6 +51,14 @@ export interface MeshState {
   cellCount: number;
   nodeCount: number;
   quality: { minOrthogonality: number; maxSkewness: number; maxAspectRatio: number } | null;
+  /** Count of cells failing a quality threshold (from the backend mesher). */
+  badCells?: number;
+  /** The grid resolution used to generate this mesh (so a refine fix can scale it). */
+  gen?: { nx: number; ny: number; nz: number };
+  /** Cells blanked because they fall inside a solid body (when maskSolids). */
+  solidCells?: number;
+  /** Active fluid cells after solid masking. */
+  fluidCells?: number;
 }
 
 export interface SolverStatus {
@@ -59,6 +67,10 @@ export interface SolverStatus {
   iteration: number;
   residual: number | null;
   maxIterations: number;
+  /** Per-equation final update residuals (vx/vy/vz/pressure/continuity), if reported. */
+  residualsByEq?: Record<string, number | null>;
+  /** Recent residual values (newest last), for convergence-trend analysis. */
+  residualHistory?: number[];
 }
 
 export interface ResultsSummary {
@@ -103,7 +115,13 @@ export interface SetupState {
 
 export interface DisplayState {
   renderMode: 'shaded' | 'wireframe' | 'shaded_edges';
-  sectionPlane: { enabled: boolean; axis: 'x' | 'y' | 'z'; offset: number };
+  /** Surface opacity 0–1 (1 = opaque). < 1 renders geometry semi-transparent. */
+  opacity: number;
+  /** Master show/hide per render layer (independent of per-shape visibility). */
+  layers: { geometry: boolean; mesh: boolean; results: boolean };
+  /** Section/clipping plane. `axis` picks an axis-aligned normal; when `axis` is
+   *  'custom' the explicit `normal` is used (arbitrary plane). */
+  sectionPlane: { enabled: boolean; axis: 'x' | 'y' | 'z' | 'custom'; offset: number; normal?: [number, number, number] };
 }
 
 /** Results visualization toggles/parameters (contour / vectors / streamlines). */
@@ -115,6 +133,9 @@ export interface VizState {
   showStreamlines: boolean;
   streamlineSeeds: number;
   streamlineSteps: number;
+  showIsosurface: boolean;
+  /** Isosurface level; 0 means "auto" (backend uses the field mean). */
+  isovalue: number;
 }
 
 /**
@@ -179,6 +200,12 @@ export interface AppState {
   gmsh: GmshScene;
   solver: SolverStatus;
   results: ResultsSummary | null;
+  /**
+   * Latest analysis from `calc.diagnose` / `auto_refine` (a DiagnoseResult,
+   * stored loosely to avoid a state↔command type cycle). Lets the human UI and
+   * an AI agent see the current problem assessment + suggested fixes.
+   */
+  diagnosis: JsonValue | null;
   ui: UiState;
 }
 
@@ -190,7 +217,12 @@ export function createInitialState(): AppState {
     fov: 50,
     projection: 'perspective',
   };
-  const display: DisplayState = { renderMode: 'shaded', sectionPlane: { enabled: false, axis: 'x', offset: 0 } };
+  const display: DisplayState = {
+    renderMode: 'shaded',
+    opacity: 1,
+    layers: { geometry: true, mesh: true, results: true },
+    sectionPlane: { enabled: false, axis: 'x', offset: 0 },
+  };
   const viz: VizState = {
     showContour: true,
     showVectors: false,
@@ -199,6 +231,8 @@ export function createInitialState(): AppState {
     showStreamlines: false,
     streamlineSeeds: 20,
     streamlineSteps: 200,
+    showIsosurface: false,
+    isovalue: 0,
   };
   return {
     doc: { id: 'doc_1', revision: 0, geometry: { roots: [], nodes: {} }, sketchIds: [] },
@@ -221,6 +255,7 @@ export function createInitialState(): AppState {
     gmsh: { mesh: null, shapeIds: [], meshStats: null },
     solver: { jobId: null, status: 'idle', iteration: 0, residual: null, maxIterations: 200 },
     results: null,
+    diagnosis: null,
     ui: { activeTab: 'geometry', activeTool: null, units: 'SI' },
   };
 }

@@ -151,6 +151,126 @@ pub fn pad_polygon_xy_signed(
     Ok(arena.push(Shape::Solid { shells: vec![shell] }))
 }
 
+/// Build the lateral (side-wall) quad faces for one closed XY loop extruded
+/// from z=0 to z=`height`, pushing them onto `faces`. Outward normal ∝ edge
+/// direction rotated −90°, so a CCW loop faces outward and a CW loop (a hole)
+/// faces inward — both "outward from the solid material", keeping the divergence
+/// volume sign consistent across outer wall + hole wall.
+fn push_lateral_faces(
+    arena: &mut ShapeArena,
+    loop_xy: &[(f64, f64)],
+    height: f64,
+    faces: &mut Vec<(ShapeId, Orientation)>,
+) -> TopoResult<()> {
+    let bottom: Vec<Point3> = loop_xy.iter().map(|(x, y)| Point3::new(*x, *y, 0.0)).collect();
+    let top: Vec<Point3> = loop_xy.iter().map(|(x, y)| Point3::new(*x, *y, height)).collect();
+    let n = loop_xy.len();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let (a, b, c, d) = (bottom[i], bottom[j], top[j], top[i]);
+        let v0 = arena.push(Shape::vertex(a));
+        let v1 = arena.push(Shape::vertex(b));
+        let v2 = arena.push(Shape::vertex(c));
+        let v3 = arena.push(Shape::vertex(d));
+        let e0 = push_line_edge(arena, a, b, v0, v1)?;
+        let e1 = push_line_edge(arena, b, c, v1, v2)?;
+        let e2 = push_line_edge(arena, c, d, v2, v3)?;
+        let e3 = push_line_edge(arena, d, a, v3, v0)?;
+        let wire = arena.push(Shape::Wire { edges: vec![
+            (e0, Orientation::Forward), (e1, Orientation::Forward),
+            (e2, Orientation::Forward), (e3, Orientation::Forward),
+        ]});
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let nlen = (dx * dx + dy * dy).sqrt().max(f64::EPSILON);
+        let normal = Direction3 { x: dy / nlen, y: -dx / nlen, z: 0.0 };
+        let x_axis = Direction3 { x: dx / nlen, y: dy / nlen, z: 0.0 };
+        let face = arena.push(Shape::Face {
+            surface: SurfaceGeom::Plane(Plane::new(a, normal, x_axis)),
+            wires: vec![wire],
+            orient: Orientation::Forward,
+        });
+        faces.push((face, Orientation::Forward));
+    }
+    Ok(())
+}
+
+/// Build a planar cap face carrying an outer loop plus one or more hole loops
+/// (`wires = [outer, hole0, ...]`). `downward` flips the normal to −Z.
+fn build_cap_with_holes(
+    arena: &mut ShapeArena,
+    outer: &[Point3],
+    holes: &[Vec<Point3>],
+    downward: bool,
+) -> TopoResult<ShapeId> {
+    let make_wire = |arena: &mut ShapeArena, lp: &[Point3]| -> TopoResult<ShapeId> {
+        let verts: Vec<ShapeId> = lp.iter().map(|p| arena.push(Shape::vertex(*p))).collect();
+        let mut edges = Vec::with_capacity(lp.len());
+        for i in 0..lp.len() {
+            let j = (i + 1) % lp.len();
+            let e = push_line_edge(arena, lp[i], lp[j], verts[i], verts[j])?;
+            edges.push((e, Orientation::Forward));
+        }
+        Ok(arena.push(Shape::Wire { edges }))
+    };
+    let mut wires = vec![make_wire(arena, outer)?];
+    for h in holes {
+        wires.push(make_wire(arena, h)?);
+    }
+    let normal = if downward { Direction3 { x: 0.0, y: 0.0, z: -1.0 } } else { Direction3::Z };
+    Ok(arena.push(Shape::Face {
+        surface: SurfaceGeom::Plane(Plane::new(outer[0], normal, Direction3::X)),
+        wires,
+        orient: Orientation::Forward,
+    }))
+}
+
+/// A rectangular plate `width`×`depth`×`height` with a regular `sides`-gon
+/// through-hole of radius `hole_r` centered at (`cx`,`cy`). The hole is a
+/// genuine multi-wire face on both caps (so it renders cut-out and measures
+/// volume = box − hole·height), with inner side walls.
+#[allow(clippy::too_many_arguments)]
+pub fn plate_with_hole_solid(
+    arena: &mut ShapeArena,
+    width: f64,
+    depth: f64,
+    height: f64,
+    cx: f64,
+    cy: f64,
+    hole_r: f64,
+    sides: usize,
+) -> TopoResult<ShapeId> {
+    if sides < 3 || hole_r <= 0.0 || width <= 0.0 || depth <= 0.0 || height <= 0.0 {
+        return Err(TopoError::Geom(gfd_cad_geom::GeomError::Degenerate("invalid plate/hole dimensions")));
+    }
+    // The hole must be strictly interior, else the cut yields a self-intersecting
+    // / non-watertight solid (its negative volume would be masked by abs()).
+    if cx - hole_r <= 0.0 || cx + hole_r >= width || cy - hole_r <= 0.0 || cy + hole_r >= depth {
+        return Err(TopoError::Geom(gfd_cad_geom::GeomError::Degenerate("hole must be strictly inside the plate")));
+    }
+    // Outer rectangle CCW.
+    let outer_xy = vec![(0.0, 0.0), (width, 0.0), (width, depth), (0.0, depth)];
+    // Hole regular polygon wound CW (opposite the CCW outer) so it cuts out.
+    let hole_xy: Vec<(f64, f64)> = (0..sides)
+        .map(|k| {
+            let t = -(k as f64) / sides as f64 * std::f64::consts::TAU; // negative = CW
+            (cx + hole_r * t.cos(), cy + hole_r * t.sin())
+        })
+        .collect();
+
+    let mut faces: Vec<(ShapeId, Orientation)> = Vec::new();
+    push_lateral_faces(arena, &outer_xy, height, &mut faces)?;
+    push_lateral_faces(arena, &hole_xy, height, &mut faces)?;
+    let to3 = |loop_xy: &[(f64, f64)], z: f64| -> Vec<Point3> {
+        loop_xy.iter().map(|(x, y)| Point3::new(*x, *y, z)).collect()
+    };
+    let bottom = build_cap_with_holes(arena, &to3(&outer_xy, 0.0), &[to3(&hole_xy, 0.0)], true)?;
+    let top = build_cap_with_holes(arena, &to3(&outer_xy, height), &[to3(&hole_xy, height)], false)?;
+    faces.push((bottom, Orientation::Forward));
+    faces.push((top, Orientation::Forward));
+    let shell = arena.push(Shape::Shell { faces });
+    Ok(arena.push(Shape::Solid { shells: vec![shell] }))
+}
+
 fn push_line_edge(arena: &mut ShapeArena, a: Point3, b: Point3, va: ShapeId, vb: ShapeId) -> TopoResult<ShapeId> {
     let line = Line::from_points(a, b).map_err(TopoError::from)?;
     Ok(arena.push(Shape::Edge {
@@ -203,6 +323,18 @@ mod tests {
         let id = pad_polygon_xy(&mut a, &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], 0.5).unwrap();
         let faces = collect_by_kind(&a, id, ShapeKind::Face);
         assert_eq!(faces.len(), 6); // 4 lateral + 2 caps
+    }
+
+    #[test]
+    fn plate_with_hole_rejects_invalid_dimensions() {
+        let mut a = ShapeArena::new();
+        // hole bigger than plate / overlapping boundary / non-positive height all error.
+        assert!(plate_with_hole_solid(&mut a, 4.0, 3.0, 1.0, 2.0, 1.5, 5.0, 12).is_err(), "oversized hole");
+        assert!(plate_with_hole_solid(&mut a, 4.0, 3.0, 1.0, 0.0, 0.0, 1.0, 12).is_err(), "corner-overlapping hole");
+        assert!(plate_with_hole_solid(&mut a, 4.0, 3.0, -2.0, 2.0, 1.5, 0.5, 12).is_err(), "negative height");
+        assert!(plate_with_hole_solid(&mut a, 4.0, 3.0, 0.0, 2.0, 1.5, 0.5, 12).is_err(), "zero height");
+        // A strictly-interior hole still builds.
+        assert!(plate_with_hole_solid(&mut a, 4.0, 3.0, 1.0, 2.0, 1.5, 0.5, 12).is_ok(), "valid plate");
     }
 
     #[test]

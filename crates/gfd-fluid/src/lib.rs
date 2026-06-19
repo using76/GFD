@@ -11,6 +11,7 @@ pub mod multiphase;
 pub mod combustion;
 pub mod eos;
 pub mod source;
+pub mod shallow_water;
 
 use gfd_core::{ScalarField, VectorField};
 use serde::Deserialize;

@@ -7,6 +7,10 @@
 import type { CommandDef } from '../command';
 import type { CommandRegistry } from '../registry';
 import type { Vec3 } from '../types';
+import { isGmshShape } from './gmsh';
+
+/** Mass properties of a gmsh (OCC) solid, fetched once and cached per call. */
+interface GmshMeasure { volume?: number; surface_area?: number; center_of_mass?: [number, number, number]; bbox?: number[] }
 
 export interface ShapeIdParams {
   shape_id: string;
@@ -28,6 +32,10 @@ export const measureVolume: CommandDef<ShapeIdParams, { volume: number }> = {
   capability: 'read',
   paramsSchema: shapeIdSchema,
   async run(params, ctx) {
+    if (isGmshShape(ctx.getState(), params.shape_id)) {
+      const m = await ctx.rpc.request<GmshMeasure>('gmsh.measure', { shape_id: params.shape_id });
+      return { ok: true, result: { volume: m.volume ?? 0 } };
+    }
     const r = await ctx.rpc.request<{ volume: number }>('cad.measure.volume', { shape_id: params.shape_id });
     return { ok: true, result: r };
   },
@@ -43,6 +51,10 @@ export const measureSurfaceArea: CommandDef<ShapeIdParams, { area: number }> = {
   capability: 'read',
   paramsSchema: shapeIdSchema,
   async run(params, ctx) {
+    if (isGmshShape(ctx.getState(), params.shape_id)) {
+      const m = await ctx.rpc.request<GmshMeasure>('gmsh.measure', { shape_id: params.shape_id });
+      return { ok: true, result: { area: m.surface_area ?? 0 } };
+    }
     const r = await ctx.rpc.request<{ area: number }>('cad.measure.surface_area', { shape_id: params.shape_id });
     return { ok: true, result: r };
   },
@@ -58,6 +70,11 @@ export const measureCenterOfMass: CommandDef<ShapeIdParams, { x: number; y: numb
   capability: 'read',
   paramsSchema: shapeIdSchema,
   async run(params, ctx) {
+    if (isGmshShape(ctx.getState(), params.shape_id)) {
+      const m = await ctx.rpc.request<GmshMeasure>('gmsh.measure', { shape_id: params.shape_id });
+      const c = m.center_of_mass ?? [0, 0, 0];
+      return { ok: true, result: { x: c[0], y: c[1], z: c[2] } };
+    }
     const r = await ctx.rpc.request<{ x: number; y: number; z: number }>('cad.measure.center_of_mass', {
       shape_id: params.shape_id,
     });
@@ -75,9 +92,120 @@ export const measureBoundingBox: CommandDef<ShapeIdParams, { min: Vec3; max: Vec
   capability: 'read',
   paramsSchema: shapeIdSchema,
   async run(params, ctx) {
+    if (isGmshShape(ctx.getState(), params.shape_id)) {
+      const m = await ctx.rpc.request<GmshMeasure>('gmsh.measure', { shape_id: params.shape_id });
+      const b = m.bbox ?? [0, 0, 0, 0, 0, 0];
+      return { ok: true, result: { min: [b[0], b[1], b[2]], max: [b[3], b[4], b[5]] } };
+    }
     const node = ctx.getState().doc.geometry.nodes[params.shape_id];
     if (!node) return { ok: false, error: { code: 'UNKNOWN_SHAPE', message: `No shape "${params.shape_id}"` } };
     return { ok: true, result: { min: node.bbox.min, max: node.bbox.max } };
+  },
+};
+
+function bboxCenter(b: { min: Vec3; max: Vec3 }): Vec3 {
+  return [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2];
+}
+
+function distance(a: Vec3, b: Vec3): number {
+  return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
+/** Closest gap between two AABBs (0 if they overlap/touch). */
+function bboxGap(a: { min: Vec3; max: Vec3 }, b: { min: Vec3; max: Vec3 }): number {
+  let s = 0;
+  for (let k = 0; k < 3; k++) {
+    const sep = Math.max(0, a.min[k] - b.max[k], b.min[k] - a.max[k]);
+    s += sep * sep;
+  }
+  return Math.sqrt(s);
+}
+
+export interface MeasureDistanceParams {
+  a: string;
+  b: string;
+}
+
+export interface MeasureDistanceResult {
+  centerDistance: number;
+  gap: number;
+  centerA: Vec3;
+  centerB: Vec3;
+}
+
+export const measureDistance: CommandDef<MeasureDistanceParams, MeasureDistanceResult> = {
+  id: 'measure.distance',
+  category: 'measure',
+  group: 'Extent',
+  title: 'Distance',
+  titleKo: '거리',
+  description:
+    'Distance between two shapes (by id): center-to-center distance and the closest gap between their bounding boxes (0 if they overlap). Lets the AI check clearances and spacing.',
+  capability: 'read',
+  paramsSchema: {
+    type: 'object',
+    properties: { a: { type: 'string' }, b: { type: 'string' } },
+    required: ['a', 'b'],
+  },
+  async run(params, ctx) {
+    const tree = ctx.getState().doc.geometry.nodes;
+    const na = tree[params.a];
+    const nb = tree[params.b];
+    if (!na || !nb) {
+      const missing = !na ? params.a : params.b;
+      return { ok: false, error: { code: 'UNKNOWN_SHAPE', message: `No shape "${missing}"` } };
+    }
+    const centerA = bboxCenter(na.bbox);
+    const centerB = bboxCenter(nb.bbox);
+    return {
+      ok: true,
+      result: { centerDistance: distance(centerA, centerB), gap: bboxGap(na.bbox, nb.bbox), centerA, centerB },
+    };
+  },
+};
+
+export interface MeasureAngleParams {
+  a: string;
+  b?: string;
+  direction?: [number, number, number];
+}
+
+export interface MeasureAngleResult {
+  angle_deg: number;
+  axis_a: number[];
+  axis_b: number[];
+  a: string;
+  b: string;
+}
+
+export const measureAngle: CommandDef<MeasureAngleParams, MeasureAngleResult> = {
+  id: 'measure.angle',
+  category: 'measure',
+  group: 'Extent',
+  title: 'Angle',
+  titleKo: '각도',
+  description:
+    "Angle (0–90°, orientation-free) between two shapes' principal axes, or between shape `a`'s principal axis and an explicit direction [x,y,z]. Works for imported meshes too (PCA on the tessellated vertices). Use it to check part alignment/orientation.",
+  capability: 'read',
+  paramsSchema: {
+    type: 'object',
+    properties: {
+      a: { type: 'string' },
+      b: { type: 'string' },
+      direction: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+    },
+    required: ['a'],
+  },
+  async run(params, ctx) {
+    if (!params.b && !params.direction) {
+      return { ok: false, error: { code: 'BAD_PARAMS', message: "need shape 'b' or a 'direction'" } };
+    }
+    const r = await ctx.rpc.request<MeasureAngleResult>('cad.measure.shape_angle', {
+      a: params.a,
+      ...(params.b ? { b: params.b } : {}),
+      ...(params.direction ? { direction: params.direction } : {}),
+    });
+    return { ok: true, result: r };
   },
 };
 
@@ -86,4 +214,6 @@ export function registerMeasureCommands(registry: CommandRegistry): void {
   registry.register(measureSurfaceArea);
   registry.register(measureCenterOfMass);
   registry.register(measureBoundingBox);
+  registry.register(measureDistance);
+  registry.register(measureAngle);
 }

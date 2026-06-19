@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createCore } from '../index';
+import { createInitialState } from '../state';
 import { createMcpBridge } from '../mcp/bridge';
 import { createMockRpcClient } from '../transport/rpcClient';
 import type { JsonObject } from '../types';
@@ -93,6 +94,20 @@ describe('OpenUSD / OpenVDB export commands', () => {
     const vdb = await core.dispatcher.dispatch({ commandId: 'results.export_vdb', params: { field: 'pressure', path: '/tmp/f.vdb' }, source: 'agent' });
     expect((vdb.result as { voxels: number }).voxels).toBe(256);
   });
+
+  it('exports the solved fields to a VTK file', async () => {
+    const rpc = createMockRpcClient((method: string, params: JsonObject) => {
+      if (method === 'field.export_vtk') {
+        expect(params.path).toBe('/out/run.vtk');
+        return { ok: true, path: '/out/run.vtk', fields: 5, cells: 400 };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const r = await core.dispatcher.dispatch({ commandId: 'results.export_vtk', params: { path: '/out/run.vtk' }, source: 'agent' });
+    expect(r.ok).toBe(true);
+    expect((r.result as { fields: number }).fields).toBe(5);
+  });
 });
 
 describe('Solver→UI field contour', () => {
@@ -139,5 +154,169 @@ describe('Vector / streamline viz commands', () => {
     await core.dispatcher.dispatch({ commandId: 'results.set_viz', params: { showVectors: true, vectorScale: 2 }, source: 'agent' });
     expect(core.store.getState().viz.showVectors).toBe(true);
     expect(core.store.getState().viz.vectorScale).toBe(2);
+  });
+
+  it('extracts an isosurface and toggles its viz state', async () => {
+    const rpc = createMockRpcClient((method: string, params: JsonObject) => {
+      if (method === 'field.isosurface') {
+        expect(params.field).toBe('velocity_magnitude');
+        return { positions: [0, 0, 0, 1, 0, 0, 0, 1, 0], triangle_count: 1, isovalue: params.isovalue ?? 0.5, field: 'velocity_magnitude' };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const iso = await core.dispatcher.dispatch({
+      commandId: 'results.isosurface',
+      params: { field: 'velocity_magnitude', isovalue: 0.5 },
+      source: 'agent',
+    });
+    expect(iso.ok).toBe(true);
+    expect((iso.result as { triangle_count: number }).triangle_count).toBe(1);
+
+    await core.dispatcher.dispatch({ commandId: 'results.set_viz', params: { showIsosurface: true, isovalue: 0.3 }, source: 'agent' });
+    expect(core.store.getState().viz.showIsosurface).toBe(true);
+    expect(core.store.getState().viz.isovalue).toBe(0.3);
+  });
+
+  it('computes vorticity and registers it as a selectable field', async () => {
+    const rpc = createMockRpcClient((method: string) => {
+      if (method === 'field.vorticity') return { field: 'vorticity_magnitude', min: 0, max: 12, mean: 3 };
+      return {};
+    });
+    const seeded = createInitialState();
+    seeded.results = { availableFields: ['velocity_magnitude'], activeField: 'velocity_magnitude', fieldStats: { velocity_magnitude: { min: 0, max: 1, mean: 0.5 } } };
+    const core = createCore({ rpc, initialState: seeded });
+    const r = await core.dispatcher.dispatch({ commandId: 'results.vorticity', params: {}, source: 'agent' });
+    expect(r.ok).toBe(true);
+    const res = core.store.getState().results;
+    expect(res?.availableFields).toContain('vorticity_magnitude');
+    expect(res?.activeField).toBe('vorticity_magnitude');
+    expect(res?.fieldStats['vorticity_magnitude']?.max).toBe(12);
+  });
+
+  it('probes a field value at a point', async () => {
+    const rpc = createMockRpcClient((method: string, params: JsonObject) => {
+      if (method === 'field.probe') {
+        expect(params.field).toBe('pressure');
+        expect(params.point).toEqual([1, 2, 0]);
+        return { field: 'pressure', value: 42, cell: 7, cell_center: [1.1, 2.0, 0.0], distance: 0.1, point: [1, 2, 0] };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const r = await core.dispatcher.dispatch({
+      commandId: 'results.probe',
+      params: { field: 'pressure', point: [1, 2, 0] },
+      source: 'agent',
+    });
+    expect(r.ok).toBe(true);
+    expect((r.result as { value: number }).value).toBe(42);
+  });
+
+  it('computes scalar objectives from the current fields', async () => {
+    const rpc = createMockRpcClient((method: string) => {
+      if (method === 'field.objective') {
+        return { kinetic_energy: 12.5, max_velocity: 2, mean_velocity: 0.8, min_pressure: -3, max_pressure: 5, mean_pressure: 1, pressure_range: 8 };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const r = await core.dispatcher.dispatch({ commandId: 'results.objective', params: {}, source: 'agent' });
+    expect(r.ok).toBe(true);
+    expect((r.result as { kinetic_energy: number }).kinetic_energy).toBe(12.5);
+    expect((r.result as { pressure_range: number }).pressure_range).toBe(8);
+  });
+
+  it('computes the Q-criterion as a selectable field', async () => {
+    const rpc = createMockRpcClient((method: string) => {
+      if (method === 'field.qcriterion') return { field: 'q_criterion', min: -5, max: 20, mean: 1.5 };
+      return {};
+    });
+    const seeded = createInitialState();
+    seeded.results = { availableFields: ['velocity_magnitude'], activeField: 'velocity_magnitude', fieldStats: {} };
+    const core = createCore({ rpc, initialState: seeded });
+    await core.dispatcher.dispatch({ commandId: 'results.qcriterion', params: {}, source: 'agent' });
+    const res = core.store.getState().results;
+    expect(res?.availableFields).toContain('q_criterion');
+    expect(res?.activeField).toBe('q_criterion');
+  });
+});
+
+describe('CAD import → feature tree', () => {
+  it('imports a mesh file as a tree node with its bbox', async () => {
+    const rpc = createMockRpcClient((method: string, params: JsonObject) => {
+      if (method === 'cad.import.mesh_to_tree') {
+        expect(params.path).toBe('/models/bracket.stl');
+        return {
+          shape_id: 'shape_7',
+          arena_id: 0,
+          kind: 'imported_stl',
+          triangle_count: 12,
+          vertex_count: 8,
+          bbox: { min: [-1, -1, -1], max: [1, 1, 1] },
+        };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const r = await core.dispatcher.dispatch({
+      commandId: 'io.import_mesh',
+      params: { path: '/models/bracket.stl' },
+      source: 'agent',
+    });
+    expect(r.ok).toBe(true);
+    const tree = core.store.getState().doc.geometry;
+    expect(tree.roots).toContain('shape_7');
+    const node = tree.nodes['shape_7'];
+    expect(node.kind).toBe('imported_stl');
+    expect(node.name).toBe('bracket.stl');
+    expect(node.bbox.max).toEqual([1, 1, 1]);
+    expect(node.visible).toBe(true);
+  });
+
+  it('imports a STEP file as a faceted solid when faces reconstruct', async () => {
+    const rpc = createMockRpcClient((method: string) => {
+      if (method === 'cad.import.step_mesh') {
+        return {
+          shape_id: 'shape_9',
+          arena_id: 0,
+          kind: 'imported_step',
+          triangle_count: 12,
+          vertex_count: 8,
+          bbox: { min: [0, 0, 0], max: [2, 1, 1] },
+        };
+      }
+      return {};
+    });
+    const core = createCore({ rpc });
+    const r = await core.dispatcher.dispatch({
+      commandId: 'io.import_step',
+      params: { path: '/cad/bracket.step', name: 'bracket' },
+      source: 'agent',
+    });
+    expect(r.ok).toBe(true);
+    expect((r.result as { faceted: boolean }).faceted).toBe(true);
+    const node = core.store.getState().doc.geometry.nodes['shape_9'];
+    expect(node.kind).toBe('imported_step');
+    expect(node.bbox.max).toEqual([2, 1, 1]);
+  });
+
+  it('imports a STEP file and derives the bbox from its tessellation', async () => {
+    const rpc = createMockRpcClient((method: string) => {
+      if (method === 'cad.import.step') return { shape_id: 'shape_3', arena_id: 3 };
+      if (method === 'cad.tessellate_adaptive') return { positions: [0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4], normals: [], indices: [] };
+      return {};
+    });
+    const core = createCore({ rpc });
+    const r = await core.dispatcher.dispatch({
+      commandId: 'io.import_step',
+      params: { path: 'C:\\cad\\part.step', name: 'part' },
+      source: 'agent',
+    });
+    expect(r.ok).toBe(true);
+    const node = core.store.getState().doc.geometry.nodes['shape_3'];
+    expect(node.name).toBe('part');
+    expect(node.bbox.min).toEqual([0, 0, 0]);
+    expect(node.bbox.max).toEqual([2, 3, 4]);
   });
 });

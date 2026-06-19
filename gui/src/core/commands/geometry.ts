@@ -15,6 +15,7 @@ import type { CommandDef, CommandContext } from '../command';
 import type { CommandRegistry } from '../registry';
 import type { GeometryNode } from '../state';
 import type { PatchOp } from '../patch';
+import { isGmshShape, refreshScene } from './gmsh';
 
 interface PrimitiveResponse {
   shape_id: string;
@@ -124,14 +125,16 @@ export const createPrimitive: CommandDef<CreatePrimitiveParams, PrimitiveRespons
   },
 };
 
-/** Shared implementation for the functional transform features. */
+/** Shared implementation for the functional transform features. `gmshKind`, when
+ *  set, routes a gmsh (OCC) shape to the in-place `gmsh.transform` RPC. */
 function transformCommand(
   id: string,
   method: string,
   title: string,
   titleKo: string,
   extraSchema: JsonObject,
-  buildRpc: (params: JsonObject) => JsonObject
+  buildRpc: (params: JsonObject) => JsonObject,
+  gmshKind?: 'translate' | 'rotate' | 'scale'
 ): CommandDef<JsonObject, PrimitiveResponse> {
   return {
     id,
@@ -148,6 +151,13 @@ function transformCommand(
     },
     async run(params, ctx) {
       const sourceId = params.shape_id as string;
+      // Gmsh (OCC) shape → transform in place and refresh the scene mesh.
+      if (gmshKind && isGmshShape(ctx.getState(), sourceId)) {
+        const resp = await ctx.rpc.request<PrimitiveResponse>('gmsh.transform', {
+          ...buildRpc(params), kind: gmshKind,
+        });
+        return { ok: true, result: resp, statePatch: await refreshScene(ctx, ctx.getState().gmsh.shapeIds) };
+      }
       const source = ctx.getState().doc.geometry.nodes[sourceId];
       if (!source) {
         return { ok: false, error: { code: 'UNKNOWN_SHAPE', message: `No shape "${sourceId}"` } };
@@ -172,7 +182,8 @@ export const translateShape = transformCommand(
   'Translate',
   '이동',
   { properties: { tx: { type: 'number' }, ty: { type: 'number' }, tz: { type: 'number' } } },
-  (p) => ({ shape_id: p.shape_id, tx: p.tx ?? 0, ty: p.ty ?? 0, tz: p.tz ?? 0 })
+  (p) => ({ shape_id: p.shape_id, tx: p.tx ?? 0, ty: p.ty ?? 0, tz: p.tz ?? 0 }),
+  'translate'
 );
 
 export const rotateShape = transformCommand(
@@ -187,7 +198,8 @@ export const rotateShape = transformCommand(
     },
     required: ['angle_deg'],
   },
-  (p) => ({ shape_id: p.shape_id, ax: p.ax ?? 0, ay: p.ay ?? 0, az: p.az ?? 1, angle_deg: p.angle_deg ?? 90 })
+  (p) => ({ shape_id: p.shape_id, ax: p.ax ?? 0, ay: p.ay ?? 0, az: p.az ?? 1, angle_deg: p.angle_deg ?? 90 }),
+  'rotate'
 );
 
 export const scaleShape = transformCommand(
@@ -196,7 +208,8 @@ export const scaleShape = transformCommand(
   'Scale',
   '크기 조절',
   { properties: { sx: { type: 'number' }, sy: { type: 'number' }, sz: { type: 'number' } } },
-  (p) => ({ shape_id: p.shape_id, sx: p.sx ?? 1, sy: p.sy ?? 1, sz: p.sz ?? 1 })
+  (p) => ({ shape_id: p.shape_id, sx: p.sx ?? 1, sy: p.sy ?? 1, sz: p.sz ?? 1 }),
+  'scale'
 );
 
 export const mirrorShape = transformCommand(
@@ -226,6 +239,12 @@ export const deleteShape: CommandDef<DeleteShapeParams, { deleted: boolean }> = 
     required: ['shape_id'],
   },
   async run(params, ctx) {
+    // Gmsh (OCC) shape → delete in the gmsh model and refresh the scene mesh.
+    if (isGmshShape(ctx.getState(), params.shape_id)) {
+      await ctx.rpc.request('gmsh.delete', { shape_id: params.shape_id });
+      const ids = ctx.getState().gmsh.shapeIds.filter((x) => x !== params.shape_id);
+      return { ok: true, result: { deleted: true }, statePatch: await refreshScene(ctx, ids) };
+    }
     const tree = ctx.getState().doc.geometry;
     if (!tree.nodes[params.shape_id]) {
       return { ok: false, error: { code: 'UNKNOWN_SHAPE', message: `No shape "${params.shape_id}"` } };

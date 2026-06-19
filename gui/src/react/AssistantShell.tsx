@@ -16,6 +16,7 @@ import { createCore, createInitialState, type Core, type ViewDefaults } from '..
 import { CoreProvider, useAppState } from './CoreContext';
 import { ChatPanel } from './ChatPanel';
 import { ViewportV2 } from './engine/ViewportV2';
+import { McpControlResponder } from './McpControlResponder';
 
 const DEFAULTS_KEY = 'gfd.viewDefaults.v1';
 
@@ -128,6 +129,7 @@ export function AssistantShell({ core }: { core?: Core }) {
 
   return (
     <CoreProvider core={ownCore}>
+      <McpControlResponder />
       <Shell />
     </CoreProvider>
   );

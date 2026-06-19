@@ -1,0 +1,10 @@
+[package]
+name = "gfd-geo"
+version = "0.1.0"
+edition = "2021"
+description = "GFD geospatial I/O — DEM (terrain), CRS/georeferencing, IFC (BIM). Flood plan Layer 1."
+
+[dependencies]
+gfd-core = { path = "../gfd-core" }
+thiserror = { workspace = true }
+serde = { workspace = true }

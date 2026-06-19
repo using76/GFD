@@ -95,6 +95,12 @@ pub struct SimpleSolver {
     /// External momentum damping coefficient per cell [N*s/m^4].
     /// Used by solidification (Carman-Kozeny damping) and other couplings.
     external_momentum_damping: Option<Vec<f64>>,
+    /// Immersed-boundary solid mask (true = cell is inside a solid body). Unlike
+    /// `external_momentum_damping` (a physical coefficient), this is a geometric
+    /// blockage: the penalty is auto-scaled to dominate each cell's own momentum
+    /// diagonal (K·a_p), so velocity is driven to ~0 there regardless of cell
+    /// size / material / Reynolds number, with bounded matrix conditioning.
+    immersed_solid_mask: Option<Vec<bool>>,
     /// External per-cell momentum body force [N/m^3], (fx,fy,fz) per cell.
     /// Used by pluggable expression source terms (Phase 7): S_i += f[i][comp] * V.
     external_momentum_source: Option<Vec<[f64; 3]>>,
@@ -150,6 +156,7 @@ impl SimpleSolver {
             pc_diag_csr_idx: Vec::new(),
             boussinesq: None,
             external_momentum_damping: None,
+            immersed_solid_mask: None,
             external_momentum_source: None,
         }
     }
@@ -184,6 +191,19 @@ impl SimpleSolver {
     /// Clears external momentum damping.
     pub fn clear_external_momentum_damping(&mut self) {
         self.external_momentum_damping = None;
+    }
+
+    /// Mark cells as solid (immersed boundary). The momentum solve penalizes
+    /// each marked cell's diagonal so velocity is driven to ~0 and flow routes
+    /// around the body. The penalty auto-scales to the local diagonal, so it
+    /// works for any cell size / material without manual tuning.
+    pub fn set_immersed_solid_mask(&mut self, mask: Vec<bool>) {
+        self.immersed_solid_mask = Some(mask);
+    }
+
+    /// Clears the immersed-boundary solid mask.
+    pub fn clear_immersed_solid_mask(&mut self) {
+        self.immersed_solid_mask = None;
     }
 
     /// Set a per-cell momentum body force [N/m^3] (fx,fy,fz), e.g. from a
@@ -435,6 +455,24 @@ impl SimpleSolver {
 
         // Internal faces: compute D+F coefficients using cached normal*area
         for (face_idx, &(fi, owner, neigh, _dist, d)) in self.cached_internal_geom.iter().enumerate() {
+            let (idx_on, idx_no) = self.pc_face_csr_idx[face_idx];
+            // True face-flux cut-cell: a face between a fluid and a solid cell is
+            // a no-slip wall (the immersed body surface). Keep wall friction D on
+            // the fluid diagonal (wall velocity 0 → no RHS term), but ZERO the
+            // off-diagonal coupling and skip convection — flow cannot cross it.
+            if let Some(ref mask) = self.immersed_solid_mask {
+                let (so, sn) = (mask.get(owner).copied().unwrap_or(false), mask.get(neigh).copied().unwrap_or(false));
+                if so || sn {
+                    if so != sn {
+                        // Wall face: add diffusion to the fluid side only.
+                        if so { self.ws_a_p[neigh] += d; } else { self.ws_a_p[owner] += d; }
+                    }
+                    // Both-solid or fluid↔solid: no coupling across the interface.
+                    mom_mat.values[idx_on] = 0.0;
+                    mom_mat.values[idx_no] = 0.0;
+                    continue;
+                }
+            }
             let na = self.cached_normal_area[fi];
             let vo = vel_vals[owner];
             let vn = vel_vals[neigh];
@@ -446,7 +484,6 @@ impl SimpleSolver {
             let f_neg = f64::max(-f_flux, 0.0);
             self.ws_a_p[owner] += d + f_pos;
             self.ws_a_p[neigh] += d + f_neg;
-            let (idx_on, idx_no) = self.pc_face_csr_idx[face_idx];
             mom_mat.values[idx_on] = -(d + f_neg);
             mom_mat.values[idx_no] = -(d + f_pos);
         }
@@ -496,6 +533,23 @@ impl SimpleSolver {
             let len = damping.len().min(n);
             for i in 0..len {
                 self.ws_a_p[i] += damping[i] * self.cached_volumes[i];
+            }
+        }
+
+        // Immersed-boundary blockage: penalize each solid cell's momentum
+        // diagonal by a large MULTIPLE of its own just-assembled value
+        // (ws_a_p[i] already holds the local D+F+transient sum). Penalty =
+        // K·max(a_p, ρV) drives solid velocity to ~1/K of the local scale —
+        // scale/material-independent, with condition number bounded by K.
+        if let Some(ref mask) = self.immersed_solid_mask {
+            const K: f64 = 1.0e4;
+            let len = mask.len().min(n);
+            for i in 0..len {
+                if mask[i] {
+                    let floor = self.density * self.cached_volumes[i]; // ρV: never zero
+                    let a_local = self.ws_a_p[i].max(floor);
+                    self.ws_a_p[i] += K * a_local;
+                }
             }
         }
 
@@ -591,6 +645,19 @@ impl SimpleSolver {
             }
         }
 
+        // Pin immersed-solid cells to exactly zero velocity: the body interior
+        // is rigid, so it carries no momentum regardless of residual RHS terms
+        // (pressure gradient, transient, buoyancy) that the diagonal penalty only
+        // attenuates by ~1/K.
+        if let Some(ref mask) = self.immersed_solid_mask {
+            let vel_mut = state.velocity.values_mut();
+            for i in 0..n.min(mask.len()) {
+                if mask[i] {
+                    vel_mut[i] = [0.0, 0.0, 0.0];
+                }
+            }
+        }
+
         // Put momentum matrix back
         self.mom_matrix = Some(mom_mat);
 
@@ -634,6 +701,16 @@ impl SimpleSolver {
 
         // Internal faces: compute coefficients and mass flux
         for (face_idx, &(fi, owner, neigh, dist, _d)) in self.cached_internal_geom.iter().enumerate() {
+            // Cut-cell: no pressure-correction flux may cross a fluid↔solid (wall)
+            // face — leave its off-diagonals at 0 and add no mass-flux source. This
+            // is the load-bearing half of the cut-cell: without it p' still drives
+            // a small leak through the blocked interface.
+            if let Some(ref mask) = self.immersed_solid_mask {
+                let (so, sn) = (mask.get(owner).copied().unwrap_or(false), mask.get(neigh).copied().unwrap_or(false));
+                if so || sn {
+                    continue;
+                }
+            }
             let ra_o = self.cached_volumes[owner] / self.a_p_momentum[owner];
             let ra_n = self.cached_volumes[neigh] / self.a_p_momentum[neigh];
             let ra_f = 0.5 * (ra_o + ra_n);
@@ -709,6 +786,25 @@ impl SimpleSolver {
                         pc_mat.values[idx] = if self.pc_col_idx[idx] == cell_id { 1.0 } else { 0.0 };
                     }
                     sources_pc[cell_id] = 0.0;
+                }
+            }
+        }
+
+        // Cut-cell: pin p' = 0 in every solid cell. All of a solid cell's faces
+        // are now wall faces (skipped above), so its row would otherwise be
+        // all-zero (singular). Identity row keeps the system solvable. Also pin
+        // any FLUID cell left with a zero diagonal (fully enclosed by solids /
+        // walls) — otherwise the linear solve is singular.
+        if self.immersed_solid_mask.is_some() {
+            let mask = self.immersed_solid_mask.clone();
+            let is_solid = |i: usize| mask.as_ref().map_or(false, |m| m.get(i).copied().unwrap_or(false));
+            for i in 0..n {
+                if is_solid(i) || pc_mat.values[self.pc_diag_csr_idx[i]] == 0.0 {
+                    let (start, end) = (self.pc_row_ptr[i], self.pc_row_ptr[i + 1]);
+                    for idx in start..end {
+                        pc_mat.values[idx] = if self.pc_col_idx[idx] == i { 1.0 } else { 0.0 };
+                    }
+                    sources_pc[i] = 0.0;
                 }
             }
         }
@@ -838,6 +934,14 @@ impl SimpleSolver {
             let owner = face.owner_cell;
             let na = self.cached_normal_area[fi];
             if let Some(neighbor) = face.neighbor_cell {
+                // Cut-cell: a wall face carries no p' flux — skip it so neither
+                // fluid cell sees a spurious gradient jump from inside the solid.
+                if let Some(ref mask) = self.immersed_solid_mask {
+                    let (so, sn) = (mask.get(owner).copied().unwrap_or(false), mask.get(neighbor).copied().unwrap_or(false));
+                    if so || sn {
+                        continue;
+                    }
+                }
                 let phi_f = 0.5 * (p_prime[owner] + p_prime[neighbor]);
                 let c0 = phi_f * na[0];
                 let c1 = phi_f * na[1];
@@ -858,6 +962,12 @@ impl SimpleSolver {
 
         let vel_mut = state.velocity.values_mut();
         for i in 0..n {
+            // Cut-cell: solid cells stay pinned at 0 — never correct them.
+            if let Some(ref mask) = self.immersed_solid_mask {
+                if mask.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+            }
             // ra * inv_vol = (V / a_P) * (1 / V) = 1 / a_P
             let inv_ap = 1.0 / self.a_p_momentum[i];
             vel_mut[i][0] -= inv_ap * grad_pp[i][0];
@@ -899,6 +1009,14 @@ impl SimpleSolver {
 
         // Internal faces: use cached geometry (avoids Face struct access)
         for &(fi, owner, neigh, _dist, _d) in &self.cached_internal_geom {
+            // Cut-cell: a fluid↔solid (or solid↔solid) face is a zero-flux wall —
+            // exclude it from the imbalance, matching the momentum / pcorr loops.
+            // Otherwise the residual plateaus at a nonzero floor and masked runs
+            // never report convergence.
+            if let Some(ref mask) = self.immersed_solid_mask {
+                let (so, sn) = (mask.get(owner).copied().unwrap_or(false), mask.get(neigh).copied().unwrap_or(false));
+                if so || sn { continue; }
+            }
             let na = self.cached_normal_area[fi];
             let vo = vel_vals[owner];
             let vn = vel_vals[neigh];
@@ -1548,5 +1666,85 @@ mod tests {
         let mag_d: f64 = vel_d.iter().map(|v| v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sum();
         assert!(mag_d < mag_no * 0.5,
             "Large damping should reduce velocity: no_damp={}, damp={}", mag_no.sqrt(), mag_d.sqrt());
+    }
+
+    #[test]
+    fn test_immersed_solid_mask_blocks_marked_cells() {
+        // Marking cells solid (auto-scaled K·a_p penalty) drives their velocity to
+        // ~0 over a few iterations, regardless of the absolute material scale.
+        let (mesh, bv, bp, wp) = make_3x3x1_lid_driven_cavity();
+        let n = mesh.num_cells();
+        let (density, viscosity) = (1.0, 0.1);
+        let mut state = FluidState::new(n);
+        for i in 0..n { let _ = state.density.set(i, density); let _ = state.viscosity.set(i, viscosity); }
+        let mut solver = SimpleSolver::new(density, viscosity);
+        solver.alpha_u = 0.7; solver.alpha_p = 0.3;
+        // Mark the center cell solid.
+        let solid = n / 2;
+        let mut mask = vec![false; n];
+        mask[solid] = true;
+        solver.set_immersed_solid_mask(mask);
+        for _ in 0..30 {
+            let _ = solver.solve_step_with_bcs(&mut state, &mesh, &bv, &bp, &wp).unwrap();
+        }
+        let vel = state.velocity.values();
+        let solid_speed = (vel[solid][0].powi(2) + vel[solid][1].powi(2) + vel[solid][2].powi(2)).sqrt();
+        // Reference: max speed anywhere (the lid drives the flow).
+        let max_speed = vel.iter().map(|v| (v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt()).fold(0.0, f64::max);
+        assert!(max_speed > 1e-6, "flow should develop somewhere");
+        assert!(solid_speed < max_speed * 1e-2,
+            "solid cell speed {} should be «  max {}", solid_speed, max_speed);
+    }
+
+    #[test]
+    fn test_cut_cell_pins_solid_exactly() {
+        // Face-flux cut-cell + pin: a solid cell ends at EXACTLY zero velocity
+        // (the rigid-body interior), not just the ~1/K residual the diagonal
+        // penalty alone leaves. Exercises the momentum/pcorr wall-face skips and
+        // the explicit post-solve pin; the linear solves must still converge.
+        let (mesh, bv, bp, wp) = make_3x3x1_lid_driven_cavity();
+        let n = mesh.num_cells();
+        let (density, viscosity) = (1.0, 0.1);
+        let mut state = FluidState::new(n);
+        for i in 0..n { let _ = state.density.set(i, density); let _ = state.viscosity.set(i, viscosity); }
+        let mut solver = SimpleSolver::new(density, viscosity);
+        solver.alpha_u = 0.7; solver.alpha_p = 0.3;
+        let solid = n / 2;
+        let mut mask = vec![false; n];
+        mask[solid] = true;
+        solver.set_immersed_solid_mask(mask);
+        for _ in 0..40 {
+            let _ = solver.solve_step_with_bcs(&mut state, &mesh, &bv, &bp, &wp).unwrap();
+        }
+        let vel = state.velocity.values();
+        // The solid cell is pinned exactly to zero (the rigid interior).
+        assert_eq!(vel[solid], [0.0, 0.0, 0.0], "solid cell must be pinned to exactly zero");
+        // The surrounding flow still develops (the solve converged around the body).
+        let max_speed = vel.iter().enumerate()
+            .filter(|(i, _)| *i != solid)
+            .map(|(_, v)| (v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt())
+            .fold(0.0, f64::max);
+        assert!(max_speed > 1e-6, "flow should develop around the body");
+    }
+
+    #[test]
+    fn test_cut_cell_residual_converges() {
+        // The continuity residual (the returned convergence signal) must drop for
+        // a masked run — it excludes the blocked wall-face flux. A bug would leave
+        // it stuck at a nonzero floor.
+        let (mesh, bv, bp, wp) = make_3x3x1_lid_driven_cavity();
+        let n = mesh.num_cells();
+        let mut state = FluidState::new(n);
+        for i in 0..n { let _ = state.density.set(i, 1.0); let _ = state.viscosity.set(i, 0.1); }
+        let mut solver = SimpleSolver::new(1.0, 0.1);
+        solver.alpha_u = 0.7; solver.alpha_p = 0.3;
+        let mut mask = vec![false; n];
+        mask[n / 2] = true;
+        solver.set_immersed_solid_mask(mask);
+        let mut last = f64::INFINITY;
+        for _ in 0..80 {
+            last = solver.solve_step_with_bcs(&mut state, &mesh, &bv, &bp, &wp).unwrap();
+        }
+        assert!(last < 1e-4, "masked continuity residual should converge, got {}", last);
     }
 }

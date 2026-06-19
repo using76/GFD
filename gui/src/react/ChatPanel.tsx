@@ -16,11 +16,11 @@ import {
   createOllamaProvider,
   runAgentTurn,
   type AgentEvent,
-  type AppState,
   type LlmMessage,
   type LlmProvider,
 } from '../core';
 import { useCore } from './CoreContext';
+import { SYSTEM_PROMPT, sceneContext } from './agentPrompt';
 
 type ProviderId = 'claude' | 'ollama' | 'mock';
 
@@ -29,65 +29,6 @@ type ChatItem =
   | { kind: 'assistant'; id: number; text: string }
   | { kind: 'action'; id: number; callId: string; name: string; input: string; status: 'running' | 'ok' | 'fail'; detail?: string; startedAt?: number }
   | { kind: 'error'; id: number; text: string };
-
-const SYSTEM_PROMPT = `You are the GFD workbench assistant. GFD is a multiphysics CFD/thermal/solid
-solver with a pure-Rust CAD kernel. You operate the workbench by CALLING TOOLS —
-each tool is a command (geometry, sketch, mesh, setup, calc, results, measure,
-repair, physics, view, selection, display). The user cannot click a ribbon; you
-are the only way to act.
-
-BUILD PRECISELY — never place things "roughly":
-- Every shape lives in a shared 3D coordinate system (meters, +Z up). The
-  "Current scene state" below lists each existing shape's id, kind, position and
-  bounding box — READ IT before acting and reuse those exact ids/coordinates.
-- Choose explicit dimensions and positions. To place a shape relative to another,
-  compute coordinates from the listed bbox (e.g. to stack on top of a box whose
-  bbox max z is 1, set the new shape's position z so it sits at z=1).
-- After creating/transforming, briefly state the resulting position/size.
-- Prefer view.set_camera('iso') + a screenshot to verify, but do NOT spam tools.
-
-PROFESSIONAL CAD / FLUID PREP / MESH — use the gmsh (OpenCASCADE) tools:
-- gmsh.primitive — B-Rep solids (box/sphere/cylinder/cone) at explicit [x,y,z]
-- gmsh.boolean — real cut/fuse/common
-- gmsh.heal — fix small/degenerate edges & faces, sew (shape refinement)
-- gmsh.enclosure — padded box around the solids (fluid-domain bounds)
-- gmsh.extract_fluid — enclosure − solids = the watertight fluid region
-- gmsh.mesh — tetrahedral volume mesh of the fluid domain
-Typical CFD prep the user wants: gmsh.primitive (the part) → gmsh.heal →
-gmsh.enclosure → gmsh.extract_fluid → gmsh.mesh → calc.run. Prefer these gmsh.*
-tools over the simpler legacy geometry.*/mesh.generate when the user asks to
-clean up geometry, build an enclosure/fluid region, or mesh.
-
-Confirm each result in 1-2 sentences. Prefer concrete tool calls over long explanations.`;
-
-/** Round for compact display. */
-function fmt(n: number): number {
-  return Number.isFinite(n) ? Math.round(n * 1000) / 1000 : n;
-}
-
-/**
- * A compact, token-bounded snapshot of the scene injected into the system prompt
- * each turn, so the AI knows exactly what exists and where (ids + coordinates)
- * without calling get_state (which returns a huge document).
- */
-function sceneContext(state: AppState): string {
-  const nodes = Object.values(state.doc.geometry.nodes);
-  const shown = nodes.slice(0, 40);
-  const lines = shown.map((n) => {
-    const { min, max } = n.bbox;
-    const p = n.transform.position;
-    return `- ${n.name} (id=${n.id}, ${n.kind}) pos[${fmt(p[0])},${fmt(p[1])},${fmt(p[2])}] bbox min[${fmt(min[0])},${fmt(min[1])},${fmt(min[2])}] max[${fmt(max[0])},${fmt(max[1])},${fmt(max[2])}]${n.visible ? '' : ' (hidden)'}`;
-  });
-  const more = nodes.length > shown.length ? `\n…(+${nodes.length - shown.length} more shapes)` : '';
-  const geom = nodes.length ? `Legacy shapes (${nodes.length}):\n${lines.join('\n')}${more}` : 'No legacy shapes.';
-  const mesh = state.mesh ? `${state.mesh.cellCount} cells` : 'none';
-  const fields = state.results?.availableFields?.length ? state.results.availableFields.join(', ') : 'none';
-  const sel = state.selection.ids.length ? state.selection.ids.join(', ') : 'none';
-  const g = state.gmsh;
-  const occ = g.shapeIds.length ? `OCC/Gmsh solids: ${g.shapeIds.join(', ')}` : 'OCC/Gmsh solids: none yet';
-  const gmesh = g.meshStats ? ` | gmsh mesh: ${g.meshStats.nodes} nodes / ${g.meshStats.tets} tets` : '';
-  return `Current scene state (use these exact ids and coordinates):\n${geom}\n${occ}${gmesh}\nselection: ${sel} | mesh: ${mesh} | solver: ${state.solver.status} | result fields: ${fields}`;
-}
 
 const SUGGESTIONS = [
   'Create a 2×1×1 box at the origin',

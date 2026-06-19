@@ -22,9 +22,9 @@ pub use document::Document;
 mod integration_tests {
     use super::*;
     use bool_::compound_merge;
-    use feature::{box_solid, pad_polygon_xy, revolve_profile_z, sphere_solid};
+    use feature::{box_solid, cone_solid, cylinder_solid, pad_polygon_xy, plate_with_hole_solid, revolve_profile_z, sphere_solid};
     use heal::check_validity;
-    use measure::{bbox_volume, surface_area};
+    use measure::{bbox_volume, surface_area, trimesh_is_closed, volume};
     use tessel::{tessellate, TessellationOptions};
     use topo::ShapeArena;
 
@@ -33,9 +33,121 @@ mod integration_tests {
         let mut arena = ShapeArena::new();
         let id = box_solid(&mut arena, 2.0, 2.0, 2.0).unwrap();
         let mesh = tessellate(&arena, id, TessellationOptions::default()).unwrap();
-        // 6 faces × (32 × 16 × 2) triangles by default.
-        assert_eq!(mesh.indices.len() / 3, 6 * 32 * 16 * 2);
+        // Planar faces are now bounded to their wire polygon (ear-clipped), so a
+        // box is 6 quad faces × 2 triangles = 12, with the TRUE extent — not the
+        // old clamped-±1 surface grid (6 × 32 × 16 × 2).
+        assert_eq!(mesh.indices.len() / 3, 6 * 2);
+        // True extent: a 2×2×2 box spans [-1,1]^3 (not the old oversized shell).
+        let (mut mn, mut mx) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for p in &mesh.positions {
+            for k in 0..3 {
+                if p[k] < mn[k] { mn[k] = p[k]; }
+                if p[k] > mx[k] { mx[k] = p[k]; }
+            }
+        }
+        assert_eq!(mn, [-1.0, -1.0, -1.0]);
+        assert_eq!(mx, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn cylinder_caps_are_watertight_discs() {
+        // Cylinder caps used to tessellate as clamped ±1 squares; now they are
+        // real discs (a Circle-edge wire → center-fan), so the tessellated solid
+        // is watertight after a weld and bounded to the true radius.
+        let mut arena = ShapeArena::new();
+        let id = cylinder_solid(&mut arena, 0.5, 2.0).unwrap();
+        let mut mesh = tessellate(&arena, id, TessellationOptions::default()).unwrap();
+        // True radial extent: x,y ∈ [-0.5, 0.5] (NOT the old ±1 square caps).
+        let (mut mn, mut mx) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for p in &mesh.positions {
+            for k in 0..3 {
+                if p[k] < mn[k] { mn[k] = p[k]; }
+                if p[k] > mx[k] { mx[k] = p[k]; }
+            }
+        }
+        assert!((mn[0] + 0.5).abs() < 1e-5 && (mx[0] - 0.5).abs() < 1e-5, "x extent {:?}..{:?} != ±0.5", mn[0], mx[0]);
+        assert!((mn[2]).abs() < 1e-5 && (mx[2] - 2.0).abs() < 1e-5, "z extent should be [0,2]");
+        // Watertight after welding coincident rim vertices (cap rim shares the
+        // lateral wall's vertices because both sample u_steps angles).
+        let removed = mesh.weld(1e-4);
+        mesh.prune_unused_vertices();
+        assert!(removed > 0, "weld should merge duplicated face-corner vertices");
+        assert!(trimesh_is_closed(&mesh.indices), "welded cylinder must be watertight (caps closed)");
+    }
+
+    #[test]
+    fn cylinder_volume_is_analytic() {
+        // Wire-bounded caps used to make divergence_volume silently return 0;
+        // now cylinder/cone report exact closed-form volume.
+        let mut arena = ShapeArena::new();
+        let cyl = cylinder_solid(&mut arena, 0.5, 2.0).unwrap();
+        let v = volume(&arena, cyl).unwrap();
+        let expect = std::f64::consts::PI * 0.5 * 0.5 * 2.0; // πr²h
+        assert!((v - expect).abs() < 1e-9, "cylinder volume {} != {}", v, expect);
+    }
+
+    #[test]
+    fn full_cone_r1_zero_tessellates_without_nan() {
+        // r1=0 (apex at bottom) must not emit a radius-0 NaN disc cap.
+        let mut arena = ShapeArena::new();
+        let id = cone_solid(&mut arena, 0.0, 0.5, 2.0).unwrap();
+        let mesh = tessellate(&arena, id, TessellationOptions::default()).unwrap();
         assert!(!mesh.positions.is_empty());
+        assert!(
+            mesh.positions.iter().all(|p| p.iter().all(|c| c.is_finite())),
+            "cone r1=0 tessellation must not contain NaN vertices"
+        );
+    }
+
+    #[test]
+    fn step_brep_roundtrips_box_topology_and_volume() {
+        use io::{export_step, import_step_brep};
+        use topo::{collect_by_kind, EdgeFaceMap, ShapeKind};
+        // Write a box solid, reconstruct its real B-Rep, and validate not just
+        // counts/volume but TOPOLOGY: the writer now shares vertices/edges, so the
+        // reconstruction is watertight (8 verts, 12 edges, every edge shared by 2
+        // faces) — not 24 unshared verts/edges.
+        let mut src = ShapeArena::new();
+        let bid = box_solid(&mut src, 2.0, 3.0, 4.0).unwrap();
+        let path = std::env::temp_dir().join(format!("gfd_cad_brep_{}.stp",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        export_step(&path, &src, bid).unwrap();
+        let mut dst = ShapeArena::new();
+        let root = import_step_brep(&path, &mut dst).unwrap();
+        let _ = std::fs::remove_file(&path);
+        // collect_by_kind counts traversal occurrences; shared topology means the
+        // SAME ShapeId recurs, so unique ids reveal real sharing.
+        let uniq = |k| collect_by_kind(&dst, root, k).into_iter().collect::<std::collections::HashSet<_>>().len();
+        assert_eq!(uniq(ShapeKind::Solid), 1, "one solid");
+        assert_eq!(uniq(ShapeKind::Face), 6, "six faces");
+        assert_eq!(uniq(ShapeKind::Vertex), 8, "eight shared vertices");
+        assert_eq!(uniq(ShapeKind::Edge), 12, "twelve shared edges");
+        // Every face has exactly 4 neighbors across shared edges (watertight box).
+        let map = EdgeFaceMap::build(&dst, root).unwrap();
+        let counts: Vec<usize> = collect_by_kind(&dst, root, ShapeKind::Face)
+            .into_iter().collect::<std::collections::HashSet<_>>()
+            .into_iter().map(|f| map.face_neighbors(f).len()).collect();
+        assert!(counts.iter().all(|&c| c == 4), "each box face should adjoin 4 others, got {:?}", counts);
+        let v = volume(&dst, root).unwrap();
+        assert!((v - 24.0).abs() < 1e-6, "reconstructed box volume {} != 24", v);
+        let mesh = tessellate(&dst, root, TessellationOptions::default()).unwrap();
+        assert!(mesh.indices.len() >= 12, "box B-Rep should tessellate");
+    }
+
+    #[test]
+    fn plate_with_hole_volume_and_tessellation() {
+        // 4×3×1 plate with a 12-gon hole (r=0.5) → volume = box − hole·height,
+        // and the cap tessellation cuts the hole out (multi-wire planar face).
+        let mut arena = ShapeArena::new();
+        let id = plate_with_hole_solid(&mut arena, 4.0, 3.0, 1.0, 2.0, 1.5, 0.5, 12).unwrap();
+        let v = volume(&arena, id).unwrap();
+        let hole_area = 0.5 * 12.0 * 0.5_f64.powi(2) * (std::f64::consts::TAU / 12.0).sin();
+        let expect = 4.0 * 3.0 * 1.0 - hole_area * 1.0;
+        assert!((v - expect).abs() < 1e-9, "plate volume {} != box−hole {}", v, expect);
+        // Holed caps tessellate (the hole is cut, so a cap has fewer triangles
+        // than a solid quad fan would, but the mesh is non-empty).
+        let mesh = tessellate(&arena, id, TessellationOptions::default()).unwrap();
+        assert!(mesh.indices.len() / 3 > 8, "plate-with-hole should tessellate to many triangles");
     }
 
     #[test]

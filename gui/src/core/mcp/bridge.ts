@@ -16,6 +16,7 @@ import type { JsonObject, JsonValue } from '../types';
 import type { JsonSchema } from '../schema';
 import type { Core } from '../index';
 import { createEntityResolver, type EntityRef, type EntityResolver } from '../entity';
+import { runAutoRefine } from '../solver/autoRefine';
 
 export interface McpToolSchema {
   name: string;
@@ -68,13 +69,25 @@ export function createMcpBridge(core: Core): McpBridge {
       schema: { name: 'get_state_summary', description: 'Token-cheap summary: entity counts/names, mesh, solver, results.', inputSchema: EMPTY_SCHEMA },
       handler: async () => {
         const s = core.store.getState();
+        const diag = s.diagnosis as null | { summary?: unknown; issues?: Array<{ code: string; severity: string; message: string }> };
         return ok({
           revision: s.doc.revision,
           shapes: Object.values(s.doc.geometry.nodes).map((n) => ({ id: n.id, name: n.name, kind: n.kind, visible: n.visible })),
           selection: s.selection as unknown as JsonValue,
-          mesh: s.mesh ? { cells: s.mesh.cellCount, nodes: s.mesh.nodeCount } : null,
-          solver: { status: s.solver.status, iteration: s.solver.iteration, residual: s.solver.residual },
+          mesh: s.mesh ? { cells: s.mesh.cellCount, nodes: s.mesh.nodeCount, badCells: s.mesh.badCells ?? 0 } : null,
+          solver: {
+            status: s.solver.status,
+            iteration: s.solver.iteration,
+            residual: s.solver.residual,
+            ...(s.solver.residualsByEq ? { residualsByEq: s.solver.residualsByEq } : {}),
+          },
           results: s.results ? { fields: s.results.availableFields, active: s.results.activeField } : null,
+          diagnosis: diag
+            ? {
+                summary: diag.summary ?? null,
+                issues: (diag.issues ?? []).map((i) => ({ code: i.code, severity: i.severity, message: i.message })),
+              }
+            : null,
         } as JsonValue);
       },
     },
@@ -149,6 +162,27 @@ export function createMcpBridge(core: Core): McpBridge {
         } catch (e) {
           return fail(e instanceof Error ? e.message : String(e));
         }
+      },
+    },
+    auto_refine: {
+      schema: {
+        name: 'auto_refine',
+        description:
+          'Autonomous closed loop: diagnose the current solve, apply the highest-severity fix (relaxation / turbulence model / iterations), re-run the solver, and repeat up to maxRounds until healthy. Returns per-round history + final diagnosis. Requires a mesh + setup so calc.run can execute.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            maxRounds: { type: 'integer', minimum: 1, maximum: 10 },
+            maxIterations: { type: 'integer', minimum: 1 },
+          },
+        },
+      },
+      handler: async (args) => {
+        const result = await runAutoRefine(core, {
+          maxRounds: typeof args.maxRounds === 'number' ? args.maxRounds : undefined,
+          maxIterations: typeof args.maxIterations === 'number' ? args.maxIterations : undefined,
+        });
+        return ok(result as unknown as JsonValue);
       },
     },
     undo: {

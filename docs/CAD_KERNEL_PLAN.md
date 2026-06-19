@@ -300,7 +300,7 @@ FreeCAD Part Design 카피:
 - [x] `TriMesh { positions, normals, indices }`
 - [x] `uv_grid` + per-SurfaceGeom sampler (Plane/Cyl/Sphere/Cone/Torus)
 - [x] 재귀 walker: Compound→Solid→Shell→Face 자동 tessellation
-- [x] 통합 테스트: box 6×32×16×2 triangles, sphere 점들이 unit sphere 위
+- [x] 통합 테스트: box 6×2 triangles (평면 면이 wire 폴리곤으로 ear-clip — 진짜 extent), sphere 점들이 unit sphere 위
 - [x] `earclip::triangulate_polygon` — ear-clipping (convex quad + L-shape tests)
 - [x] Sphere-pole collapsing (removes sliver triangles at ±π/2 latitude)
 - [x] `auto_uv_steps(surface, chord_tol)` + `tessellate_adaptive` — per-face chord-tolerance tessellation

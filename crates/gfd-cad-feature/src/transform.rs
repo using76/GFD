@@ -66,6 +66,29 @@ where
                     dir_xform(p.normal),
                     dir_xform(p.x_axis),
                 )),
+                // A B-spline is defined entirely by its control net, so transform
+                // every control point (degrees/knots/counts are invariant).
+                SurfaceGeom::BSpline(b) => {
+                    let cps = b.control_points.iter().map(|p| xform(*p)).collect();
+                    match gfd_cad_geom::surface::BSplineSurface::new(
+                        b.u_degree, b.v_degree, b.u_control_count, b.v_control_count,
+                        cps, b.u_knots.clone(), b.v_knots.clone(),
+                    ) {
+                        Ok(s) => SurfaceGeom::BSpline(s),
+                        Err(_) => SurfaceGeom::BSpline(b),
+                    }
+                }
+                // NURBS: transform control points; weights/knots are invariant.
+                SurfaceGeom::Nurbs(nrb) => {
+                    let cps = nrb.control_points.iter().map(|p| xform(*p)).collect();
+                    match gfd_cad_geom::surface::NurbsSurface::new(
+                        nrb.u_degree, nrb.v_degree, nrb.u_control_count, nrb.v_control_count,
+                        cps, nrb.weights.clone(), nrb.u_knots.clone(), nrb.v_knots.clone(),
+                    ) {
+                        Ok(s) => SurfaceGeom::Nurbs(s),
+                        Err(_) => SurfaceGeom::Nurbs(nrb),
+                    }
+                }
                 other => other,
             };
             let mut nw = Vec::with_capacity(wires.len());

@@ -20,6 +20,7 @@ members = [
     "crates/gfd-vdb",
     "crates/gfd-gpu",
     "crates/gfd-mesh",
+    "crates/gfd-geo",
     "crates/gfd-cad-geom",
     "crates/gfd-cad-topo",
     "crates/gfd-cad-bool",
@@ -101,6 +102,7 @@ gfd-boundary    = { path = "crates/gfd-boundary" }
 gfd-material    = { path = "crates/gfd-material" }
 gfd-postprocess = { path = "crates/gfd-postprocess" }
 gfd-mesh        = { path = "crates/gfd-mesh" }
+gfd-geo         = { path = "crates/gfd-geo" }
 gfd-cad         = { path = "crates/gfd-cad" }
 gfd-gpu         = { path = "crates/gfd-gpu", optional = true }
 gfd-occt        = { path = "crates/gfd-occt", optional = true }

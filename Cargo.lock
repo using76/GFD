@@ -193,6 +193,7 @@ dependencies = [
  "gfd-discretize",
  "gfd-expression",
  "gfd-fluid",
+ "gfd-geo",
  "gfd-gmsh",
  "gfd-gpu",
  "gfd-io",
@@ -395,6 +396,15 @@ dependencies = [
  "gfd-matrix",
  "gfd-source",
  "gfd-turbulence",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "gfd-geo"
+version = "0.1.0"
+dependencies = [
+ "gfd-core",
  "serde",
  "thiserror",
 ]

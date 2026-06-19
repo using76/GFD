@@ -137,15 +137,21 @@ fn walk(arena: &ShapeArena, id: ShapeId, issues: &mut Vec<ValidityIssue>) -> Hea
     match arena.get(id)? {
         Shape::Vertex { .. } => {}
         Shape::Edge { vertices, .. } => {
-            let v0 = arena.get(vertices[0])?;
-            let v1 = arena.get(vertices[1])?;
-            if let (Shape::Vertex { point: p0 }, Shape::Vertex { point: p1 }) = (v0, v1) {
-                if p0.distance(*p1) < LINEAR_TOL {
-                    issues.push(ValidityIssue {
-                        shape_id: id.0,
-                        kind: "degenerate_edge",
-                        detail: format!("edge {:?} has coincident endpoints", id),
-                    });
+            // A closed-loop edge (full circle on a cylinder/cone cap) legitimately
+            // has the SAME start/end vertex id — a periodic seam, not a degenerate
+            // edge. Only flag coincident endpoints on DISTINCT vertices (e.g. a
+            // revolve r=0 axis stub).
+            if vertices[0] != vertices[1] {
+                let v0 = arena.get(vertices[0])?;
+                let v1 = arena.get(vertices[1])?;
+                if let (Shape::Vertex { point: p0 }, Shape::Vertex { point: p1 }) = (v0, v1) {
+                    if p0.distance(*p1) < LINEAR_TOL {
+                        issues.push(ValidityIssue {
+                            shape_id: id.0,
+                            kind: "degenerate_edge",
+                            detail: format!("edge {:?} has coincident endpoints", id),
+                        });
+                    }
                 }
             }
             for v in vertices { walk(arena, *v, issues)?; }
@@ -480,6 +486,12 @@ fn remove_small_edges_in(arena: &mut ShapeArena, id: ShapeId, tol: f64) -> HealR
 fn collect_small_edges(arena: &ShapeArena, id: ShapeId, tol: f64, out: &mut Vec<ShapeId>) -> HealResult<()> {
     match arena.get(id)? {
         Shape::Edge { vertices, .. } => {
+            // Never treat a closed-loop edge (same start/end vertex — a full circle
+            // cap seam) as a "small edge": its chord is 0 but its arc length is
+            // 2πr. Removing it would destroy a watertight cap.
+            if vertices[0] == vertices[1] {
+                return Ok(());
+            }
             let a = match arena.get(vertices[0])? {
                 Shape::Vertex { point } => *point,
                 _ => return Ok(()),
@@ -533,6 +545,35 @@ mod tests {
         let id = box_solid(&mut arena, 1.0, 1.0, 1.0).unwrap();
         let issues = check_validity(&arena, id).unwrap();
         assert!(issues.is_empty(), "unexpected issues: {:?}", issues);
+    }
+
+    #[test]
+    fn cylinder_cone_closed_cap_edges_are_not_degenerate() {
+        // The cap full-circle edge has vertices [v0,v0] (a periodic seam). It must
+        // NOT be reported as a degenerate_edge.
+        use gfd_cad_feature::{cone_solid, cylinder_solid};
+        let mut arena = ShapeArena::new();
+        let cyl = cylinder_solid(&mut arena, 0.5, 2.0).unwrap();
+        let cyl_issues = check_validity(&arena, cyl).unwrap();
+        assert!(cyl_issues.iter().all(|i| i.kind != "degenerate_edge"), "cylinder: {:?}", cyl_issues);
+        let cone = cone_solid(&mut arena, 1.0, 0.5, 2.0).unwrap();
+        let cone_issues = check_validity(&arena, cone).unwrap();
+        assert!(cone_issues.iter().all(|i| i.kind != "degenerate_edge"), "cone: {:?}", cone_issues);
+    }
+
+    #[test]
+    fn fix_shape_keeps_cylinder_cap_circle_edges() {
+        // remove_small_edges must NOT delete the closed cap circle edges (chord 0
+        // but arc length 2πr), or it would un-watertight the caps.
+        use gfd_cad_feature::cylinder_solid;
+        use gfd_cad_topo::{collect_by_kind, ShapeKind};
+        let mut arena = ShapeArena::new();
+        let cyl = cylinder_solid(&mut arena, 0.5, 2.0).unwrap();
+        let edges_before = collect_by_kind(&arena, cyl, ShapeKind::Edge).len();
+        let opts = HealOptions { tolerance: 1e-6, sew_faces: false, fix_wires: false, remove_small_edges: true, unify_tolerances: false, remove_duplicate_faces: false };
+        let _ = fix_shape(&mut arena, cyl, &opts).unwrap();
+        let edges_after = collect_by_kind(&arena, cyl, ShapeKind::Edge).len();
+        assert_eq!(edges_before, edges_after, "cap circle edges must survive remove_small_edges");
     }
 
     #[test]

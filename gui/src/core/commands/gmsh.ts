@@ -19,8 +19,14 @@ interface TessResult {
   triangle_count: number;
 }
 
+/** True if `id` belongs to the Gmsh (OCC) model rather than the pure-Rust CAD
+ *  geometry tree — so generic geometry/measure commands can route to gmsh.* . */
+export function isGmshShape(state: { gmsh?: { shapeIds?: string[] } }, id: string): boolean {
+  return Array.isArray(state.gmsh?.shapeIds) && state.gmsh!.shapeIds!.includes(id);
+}
+
 /** Re-tessellate the whole Gmsh model and patch `state.gmsh.{mesh,shapeIds}`. */
-async function refreshScene(ctx: CommandContext, shapeIds: string[]): Promise<PatchOp[]> {
+export async function refreshScene(ctx: CommandContext, shapeIds: string[]): Promise<PatchOp[]> {
   let mesh: JsonValue = null;
   try {
     const t = await ctx.rpc.request<TessResult>('gmsh.tessellate', {});

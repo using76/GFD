@@ -22,7 +22,7 @@ pub use brep::{read_brep, write_brep, BrepJson};
 pub use obj::{read_obj, write_obj};
 pub use off::{read_off, write_off};
 pub use ply::{read_ply_ascii, write_ply_ascii};
-pub use step::{read_step_points, summarise_step, write_step, StepSummary};
+pub use step::{read_step_brep, read_step_points, read_step_trimesh, summarise_step, write_step, StepSummary};
 pub use stl::{read_stl, write_stl_ascii, write_stl_binary, StlMesh};
 pub use dxf::write_dxf_3dface;
 pub use vtk::write_vtk_polydata;
@@ -59,6 +59,13 @@ pub fn import_step(path: &Path, arena: &mut ShapeArena) -> IoResult<ShapeId> {
 
 pub fn export_step(path: &Path, arena: &ShapeArena, root: ShapeId) -> IoResult<()> {
     step::write_step(path, arena, root)
+}
+
+/// STEP B-Rep import: reconstructs real topology (vertices/edges/wires/faces/
+/// shells/solids) into `arena`, returning the root shape id. Non-destructive —
+/// pushes into the existing arena like [`import_step`].
+pub fn import_step_brep(path: &Path, arena: &mut ShapeArena) -> IoResult<ShapeId> {
+    step::read_step_brep(path, arena)
 }
 
 pub fn import_iges(_path: &Path, _arena: &mut ShapeArena) -> IoResult<ShapeId> {

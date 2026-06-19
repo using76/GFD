@@ -174,9 +174,59 @@ ipcMain.handle('gfd:status', async () => {
   return { running: gfdProcess !== null && !gfdProcess.killed };
 });
 
+// --- MCP control server -----------------------------------------------------
+// A localhost WebSocket the external MCP stdio bridge (mcp-server.cjs) connects
+// to. It relays {id, op, name?, args?} requests to the renderer's command-core
+// (window.gfdMcp responder) and routes replies back — so an external agent (the
+// Claude Code CLI) drives this running GUI exactly like the in-app chat.
+const MCP_CONTROL_PORT = 8765;
+let mcpWss = null;
+const mcpPending = new Map(); // request id -> WebSocket to reply on
+
+function startMcpControlServer() {
+  let WebSocketServer;
+  try {
+    ({ WebSocketServer } = require('ws'));
+  } catch (e) {
+    console.error('[GFD] MCP control server disabled (ws not available):', e.message);
+    return;
+  }
+  try {
+    mcpWss = new WebSocketServer({ host: '127.0.0.1', port: MCP_CONTROL_PORT });
+  } catch (e) {
+    console.error('[GFD] MCP control server failed to start:', e.message);
+    return;
+  }
+  mcpWss.on('connection', (sock) => {
+    console.log('[GFD] MCP control client connected');
+    sock.on('message', (data) => {
+      let msg;
+      try { msg = JSON.parse(data.toString()); } catch { return; }
+      if (!msg || msg.id === undefined) return;
+      if (!mainWindow || mainWindow.isDestroyed()) {
+        sock.send(JSON.stringify({ id: msg.id, result: { error: 'GFD window not open' } }));
+        return;
+      }
+      mcpPending.set(msg.id, sock);
+      mainWindow.webContents.send('mcp:control', msg);
+    });
+  });
+  mcpWss.on('error', (e) => console.error('[GFD] MCP control server error:', e.message));
+  console.log(`[GFD] MCP control server on ws://127.0.0.1:${MCP_CONTROL_PORT}`);
+}
+
+ipcMain.on('mcp:result', (_event, { id, result }) => {
+  const sock = mcpPending.get(id);
+  mcpPending.delete(id);
+  if (sock && sock.readyState === 1) {
+    sock.send(JSON.stringify({ id, result }));
+  }
+});
+
 app.whenReady().then(() => {
   createWindow();
   spawnGfdBackend();
+  startMcpControlServer();
 });
 
 app.on('window-all-closed', () => {

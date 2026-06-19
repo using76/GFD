@@ -153,8 +153,15 @@ fn walk(arena: &ShapeArena, id: ShapeId, current_face: Option<ShapeId>, out: &mu
             if let Some(f) = current_face {
                 out.edge_to_faces.entry(id).or_default().push(f);
             }
-            for v in vertices {
-                out.vertex_to_edges.entry(*v).or_default().push(id);
+            // A closed-loop edge (full circle: vertices[0] == vertices[1]) has one
+            // distinct incident vertex — register it once, not twice, so
+            // is_manifold_vertex / adjacent_edges_of stay correct.
+            if vertices[0] == vertices[1] {
+                out.vertex_to_edges.entry(vertices[0]).or_default().push(id);
+            } else {
+                for v in vertices {
+                    out.vertex_to_edges.entry(*v).or_default().push(id);
+                }
             }
         }
         Shape::Vertex { .. } => {}

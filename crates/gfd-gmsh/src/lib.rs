@@ -90,6 +90,12 @@ mod backend {
         fn gmshModelOccImportShapes(file_name: *const c_char, out_dim_tags: *mut *mut c_int, out_dim_tags_n: *mut usize, highest_dim_only: c_int, format: *const c_char, ierr: *mut c_int);
         fn gmshModelOccRemoveAllDuplicates(ierr: *mut c_int);
         fn gmshModelOccDilate(dim_tags: *const c_int, dim_tags_n: usize, x: c_double, y: c_double, z: c_double, a: c_double, b: c_double, c: c_double, ierr: *mut c_int);
+        fn gmshModelOccTranslate(dim_tags: *const c_int, dim_tags_n: usize, dx: c_double, dy: c_double, dz: c_double, ierr: *mut c_int);
+        fn gmshModelOccRotate(dim_tags: *const c_int, dim_tags_n: usize, x: c_double, y: c_double, z: c_double, ax: c_double, ay: c_double, az: c_double, angle: c_double, ierr: *mut c_int);
+        fn gmshModelOccRemove(dim_tags: *const c_int, dim_tags_n: usize, recursive: c_int, ierr: *mut c_int);
+        fn gmshModelOccGetMass(dim: c_int, tag: c_int, mass: *mut c_double, ierr: *mut c_int);
+        fn gmshModelOccGetCenterOfMass(dim: c_int, tag: c_int, x: *mut c_double, y: *mut c_double, z: *mut c_double, ierr: *mut c_int);
+        fn gmshModelGetBoundary(dim_tags: *const c_int, dim_tags_n: usize, out: *mut *mut c_int, out_n: *mut usize, combined: c_int, oriented: c_int, recursive: c_int, ierr: *mut c_int);
         fn gmshMerge(file_name: *const c_char, ierr: *mut c_int);
         fn gmshModelOccSynchronize(ierr: *mut c_int);
         fn gmshModelGetEntities(dim_tags: *mut *mut c_int, dim_tags_n: *mut usize, dim: c_int, ierr: *mut c_int);
@@ -392,6 +398,79 @@ mod backend {
             }
             check(e, "getBoundingBox")?;
             Ok(b)
+        }
+
+        /// Translate a solid in place (the tag is preserved). Caller synchronizes.
+        pub fn translate(&self, tag: i32, dx: f64, dy: f64, dz: f64) -> Result<(), GmshError> {
+            let dt = [3, tag];
+            let mut e = 0;
+            unsafe { gmshModelOccTranslate(dt.as_ptr(), dt.len(), dx, dy, dz, &mut e) };
+            check(e, "occ.translate")
+        }
+
+        /// Rotate a solid in place about a point + axis by `angle` radians.
+        #[allow(clippy::too_many_arguments)]
+        pub fn rotate(&self, tag: i32, x: f64, y: f64, z: f64, ax: f64, ay: f64, az: f64, angle: f64) -> Result<(), GmshError> {
+            let dt = [3, tag];
+            let mut e = 0;
+            unsafe { gmshModelOccRotate(dt.as_ptr(), dt.len(), x, y, z, ax, ay, az, angle, &mut e) };
+            check(e, "occ.rotate")
+        }
+
+        /// Scale (dilate) a solid in place about a center by per-axis factors.
+        pub fn scale(&self, tag: i32, cx: f64, cy: f64, cz: f64, sx: f64, sy: f64, sz: f64) -> Result<(), GmshError> {
+            let dt = [3, tag];
+            let mut e = 0;
+            unsafe { gmshModelOccDilate(dt.as_ptr(), dt.len(), cx, cy, cz, sx, sy, sz, &mut e) };
+            check(e, "occ.dilate")
+        }
+
+        /// Remove a solid (recursively removing its now-unused lower-dim entities).
+        pub fn remove(&self, tag: i32) -> Result<(), GmshError> {
+            let dt = [3, tag];
+            let mut e = 0;
+            unsafe { gmshModelOccRemove(dt.as_ptr(), dt.len(), 1, &mut e) };
+            check(e, "occ.remove")
+        }
+
+        /// Volume of a solid (OCC mass with unit density).
+        pub fn volume(&self, tag: i32) -> Result<f64, GmshError> {
+            let mut m = 0.0f64;
+            let mut e = 0;
+            unsafe { gmshModelOccGetMass(3, tag, &mut m, &mut e) };
+            check(e, "occ.getMass(3)")?;
+            Ok(m)
+        }
+
+        /// Center of mass of a solid.
+        pub fn center_of_mass(&self, tag: i32) -> Result<[f64; 3], GmshError> {
+            let mut c = [0.0f64; 3];
+            let mut e = 0;
+            unsafe { gmshModelOccGetCenterOfMass(3, tag, &mut c[0], &mut c[1], &mut c[2], &mut e) };
+            check(e, "occ.getCenterOfMass")?;
+            Ok(c)
+        }
+
+        /// Total surface area of a solid = sum of its boundary faces' areas.
+        pub fn surface_area(&self, tag: i32) -> Result<f64, GmshError> {
+            let dt = [3, tag];
+            let mut out: *mut c_int = ptr::null_mut();
+            let mut out_n: usize = 0;
+            let mut e = 0;
+            // oriented=0 so each face appears once; recursive=0 → direct (2,face) bounds.
+            unsafe { gmshModelGetBoundary(dt.as_ptr(), dt.len(), &mut out, &mut out_n, 0, 0, 0, &mut e) };
+            check(e, "getBoundary")?;
+            let flat = unsafe { take_int(out, out_n) };
+            let mut area = 0.0;
+            for p in flat.chunks_exact(2) {
+                if p[0] == 2 {
+                    let mut m = 0.0f64;
+                    let mut e2 = 0;
+                    unsafe { gmshModelOccGetMass(2, p[1].abs(), &mut m, &mut e2) };
+                    if e2 == 0 { area += m; }
+                }
+            }
+            Ok(area)
         }
 
         /// Axis-aligned bounding box of the whole synchronized model (all entities).

@@ -5,7 +5,7 @@
 //! `Shape::Solid`.
 
 use gfd_cad_geom::{
-    curve::Line, surface::Cone, surface::Cylinder, surface::Plane, surface::Sphere,
+    curve::Circle, curve::Line, surface::Cone, surface::Cylinder, surface::Plane, surface::Sphere,
     surface::Torus, Direction3, Point3,
 };
 use gfd_cad_topo::{
@@ -37,6 +37,37 @@ fn quad_face(arena: &mut ShapeArena, plane: Plane, corners: [Point3; 4]) -> Topo
     let wire = arena.push(Shape::Wire { edges });
     Ok(arena.push(Shape::Face {
         surface: SurfaceGeom::Plane(plane),
+        wires: vec![wire],
+        orient: Orientation::Forward,
+    }))
+}
+
+/// A circular planar cap (cylinder/cone end disc): a face whose outer wire is a
+/// single full-circle edge. The tessellator samples this Circle into a watertight
+/// disc instead of falling back to the clamped ±1 plane window. `normal` is the
+/// outward face normal; the plane and circle share `center`/`normal`/`x_axis`.
+fn circle_cap_face(
+    arena: &mut ShapeArena,
+    center: Point3,
+    normal: Direction3,
+    x_axis: Direction3,
+    radius: f64,
+) -> TopoResult<ShapeId> {
+    let rim = Point3::new(
+        center.x + radius * x_axis.x,
+        center.y + radius * x_axis.y,
+        center.z + radius * x_axis.z,
+    );
+    let v0 = vertex(arena, rim);
+    let circle = Circle::new(center, normal, x_axis, radius);
+    let edge = arena.push(Shape::Edge {
+        curve: CurveGeom::Circle(circle),
+        vertices: [v0, v0], // closed full circle
+        orient: Orientation::Forward,
+    });
+    let wire = arena.push(Shape::Wire { edges: vec![(edge, Orientation::Forward)] });
+    Ok(arena.push(Shape::Face {
+        surface: SurfaceGeom::Plane(Plane::new(center, normal, x_axis)),
         wires: vec![wire],
         orient: Orientation::Forward,
     }))
@@ -215,20 +246,8 @@ pub fn cylinder_solid(arena: &mut ShapeArena, radius: f64, height: f64) -> TopoR
         wires: vec![],
         orient: Orientation::Forward,
     });
-    let top = arena.push(Shape::Face {
-        surface: SurfaceGeom::Plane(Plane::new(
-            Point3::new(0.0, 0.0, height), Direction3::Z, Direction3::X)),
-        wires: vec![],
-        orient: Orientation::Forward,
-    });
-    let bottom = arena.push(Shape::Face {
-        surface: SurfaceGeom::Plane(Plane::new(
-            Point3::ORIGIN,
-            Direction3 { x: 0.0, y: 0.0, z: -1.0 },
-            Direction3::X)),
-        wires: vec![],
-        orient: Orientation::Forward,
-    });
+    let top = circle_cap_face(arena, Point3::new(0.0, 0.0, height), Direction3::Z, Direction3::X, radius)?;
+    let bottom = circle_cap_face(arena, Point3::ORIGIN, Direction3 { x: 0.0, y: 0.0, z: -1.0 }, Direction3::X, radius)?;
     let shell = arena.push(Shape::Shell {
         faces: vec![
             (lateral, Orientation::Forward),
@@ -247,25 +266,15 @@ pub fn cone_solid(arena: &mut ShapeArena, r1: f64, r2: f64, height: f64) -> Topo
         wires: vec![],
         orient: Orientation::Forward,
     });
-    let bottom = arena.push(Shape::Face {
-        surface: SurfaceGeom::Plane(Plane::new(
-            Point3::ORIGIN,
-            Direction3 { x: 0.0, y: 0.0, z: -1.0 },
-            Direction3::X)),
-        wires: vec![],
-        orient: Orientation::Forward,
-    });
-    let mut faces = vec![
-        (lateral, Orientation::Forward),
-        (bottom, Orientation::Forward),
-    ];
+    let mut faces = vec![(lateral, Orientation::Forward)];
+    // Bottom cap only when r1 > 0 (a full cone with apex at the bottom has no
+    // bottom disc; a radius-0 cap would otherwise produce NaN vertices).
+    if r1.abs() > f64::EPSILON {
+        let bottom = circle_cap_face(arena, Point3::ORIGIN, Direction3 { x: 0.0, y: 0.0, z: -1.0 }, Direction3::X, r1)?;
+        faces.push((bottom, Orientation::Forward));
+    }
     if r2.abs() > f64::EPSILON {
-        let top = arena.push(Shape::Face {
-            surface: SurfaceGeom::Plane(Plane::new(
-                Point3::new(0.0, 0.0, height), Direction3::Z, Direction3::X)),
-            wires: vec![],
-            orient: Orientation::Forward,
-        });
+        let top = circle_cap_face(arena, Point3::new(0.0, 0.0, height), Direction3::Z, Direction3::X, r2)?;
         faces.push((top, Orientation::Forward));
     }
     let shell = arena.push(Shape::Shell { faces });
@@ -312,4 +321,15 @@ mod tests {
         let faces = collect_by_kind(&a, id, ShapeKind::Face);
         assert_eq!(faces.len(), 3);
     }
+
+    #[test]
+    fn full_cone_apex_at_bottom_has_only_top_cap() {
+        // r1=0 (apex at the bottom): no bottom disc (a radius-0 cap would NaN),
+        // so faces = lateral + top cap = 2.
+        let mut a = ShapeArena::new();
+        let id = cone_solid(&mut a, 0.0, 0.5, 2.0).unwrap();
+        let faces = collect_by_kind(&a, id, ShapeKind::Face);
+        assert_eq!(faces.len(), 2, "full cone (r1=0) should have lateral + 1 cap");
+    }
+
 }

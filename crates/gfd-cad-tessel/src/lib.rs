@@ -3,17 +3,17 @@
 //! Iteration 2: each `SurfaceGeom` variant emits a UV grid with configurable
 //! resolution. Adaptive chord-tolerance refinement lands in a later iteration.
 
-use gfd_cad_geom::{Surface};
-use gfd_cad_topo::{shape::SurfaceGeom, Shape, ShapeArena, ShapeId, TopoError};
+use gfd_cad_geom::{Surface, Curve};
+use gfd_cad_topo::{shape::{SurfaceGeom, CurveGeom}, Orientation, Shape, ShapeArena, ShapeId, TopoError};
 use gfd_cad_geom::surface::{Plane, Cylinder, Sphere, Cone, Torus};
-#[allow(unused_imports)]
+use gfd_cad_geom::curve::Circle;
 use gfd_cad_geom::{Point3, Vector3};
 use serde::{Deserialize, Serialize};
 
 pub mod earclip;
 pub mod grid;
 
-pub use earclip::triangulate_polygon;
+pub use earclip::{point_in_polygon, triangulate_polygon, triangulate_polygon_with_holes};
 use grid::uv_grid;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -503,15 +503,171 @@ fn walk_adaptive(arena: &ShapeArena, id: ShapeId, chord_tol: f64, out: &mut TriM
         Shape::Compound { children } => for c in children { walk_adaptive(arena, *c, chord_tol, out)?; },
         Shape::Solid { shells }      => for s in shells   { walk_adaptive(arena, *s, chord_tol, out)?; },
         Shape::Shell { faces }       => for (f, _) in faces { walk_adaptive(arena, *f, chord_tol, out)?; },
-        Shape::Face { surface, .. }  => {
-            let (u, v) = auto_uv_steps(surface, chord_tol);
+        Shape::Face { surface, wires, .. }  => {
+            let (mut u, v) = auto_uv_steps(surface, chord_tol);
+            // A circular cap is a planar face, so auto_uv_steps gives it the coarse
+            // Plane default. Size its rim from the circle radius (same formula the
+            // curved wall uses) so the welded rims coincide → watertight here too.
+            if matches!(surface, SurfaceGeom::Plane(_)) {
+                if let Some(c) = planar_circle_loop(arena, wires) {
+                    u = (std::f64::consts::PI / (chord_tol / c.radius).max(1e-3)).clamp(8.0, 128.0) as usize;
+                }
+            }
             let opts = TessellationOptions { u_steps: u, v_steps: v, chord_tolerance: chord_tol, ..Default::default() };
-            let face_mesh = tessellate_surface(surface, opts)?;
+            let face_mesh = tessellate_face(arena, surface, wires, opts)?;
             out.merge(face_mesh);
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Ordered 3D boundary polygon of a planar face from its outer wire — but ONLY
+/// when every boundary edge is a straight Line (box / prism / pad / polygon
+/// faces). Returns None for empty wires, fewer than 3 points, or any curved
+/// boundary edge, so those faces fall back to the surface uv-grid path.
+///
+/// Honors the per-USE orientation stored in the wire tuple (Forward → the
+/// edge's start vertex, Reversed → its end vertex), matching `build_half_edges`.
+fn line_loop_for_wire(arena: &ShapeArena, wire_id: ShapeId) -> Option<Vec<Point3>> {
+    let edges = match arena.get(wire_id).ok()? {
+        Shape::Wire { edges } => edges,
+        _ => return None,
+    };
+    let mut loop_pts: Vec<Point3> = Vec::with_capacity(edges.len());
+    for (eid, orient) in edges {
+        let (curve, verts) = match arena.get(*eid).ok()? {
+            Shape::Edge { curve, vertices, .. } => (curve, vertices),
+            _ => return None,
+        };
+        if !matches!(curve, CurveGeom::Line(_)) {
+            return None; // curved boundary → fall back to the surface grid
+        }
+        let start = if matches!(orient, Orientation::Forward) { verts[0] } else { verts[1] };
+        match arena.get(start).ok()? {
+            Shape::Vertex { point } => loop_pts.push(*point),
+            _ => return None,
+        }
+    }
+    if loop_pts.len() < 3 { None } else { Some(loop_pts) }
+}
+
+/// Outer + hole loops of a planar face, each a straight-edge polygon. `[0]` is
+/// the outer boundary, `[1..]` are holes. None if any wire has a curved edge.
+fn planar_line_loops(arena: &ShapeArena, wires: &[ShapeId]) -> Option<Vec<Vec<Point3>>> {
+    if wires.is_empty() {
+        return None;
+    }
+    let mut loops = Vec::with_capacity(wires.len());
+    for w in wires {
+        loops.push(line_loop_for_wire(arena, *w)?);
+    }
+    Some(loops)
+}
+
+/// Tessellate a planar face from its wire polygons (outer = loops[0], holes =
+/// loops[1..]): project every loop onto the plane's orthonormal (u,v) basis,
+/// ear-clip with holes, and emit triangles with exact 3D positions + the plane
+/// normal. Bounds the face to its real extent (not the clamped ±1 window) and
+/// cuts out holes (pockets / through-holes).
+fn tessellate_planar_loops(plane: &Plane, loops: &[Vec<Point3>]) -> TriMesh {
+    let o = plane.origin;
+    let xd = plane.x_axis.as_vec();
+    let yd = plane.normal.as_vec().cross(plane.x_axis.as_vec());
+    let to_uv = |p: &Point3| {
+        let d = Vector3::new(p.x - o.x, p.y - o.y, p.z - o.z);
+        (d.dot(xd), d.dot(yd))
+    };
+    let outer_uv: Vec<(f64, f64)> = loops[0].iter().map(to_uv).collect();
+    let holes_uv: Vec<Vec<(f64, f64)>> = loops[1..].iter().map(|h| h.iter().map(to_uv).collect()).collect();
+    let n = plane.normal.as_vec();
+    let normal = [n.x as f32, n.y as f32, n.z as f32];
+    // Combined 3D positions in the SAME order earclip uses (outer ++ holes).
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    for lp in loops {
+        for p in lp {
+            positions.push([p.x as f32, p.y as f32, p.z as f32]);
+        }
+    }
+    let normals = vec![normal; positions.len()];
+    let (_pts, tris) = triangulate_polygon_with_holes(&outer_uv, &holes_uv);
+    let mut indices = Vec::with_capacity(tris.len() * 3);
+    for t in tris {
+        indices.extend_from_slice(&t);
+    }
+    TriMesh { positions, normals, indices }
+}
+
+/// A planar face whose outer wire is a single full-circle edge (cylinder/cone
+/// cap). Returns that Circle so the cap can be tessellated as a real disc
+/// instead of the clamped ±1 plane window.
+fn planar_circle_loop(arena: &ShapeArena, wires: &[ShapeId]) -> Option<Circle> {
+    let edges = match arena.get(*wires.first()?).ok()? {
+        Shape::Wire { edges } => edges,
+        _ => return None,
+    };
+    if edges.len() != 1 {
+        return None;
+    }
+    match arena.get(edges[0].0).ok()? {
+        Shape::Edge { curve: CurveGeom::Circle(c), .. } => Some(*c),
+        _ => None,
+    }
+}
+
+/// Tessellate a circular cap face as a center-fan disc with `n` rim segments.
+/// The rim is sampled at the same angles a cylinder/cone lateral surface uses
+/// (n = u_steps), so after a weld the cap and wall share rim vertices → the
+/// solid is watertight. Winding follows the circle normal (== plane normal).
+fn tessellate_disc(circle: &Circle, n: usize) -> TriMesh {
+    // Degenerate (radius 0 / NaN) → emit nothing rather than NaN vertices
+    // (Circle::eval divides by radius). The `!(>)` form also rejects NaN.
+    if !(circle.radius > f64::EPSILON) {
+        return TriMesh::default();
+    }
+    let n = n.max(8);
+    let c = circle.center;
+    let nrm = circle.normal.as_vec();
+    let normal = [nrm.x as f32, nrm.y as f32, nrm.z as f32];
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n + 1);
+    positions.push([c.x as f32, c.y as f32, c.z as f32]); // center = index 0
+    let circumference = std::f64::consts::TAU * circle.radius;
+    for i in 0..n {
+        let u = i as f64 / n as f64 * circumference; // arc-length parameter
+        let p = circle.eval(u).unwrap_or(c);
+        positions.push([p.x as f32, p.y as f32, p.z as f32]);
+    }
+    let normals = vec![normal; positions.len()];
+    let mut indices = Vec::with_capacity(n * 3);
+    for i in 0..n {
+        let a = 1 + i as u32;
+        let b = 1 + ((i + 1) % n) as u32;
+        indices.extend_from_slice(&[0, a, b]);
+    }
+    TriMesh { positions, normals, indices }
+}
+
+/// Tessellate a face: planar faces with a straight-edged wire are bounded to
+/// their polygon, circular caps to a disc; everything else uses the surface grid.
+fn tessellate_face(arena: &ShapeArena, surface: &SurfaceGeom, wires: &[ShapeId], opts: TessellationOptions) -> TessellResult<TriMesh> {
+    if let SurfaceGeom::Plane(p) = surface {
+        if let Some(loops) = planar_line_loops(arena, wires) {
+            return Ok(tessellate_planar_loops(p, &loops));
+        }
+        if let Some(circle) = planar_circle_loop(arena, wires) {
+            return Ok(tessellate_disc(&circle, opts.u_steps));
+        }
+    }
+    // Curved surface bounded by a wire → uv-trim to the visible region (the wire
+    // vertices are inverted onto the surface, cells outside the trim loop are
+    // culled). Falls back to the full surface if inversion fails or the wire is
+    // empty (e.g. a full cylinder/sphere).
+    if !wires.is_empty() {
+        if let Some(mesh) = try_trim_curved(arena, surface, wires, opts) {
+            return Ok(mesh);
+        }
+    }
+    tessellate_surface(surface, opts)
 }
 
 fn walk(arena: &ShapeArena, id: ShapeId, opts: TessellationOptions, out: &mut TriMesh) -> TessellResult<()> {
@@ -525,8 +681,8 @@ fn walk(arena: &ShapeArena, id: ShapeId, opts: TessellationOptions, out: &mut Tr
         Shape::Shell { faces } => {
             for (f, _) in faces { walk(arena, *f, opts, out)?; }
         }
-        Shape::Face { surface, .. } => {
-            let face_mesh = tessellate_surface(surface, opts)?;
+        Shape::Face { surface, wires, .. } => {
+            let face_mesh = tessellate_face(arena, surface, wires, opts)?;
             out.merge(face_mesh);
         }
         _ => { /* Vertex / Edge / Wire do not contribute triangles */ }
@@ -557,6 +713,36 @@ pub fn auto_uv_steps(surface: &SurfaceGeom, chord_tolerance: f64) -> (usize, usi
             let nv = clamp(std::f64::consts::PI / (chord_tolerance / t.minor).max(1e-3));
             (nu, nv)
         }
+        // Free-form patch: ~4 samples per control span on each axis, clamped.
+        SurfaceGeom::BSpline(b) => (clamp(b.u_control_count as f64 * 4.0), clamp(b.v_control_count as f64 * 4.0)),
+        SurfaceGeom::Nurbs(n) => (clamp(n.u_control_count as f64 * 4.0), clamp(n.v_control_count as f64 * 4.0)),
+    }
+}
+
+/// Try to tessellate a curved face trimmed to its wire boundary. Returns None
+/// (→ caller uses the full surface) for planes, infinite ranges, or when the
+/// boundary can't be inverted onto the surface.
+fn try_trim_curved(arena: &ShapeArena, surface: &SurfaceGeom, wires: &[ShapeId], opts: TessellationOptions) -> Option<TriMesh> {
+    fn trim_one<S: Surface>(arena: &ShapeArena, s: &S, wires: &[ShapeId], opts: TessellationOptions, u_periodic: bool, v_periodic: bool) -> Option<TriMesh> {
+        let (u0, u1) = s.u_range();
+        let (v0, v1) = s.v_range();
+        if !(u0.is_finite() && u1.is_finite() && v0.is_finite() && v1.is_finite()) {
+            return None;
+        }
+        let (outer, holes) = trim_loops_uv(arena, s, wires, u0, u1, v0, v1, u_periodic, v_periodic)?;
+        let m = sample_trimmed(s, opts, &outer, &holes, u0, u1, v0, v1, u_periodic, v_periodic).ok()?;
+        if m.indices.is_empty() { None } else { Some(m) }
+    }
+    // Periodicity: cylinder/cone/sphere have a periodic u (angle); torus is
+    // periodic in both u and v. Plane/bspline/nurbs are non-periodic.
+    match surface {
+        SurfaceGeom::Plane(_) => None,
+        SurfaceGeom::Cylinder(s) => trim_one(arena, s, wires, opts, true, false),
+        SurfaceGeom::Sphere(s) => trim_one(arena, s, wires, opts, true, false),
+        SurfaceGeom::Cone(s) => trim_one(arena, s, wires, opts, true, false),
+        SurfaceGeom::Torus(s) => trim_one(arena, s, wires, opts, true, true),
+        SurfaceGeom::BSpline(s) => trim_one(arena, s, wires, opts, false, false),
+        SurfaceGeom::Nurbs(s) => trim_one(arena, s, wires, opts, false, false),
     }
 }
 
@@ -573,6 +759,8 @@ pub fn tessellate_surface(surface: &SurfaceGeom, opts: TessellationOptions) -> T
         }
         SurfaceGeom::Cone(c)     => sample(c, opts, 1.0, 1.0),
         SurfaceGeom::Torus(t)    => sample(t, opts, 1.0, 1.0),
+        SurfaceGeom::BSpline(b)  => sample(b, opts, 1.0, 1.0),
+        SurfaceGeom::Nurbs(n)    => sample(n, opts, 1.0, 1.0),
     }
 }
 
@@ -618,9 +806,335 @@ pub fn sample<S: Surface>(s: &S, opts: TessellationOptions, _u_scale: f64, _v_sc
     Ok(mesh)
 }
 
+/// Invert a 3D point onto a surface's (u,v) parameters: a coarse grid search for
+/// a seed, then Newton refinement with a numerical Jacobian (generic over the
+/// `Surface` trait — no per-surface parametrization knowledge needed). Returns
+/// None if the residual stays large (point off-surface / divergence).
+fn invert_surface_uv<S: Surface>(s: &S, p: Point3, u0: f64, u1: f64, v0: f64, v1: f64) -> Option<(f64, f64)> {
+    let d2 = |a: Point3| (a.x - p.x).powi(2) + (a.y - p.y).powi(2) + (a.z - p.z).powi(2);
+    // Coarse seed.
+    let (gu, gv) = (12usize, 12usize);
+    let (mut bu, mut bv, mut best) = (u0, v0, f64::INFINITY);
+    for j in 0..=gv {
+        let v = v0 + (v1 - v0) * j as f64 / gv as f64;
+        for i in 0..=gu {
+            let u = u0 + (u1 - u0) * i as f64 / gu as f64;
+            if let Ok(q) = s.eval(u, v) {
+                let dd = d2(q);
+                if dd < best { best = dd; bu = u; bv = v; }
+            }
+        }
+    }
+    // Newton with numerical partials.
+    let (mut u, mut v) = (bu, bv);
+    let (hu, hv) = ((u1 - u0) * 1e-5 + 1e-9, (v1 - v0) * 1e-5 + 1e-9);
+    for _ in 0..40 {
+        let s0 = s.eval(u, v).ok()?;
+        let r = Vector3::new(s0.x - p.x, s0.y - p.y, s0.z - p.z);
+        if r.norm() < 1e-7 { break; }
+        let su = {
+            let (up, un) = ((u + hu).min(u1), (u - hu).max(u0));
+            let a = s.eval(up, v).ok()?;
+            let b = s.eval(un, v).ok()?;
+            let inv = 1.0 / (up - un).max(1e-12);
+            Vector3::new((a.x - b.x) * inv, (a.y - b.y) * inv, (a.z - b.z) * inv)
+        };
+        let sv = {
+            let (vp, vn) = ((v + hv).min(v1), (v - hv).max(v0));
+            let a = s.eval(u, vp).ok()?;
+            let b = s.eval(u, vn).ok()?;
+            let inv = 1.0 / (vp - vn).max(1e-12);
+            Vector3::new((a.x - b.x) * inv, (a.y - b.y) * inv, (a.z - b.z) * inv)
+        };
+        // Solve the 2x2 normal equations [Su·Su, Su·Sv; Su·Sv, Sv·Sv][du;dv] = -[Su·r; Sv·r].
+        let (a, b, c) = (su.dot(su), su.dot(sv), sv.dot(sv));
+        let det = a * c - b * b;
+        if det.abs() < 1e-14 { break; }
+        let (rb1, rb2) = (-su.dot(r), -sv.dot(r));
+        let du = (rb1 * c - b * rb2) / det;
+        let dv = (a * rb2 - b * rb1) / det;
+        u = (u + du).clamp(u0, u1);
+        v = (v + dv).clamp(v0, v1);
+    }
+    let final_r = s.eval(u, v).ok().map(d2).unwrap_or(f64::INFINITY).sqrt();
+    let scale = (u1 - u0).abs().max((v1 - v0).abs()).max(1.0);
+    if final_r < 1e-4 * scale + 1e-6 { Some((u, v)) } else { None }
+}
+
+/// Unwrap a loop's periodic coordinate(s) so successive vertices stay within π,
+/// turning e.g. a seam-crossing run [0.5, 5.8] into a contiguous [0.5, -0.48].
+/// Without this, point-in-polygon over [0,2π] keeps the COMPLEMENTARY region for
+/// a boundary that crosses the seam (u=0).
+fn unwrap_periodic(loop_uv: &mut [(f64, f64)], u_periodic: bool, v_periodic: bool) {
+    use std::f64::consts::{PI, TAU};
+    for k in 1..loop_uv.len() {
+        if u_periodic {
+            let prev = loop_uv[k - 1].0;
+            while loop_uv[k].0 - prev > PI { loop_uv[k].0 -= TAU; }
+            while loop_uv[k].0 - prev < -PI { loop_uv[k].0 += TAU; }
+        }
+        if v_periodic {
+            let prev = loop_uv[k - 1].1;
+            while loop_uv[k].1 - prev > PI { loop_uv[k].1 -= TAU; }
+            while loop_uv[k].1 - prev < -PI { loop_uv[k].1 += TAU; }
+        }
+    }
+}
+
+/// Extract trim loops in (u,v) space for a curved face: walk each wire's edges
+/// (orientation-aware, like `line_loop_for_wire`) and invert each start vertex
+/// onto the surface. Periodic axes are unwrapped so seam-crossing boundaries
+/// stay contiguous. Returns (outer, holes) or None if any inversion fails.
+fn trim_loops_uv<S: Surface>(
+    arena: &ShapeArena, surf: &S, wires: &[ShapeId], u0: f64, u1: f64, v0: f64, v1: f64,
+    u_periodic: bool, v_periodic: bool,
+) -> Option<(Vec<(f64, f64)>, Vec<Vec<(f64, f64)>>)> {
+    let loop_uv = |wire_id: ShapeId| -> Option<Vec<(f64, f64)>> {
+        let Shape::Wire { edges } = arena.get(wire_id).ok()? else { return None };
+        if edges.is_empty() { return None; }
+        let mut uv = Vec::with_capacity(edges.len());
+        for (eid, orient) in edges {
+            let Shape::Edge { vertices, .. } = arena.get(*eid).ok()? else { return None };
+            let start = if matches!(orient, Orientation::Forward) { vertices[0] } else { vertices[1] };
+            let Shape::Vertex { point } = arena.get(start).ok()? else { return None };
+            uv.push(invert_surface_uv(surf, *point, u0, u1, v0, v1)?);
+        }
+        if uv.len() < 3 { return None; }
+        unwrap_periodic(&mut uv, u_periodic, v_periodic);
+        Some(uv)
+    };
+    let outer = loop_uv(*wires.first()?)?;
+    let mut holes = Vec::new();
+    for w in &wires[1..] {
+        holes.push(loop_uv(*w)?);
+    }
+    Some((outer, holes))
+}
+
+/// Sample a curved surface but keep only grid cells whose uv-center lies inside
+/// the trim boundary (outer minus holes). Produces a staircase-edged trimmed
+/// patch — display-quality, not watertight; see module docs.
+fn sample_trimmed<S: Surface>(
+    s: &S, opts: TessellationOptions, outer: &[(f64, f64)], holes: &[Vec<(f64, f64)>],
+    u0: f64, u1: f64, v0: f64, v1: f64, u_periodic: bool, v_periodic: bool,
+) -> TessellResult<TriMesh> {
+    use std::f64::consts::TAU;
+    let (us, vs) = (opts.u_steps.max(1), opts.v_steps.max(1));
+    let (nu, nv) = (us + 1, vs + 1);
+    let (du, dv) = ((u1 - u0) / us as f64, (v1 - v0) / vs as f64);
+    let mut mesh = TriMesh::default();
+    // Sample the full node lattice (so kept cells share vertices).
+    let mut node_index = vec![u32::MAX; nu * nv];
+    // The trim loop may have been unwrapped past the seam, so test each cell
+    // center at its periodic images (±TAU) on periodic axes.
+    let pip = |u: f64, v: f64, poly: &[(f64, f64)]| -> bool {
+        let us = if u_periodic { vec![u, u - TAU, u + TAU] } else { vec![u] };
+        let vs = if v_periodic { vec![v, v - TAU, v + TAU] } else { vec![v] };
+        for &uu in &us { for &vv in &vs { if point_in_polygon((uu, vv), poly) { return true; } } }
+        false
+    };
+    let inside = |u: f64, v: f64| pip(u, v, outer) && !holes.iter().any(|h| pip(u, v, h));
+    let mut push_node = |mesh: &mut TriMesh, node_index: &mut Vec<u32>, i: usize, j: usize| -> TessellResult<u32> {
+        let k = j * nu + i;
+        if node_index[k] != u32::MAX { return Ok(node_index[k]); }
+        let (u, v) = (u0 + du * i as f64, v0 + dv * j as f64);
+        let p = s.eval(u, v).map_err(|e| TessellError::Geom(e.to_string()))?;
+        let n = s.normal(u, v).map_err(|e| TessellError::Geom(e.to_string()))?;
+        let idx = mesh.positions.len() as u32;
+        mesh.positions.push([p.x as f32, p.y as f32, p.z as f32]);
+        mesh.normals.push([n.x as f32, n.y as f32, n.z as f32]);
+        node_index[k] = idx;
+        Ok(idx)
+    };
+    for j in 0..vs {
+        for i in 0..us {
+            let (uc, vc) = (u0 + du * (i as f64 + 0.5), v0 + dv * (j as f64 + 0.5));
+            if !inside(uc, vc) { continue; }
+            let a = push_node(&mut mesh, &mut node_index, i, j)?;
+            let b = push_node(&mut mesh, &mut node_index, i + 1, j)?;
+            let c = push_node(&mut mesh, &mut node_index, i, j + 1)?;
+            let d = push_node(&mut mesh, &mut node_index, i + 1, j + 1)?;
+            mesh.indices.extend_from_slice(&[a, b, d, a, d, c]);
+        }
+    }
+    Ok(mesh)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn planar_face_is_bounded_to_its_wire_not_the_clamped_plane() {
+        use gfd_cad_geom::{curve::Line, Direction3};
+        use gfd_cad_topo::shape::CurveGeom;
+        // A 1×1 square face in the z=0 plane, corners (0,0)→(1,0)→(1,1)→(0,1).
+        let mut arena = ShapeArena::new();
+        let pts = [
+            Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0),
+        ];
+        let v: Vec<ShapeId> = pts.iter().map(|p| arena.push(Shape::Vertex { point: *p })).collect();
+        let mut edges = Vec::new();
+        for i in 0..4 {
+            let j = (i + 1) % 4;
+            let line = Line::from_points(pts[i], pts[j]).unwrap();
+            let e = arena.push(Shape::Edge { curve: CurveGeom::Line(line), vertices: [v[i], v[j]], orient: Orientation::Forward });
+            edges.push((e, Orientation::Forward));
+        }
+        let wire = arena.push(Shape::Wire { edges });
+        let face = arena.push(Shape::Face {
+            surface: SurfaceGeom::Plane(Plane::new(Point3::ORIGIN, Direction3::Z, Direction3::X)),
+            wires: vec![wire],
+            orient: Orientation::Forward,
+        });
+        let mesh = tessellate(&arena, face, TessellationOptions::default()).unwrap();
+        // Wire-bounded: a quad → exactly 2 triangles (NOT a 32×16 clamped grid).
+        assert_eq!(mesh.indices.len() / 3, 2, "square face should be 2 triangles");
+        // Bounded to the real [0,1]×[0,1] extent, not the ±1 plane window.
+        let (mut mn, mut mx) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for p in &mesh.positions {
+            for k in 0..3 {
+                if p[k] < mn[k] { mn[k] = p[k]; }
+                if p[k] > mx[k] { mx[k] = p[k]; }
+            }
+        }
+        assert_eq!(mn, [0.0, 0.0, 0.0]);
+        assert_eq!(mx, [1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn bspline_surface_face_tessellates() {
+        use gfd_cad_geom::surface::BSplineSurface;
+        // Flat bilinear patch over [0,1]^2 at z=0 as an arena face (empty wire →
+        // full-surface sample path). Exercises the SurfaceGeom::BSpline arms in
+        // tessellate_surface + auto_uv_steps (walk and walk_adaptive).
+        let cps = vec![
+            Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0), Point3::new(1.0, 1.0, 0.0),
+        ];
+        let surf = BSplineSurface::new(1, 1, 2, 2, cps, vec![0.0, 0.0, 1.0, 1.0], vec![0.0, 0.0, 1.0, 1.0]).unwrap();
+        let mut arena = ShapeArena::new();
+        let face = arena.push(Shape::Face { surface: SurfaceGeom::BSpline(surf), wires: vec![], orient: Orientation::Forward });
+        let mesh = tessellate(&arena, face, TessellationOptions::default()).unwrap();
+        assert!(mesh.indices.len() >= 3, "bspline face should tessellate");
+        for p in &mesh.positions {
+            assert!(p[2].abs() < 1e-4, "flat patch vertex off z=0");
+        }
+        // Adaptive path must also handle the BSpline arm without panicking.
+        let adaptive = tessellate_adaptive(&arena, face, 0.05).unwrap();
+        assert!(!adaptive.indices.is_empty());
+    }
+
+    #[test]
+    fn curved_face_is_trimmed_to_its_wire() {
+        use gfd_cad_geom::surface::BSplineSurface;
+        use gfd_cad_geom::curve::Line;
+        use gfd_cad_topo::shape::CurveGeom;
+        // Flat degree-1 patch over [0,1]^2 (eval(u,v) = (u,v,0)). A square trim
+        // wire over the inner [0.25,0.75]^2 must keep only interior cells, all
+        // within the sub-square — and fewer than the untrimmed patch.
+        let cps = vec![
+            Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0), Point3::new(1.0, 1.0, 0.0),
+        ];
+        let knots = vec![0.0, 0.0, 1.0, 1.0];
+        let surf = BSplineSurface::new(1, 1, 2, 2, cps, knots.clone(), knots).unwrap();
+        let mut arena = ShapeArena::new();
+        let corners = [
+            Point3::new(0.25, 0.25, 0.0), Point3::new(0.75, 0.25, 0.0),
+            Point3::new(0.75, 0.75, 0.0), Point3::new(0.25, 0.75, 0.0),
+        ];
+        let vids: Vec<ShapeId> = corners.iter().map(|p| arena.push(Shape::Vertex { point: *p })).collect();
+        let mut edges = Vec::new();
+        for i in 0..4 {
+            let j = (i + 1) % 4;
+            let line = Line::from_points(corners[i], corners[j]).unwrap();
+            let e = arena.push(Shape::Edge { curve: CurveGeom::Line(line), vertices: [vids[i], vids[j]], orient: Orientation::Forward });
+            edges.push((e, Orientation::Forward));
+        }
+        let wire = arena.push(Shape::Wire { edges });
+        let face = arena.push(Shape::Face { surface: SurfaceGeom::BSpline(surf), wires: vec![wire], orient: Orientation::Forward });
+        let opts = TessellationOptions { u_steps: 16, v_steps: 16, ..Default::default() };
+        let trimmed = tessellate(&arena, face, opts).unwrap();
+        assert!(!trimmed.indices.is_empty(), "trimmed patch should have triangles");
+        // Every kept vertex lies within the trim square (small tolerance for the
+        // staircase cells straddling the boundary).
+        for p in &trimmed.positions {
+            assert!(p[0] >= 0.25 - 0.1 && p[0] <= 0.75 + 0.1 && p[1] >= 0.25 - 0.1 && p[1] <= 0.75 + 0.1,
+                "vertex {:?} outside trim region", p);
+        }
+        // Far fewer triangles than the full 16×16 patch (512).
+        assert!(trimmed.indices.len() / 3 < 512, "trim should cull most of the patch");
+        assert!(trimmed.indices.len() / 3 > 50, "but keep the interior region");
+    }
+
+    #[test]
+    fn seam_crossing_cylinder_keeps_its_band_not_the_complement() {
+        use gfd_cad_geom::surface::Cylinder;
+        use gfd_cad_geom::{curve::Line, Direction3};
+        use gfd_cad_topo::shape::CurveGeom;
+        // A ±45° band around angle 0 (crossing the u=0 seam) on a unit cylinder,
+        // height 2. The kept region must be the band (x>0), not the far side.
+        let cyl = Cylinder::new(Point3::new(0.0, 0.0, 0.0), Direction3::Z, Direction3::X, 1.0, 2.0);
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        let corners = [
+            Point3::new(s, -s, 0.0), Point3::new(s, s, 0.0),
+            Point3::new(s, s, 2.0), Point3::new(s, -s, 2.0),
+        ];
+        let mut arena = ShapeArena::new();
+        let vids: Vec<ShapeId> = corners.iter().map(|p| arena.push(Shape::Vertex { point: *p })).collect();
+        let mut edges = Vec::new();
+        for i in 0..4 {
+            let j = (i + 1) % 4;
+            let line = Line::from_points(corners[i], corners[j]).unwrap();
+            let e = arena.push(Shape::Edge { curve: CurveGeom::Line(line), vertices: [vids[i], vids[j]], orient: Orientation::Forward });
+            edges.push((e, Orientation::Forward));
+        }
+        let wire = arena.push(Shape::Wire { edges });
+        let face = arena.push(Shape::Face { surface: SurfaceGeom::Cylinder(cyl), wires: vec![wire], orient: Orientation::Forward });
+        let opts = TessellationOptions { u_steps: 32, v_steps: 4, ..Default::default() };
+        let mesh = tessellate(&arena, face, opts).unwrap();
+        assert!(!mesh.indices.is_empty(), "seam-crossing band should tessellate");
+        // Every kept vertex is on the near side (x>0): the band, not the complement.
+        for p in &mesh.positions {
+            assert!(p[0] > -0.2, "kept vertex {:?} is on the far side — seam wrap kept the complement", p);
+        }
+    }
+
+    #[test]
+    fn nurbs_surface_face_tessellates() {
+        use gfd_cad_geom::surface::NurbsSurface;
+        // Flat rational patch (uniform weights → planar) as an arena face.
+        let cps = vec![
+            Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0), Point3::new(1.0, 1.0, 0.0),
+        ];
+        let knots = vec![0.0, 0.0, 1.0, 1.0];
+        let surf = NurbsSurface::new(1, 1, 2, 2, cps, vec![1.0, 2.0, 2.0, 4.0], knots.clone(), knots).unwrap();
+        let mut arena = ShapeArena::new();
+        let face = arena.push(Shape::Face { surface: SurfaceGeom::Nurbs(surf), wires: vec![], orient: Orientation::Forward });
+        let mesh = tessellate(&arena, face, TessellationOptions::default()).unwrap();
+        assert!(mesh.indices.len() >= 3, "nurbs face should tessellate");
+        for p in &mesh.positions {
+            assert!(p[2].abs() < 1e-4, "flat rational patch vertex off z=0");
+        }
+    }
+
+    #[test]
+    fn planar_loop_falls_back_for_empty_wires() {
+        // A planar face with no wire (e.g. a cylinder cap) must NOT vanish — it
+        // falls back to the surface uv-grid path and still emits triangles.
+        let mut arena = ShapeArena::new();
+        use gfd_cad_geom::Direction3;
+        let face = arena.push(Shape::Face {
+            surface: SurfaceGeom::Plane(Plane::new(Point3::ORIGIN, Direction3::Z, Direction3::X)),
+            wires: vec![],
+            orient: Orientation::Forward,
+        });
+        let mesh = tessellate(&arena, face, TessellationOptions::default()).unwrap();
+        assert!(!mesh.indices.is_empty(), "wireless planar face must still tessellate (fallback)");
+    }
 
     #[test]
     fn prune_drops_unreferenced_vertices() {

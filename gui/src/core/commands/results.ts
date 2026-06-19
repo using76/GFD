@@ -88,6 +88,164 @@ export const resultsContour: CommandDef<ContourParams, ContourResult> = {
   },
 };
 
+export interface DerivedFieldResult {
+  field: string;
+  min: number;
+  max: number;
+  mean: number;
+}
+
+/** A backend-computed derived field (vorticity, Q-criterion, …) that registers
+ *  itself as a selectable, activatable field for contour/isosurface. */
+function makeDerivedFieldCommand(
+  id: string,
+  method: string,
+  title: string,
+  titleKo: string,
+  description: string
+): CommandDef<Record<string, never>, DerivedFieldResult> {
+  return {
+    id,
+    category: 'results',
+    group: 'Fields',
+    title,
+    titleKo,
+    description,
+    capability: 'read',
+    paramsSchema: { type: 'object', properties: {} },
+    async run(_params, ctx) {
+      const r = await ctx.rpc.request<DerivedFieldResult>(method, {});
+      const results = ctx.getState().results;
+      const patch: PatchOp[] = [];
+      if (results) {
+        const availableFields = results.availableFields.includes(r.field)
+          ? results.availableFields
+          : [...results.availableFields, r.field];
+        const fieldStats = { ...results.fieldStats, [r.field]: { min: r.min, max: r.max, mean: r.mean } };
+        patch.push({ op: 'replace', path: ['results', 'availableFields'], value: availableFields });
+        patch.push({ op: 'replace', path: ['results', 'fieldStats'], value: fieldStats as unknown as JsonValue });
+        patch.push({ op: 'replace', path: ['results', 'activeField'], value: r.field });
+      }
+      return { ok: true, result: r, statePatch: patch };
+    },
+  };
+}
+
+export const resultsVorticity = makeDerivedFieldCommand(
+  'results.vorticity',
+  'field.vorticity',
+  'Compute Vorticity',
+  '와도 계산',
+  'Compute the vorticity magnitude |∇×u| of the solved velocity field and register it as a selectable field (use it with contour or isosurface to see vortices).'
+);
+
+export const resultsQCriterion = makeDerivedFieldCommand(
+  'results.qcriterion',
+  'field.qcriterion',
+  'Compute Q-criterion',
+  'Q-기준 계산',
+  'Compute the Q-criterion ½(‖Ω‖²−‖S‖²) of the solved velocity field and register it as a selectable field. Q>0 isosurfaces mark vortex cores — the standard vortex-identification method.'
+);
+
+export interface ProbeParams {
+  field?: string;
+  point: [number, number, number];
+}
+
+export interface ProbeResult {
+  field: string;
+  value: number;
+  cell: number;
+  cell_center: number[];
+  distance: number;
+  point: number[];
+}
+
+export const resultsProbe: CommandDef<ProbeParams, ProbeResult> = {
+  id: 'results.probe',
+  category: 'results',
+  group: 'Fields',
+  title: 'Probe Field',
+  titleKo: '필드 측정',
+  description:
+    'Read a solved field value at a 3D point (nearest cell). Lets the AI inspect a specific location — e.g. velocity at the outlet, temperature on a wall — instead of fetching the whole field.',
+  capability: 'read',
+  paramsSchema: {
+    type: 'object',
+    properties: {
+      field: { type: 'string' },
+      point: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+    },
+    required: ['point'],
+  },
+  async run(params, ctx) {
+    const field = params.field ?? ctx.getState().results?.activeField ?? 'velocity_magnitude';
+    const r = await ctx.rpc.request<ProbeResult>('field.probe', { field, point: params.point });
+    return { ok: true, result: r };
+  },
+};
+
+export interface ObjectiveResult {
+  kinetic_energy: number | null;
+  max_velocity: number | null;
+  mean_velocity: number | null;
+  min_pressure: number | null;
+  max_pressure: number | null;
+  mean_pressure: number | null;
+  pressure_range: number | null;
+}
+
+export const resultsObjective: CommandDef<Record<string, never>, ObjectiveResult> = {
+  id: 'results.objective',
+  category: 'results',
+  group: 'Fields',
+  title: 'Objectives',
+  titleKo: '목적함수',
+  description:
+    'Compute scalar objectives (kinetic energy, max/mean velocity, pressure range/drop) from the current solved fields without re-solving. Use it to track an optimization target across re-runs while tuning parameters.',
+  capability: 'read',
+  paramsSchema: { type: 'object', properties: {} },
+  async run(_params, ctx) {
+    const r = await ctx.rpc.request<ObjectiveResult>('field.objective', {});
+    return { ok: true, result: r };
+  },
+};
+
+export interface IsosurfaceParams {
+  field?: string;
+  isovalue?: number;
+}
+
+export interface IsosurfaceResult {
+  positions: number[];
+  triangle_count: number;
+  isovalue: number;
+  field: string;
+}
+
+export const resultsIsosurface: CommandDef<IsosurfaceParams, IsosurfaceResult> = {
+  id: 'results.isosurface',
+  category: 'results',
+  group: 'Visualize',
+  title: 'Isosurface',
+  titleKo: '등치면',
+  description:
+    'Extract an isosurface (marching tetrahedra) of a solved scalar field at an isovalue (default: the field mean). Returns a triangle mesh for the viewport — the standard way to see a 3D field level set.',
+  capability: 'read',
+  paramsSchema: {
+    type: 'object',
+    properties: { field: { type: 'string' }, isovalue: { type: 'number' } },
+  },
+  async run(params, ctx) {
+    const field = params.field ?? ctx.getState().results?.activeField ?? 'velocity_magnitude';
+    const r = await ctx.rpc.request<IsosurfaceResult>('field.isosurface', {
+      field,
+      ...(params.isovalue !== undefined ? { isovalue: params.isovalue } : {}),
+    });
+    return { ok: true, result: r };
+  },
+};
+
 export interface VectorsResult {
   origins: number[];
   vectors: number[];
@@ -144,6 +302,8 @@ export interface SetVizParams {
   showStreamlines?: boolean;
   streamlineSeeds?: number;
   streamlineSteps?: number;
+  showIsosurface?: boolean;
+  isovalue?: number;
 }
 
 export const resultsSetViz: CommandDef<SetVizParams, Record<string, never>> = {
@@ -165,6 +325,8 @@ export const resultsSetViz: CommandDef<SetVizParams, Record<string, never>> = {
       showStreamlines: { type: 'boolean' },
       streamlineSeeds: { type: 'integer', minimum: 1 },
       streamlineSteps: { type: 'integer', minimum: 2 },
+      showIsosurface: { type: 'boolean' },
+      isovalue: { type: 'number' },
     },
   },
   async run(params) {
@@ -182,5 +344,10 @@ export function registerResultsCommands(registry: CommandRegistry): void {
   registry.register(resultsContour);
   registry.register(resultsVectors);
   registry.register(resultsStreamlines);
+  registry.register(resultsIsosurface);
+  registry.register(resultsVorticity);
+  registry.register(resultsQCriterion);
+  registry.register(resultsProbe);
+  registry.register(resultsObjective);
   registry.register(resultsSetViz);
 }

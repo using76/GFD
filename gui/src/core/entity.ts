@@ -5,9 +5,11 @@
  * agent does not need to know numeric ids. A reference is resolved to concrete
  * ids by the EntityResolver, reusing existing backend measure/raycast RPCs.
  *
- * Phase 0 implements the `id`, `name`, and `bbox` resolvers (pure, from
- * AppState). Spatial refs (`ray`, `screen`, `nearest`, `semantic`) have a stable
- * interface here and are wired to RPC in Phase 3 (renderer) / later phases.
+ * `id`, `name`, and `bbox` resolve purely from AppState; `ray`/`screen` use a
+ * backend raycast RPC. `nearest` (closest shape to a point) and `semantic`
+ * (directional extreme / inlet-outlet by name / largest by bbox) resolve at
+ * SHAPE granularity from AppState bounding boxes — face/edge/vertex granularity
+ * still needs backend tessellation and falls through to null.
  */
 
 import type { JsonObject, Vec3 } from './types';
@@ -52,6 +54,32 @@ function bboxContained(a: GeometryNode['bbox'], min: Vec3, max: Vec3): boolean {
   );
 }
 
+/** Euclidean distance from a point to an axis-aligned box (0 if inside). */
+function pointToBboxDistance(p: Vec3, bbox: GeometryNode['bbox']): number {
+  let s = 0;
+  for (let k = 0; k < 3; k++) {
+    const v = p[k];
+    const d = v < bbox.min[k] ? bbox.min[k] - v : v > bbox.max[k] ? v - bbox.max[k] : 0;
+    s += d * d;
+  }
+  return Math.sqrt(s);
+}
+
+function bboxVolume(b: GeometryNode['bbox']): number {
+  return (b.max[0] - b.min[0]) * (b.max[1] - b.min[1]) * (b.max[2] - b.min[2]);
+}
+
+// Directional hint → [axis, takeMax]. Convention: +Z up, so top/bottom are Z,
+// left/right are X, front/back are Y.
+const DIR_AXIS: Record<string, [number, boolean]> = {
+  top: [2, true],
+  bottom: [2, false],
+  right: [0, true],
+  left: [0, false],
+  back: [1, true],
+  front: [1, false],
+};
+
 /**
  * Default resolver. `getState` supplies the current AppState; `rpc` is used for
  * spatial queries that require the backend (raycast / nearest).
@@ -89,10 +117,72 @@ export function createEntityResolver(getState: () => Readonly<AppState>, rpc: Rp
           );
           return res?.shape_id ? { entityType: 'shape', ids: [res.shape_id] } : null;
         }
-        case 'nearest':
-        case 'semantic':
-          // Stable interface; backend wiring lands with the renderer (Phase 3+).
+        case 'nearest': {
+          const ns = nodes();
+          if (!ns.length) return null;
+          // Nearest shape by point-to-bbox distance.
+          let best = ns[0];
+          let bestD = Infinity;
+          for (const n of ns) {
+            const d = pointToBboxDistance(ref.point, n.bbox);
+            if (d < bestD) {
+              bestD = d;
+              best = n;
+            }
+          }
+          if (ref.entity === 'shape') {
+            return { entityType: 'shape', ids: [best.id] };
+          }
+          // Face/edge/vertex granularity: pick the nearest sub-entity of the
+          // nearest shape via the backend (per-face/edge/vertex queries).
+          if (rpc.isLive() && (ref.entity === 'face' || ref.entity === 'edge' || ref.entity === 'vertex')) {
+            const method = { face: 'cad.pick.face', edge: 'cad.pick.edge', vertex: 'cad.pick.vertex' }[ref.entity];
+            const idKey = { face: 'face_id', edge: 'edge_id', vertex: 'vertex_id' }[ref.entity];
+            try {
+              const res = await rpc.request<Record<string, number> | null>(method, {
+                shape_id: best.id,
+                point: [...ref.point],
+              });
+              const picked = res?.[idKey];
+              return picked !== undefined ? { entityType: ref.entity, ids: [String(picked)] } : null;
+            } catch {
+              return null; // no pickable sub-entity → unresolved, not an error
+            }
+          }
           return null;
+        }
+        case 'semantic': {
+          const ns = nodes();
+          if (!ns.length) return null;
+          // Flow patches resolve by name (e.g. a shape named "inlet_pipe").
+          if (ref.hint === 'inlet' || ref.hint === 'outlet') {
+            const matches = ns.filter((n) => n.name.toLowerCase().includes(ref.hint));
+            return matches.length ? { entityType: 'shape', ids: matches.map((n) => n.id) } : null;
+          }
+          // Restrict to a named/id'd shape when `of` is given, else the whole scene.
+          const pool = ref.of ? ns.filter((n) => n.id === ref.of || n.name === ref.of) : ns;
+          if (!pool.length) return null;
+          // Directional extreme: the shape furthest along the requested axis.
+          const dir = DIR_AXIS[ref.hint];
+          if (dir) {
+            const [axis, takeMax] = dir;
+            let best = pool[0];
+            for (const n of pool) {
+              const v = takeMax ? n.bbox.max[axis] : n.bbox.min[axis];
+              const bv = takeMax ? best.bbox.max[axis] : best.bbox.min[axis];
+              if (takeMax ? v > bv : v < bv) best = n;
+            }
+            return { entityType: 'shape', ids: [best.id] };
+          }
+          // largest_face is approximated by the largest-bounding-box shape until
+          // backend face geometry is available.
+          if (ref.hint === 'largest_face') {
+            let best = pool[0];
+            for (const n of pool) if (bboxVolume(n.bbox) > bboxVolume(best.bbox)) best = n;
+            return { entityType: 'shape', ids: [best.id] };
+          }
+          return null;
+        }
       }
     },
   };

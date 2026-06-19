@@ -29,7 +29,7 @@ use gfd_cad::{
     bool_::{compound_merge, mesh_boolean, MeshOp},
     feature::{box_solid, c_channel_profile, t_beam_profile, z_section_profile, chamfered_box_solid, chamfered_box_top_edges, circular_array, cone_solid, capsule_revolve_profile, cup_revolve_profile, cylinder_solid, disc_solid, dodecahedron_solid, ellipse_profile, filleted_box_solid, filleted_box_top_edges, filleted_cylinder_solid, frustum_revolve_profile, gear_profile_simple, airfoil_naca4_profile, archimedean_spiral_path, helix_length, helix_path, honeycomb_pattern_solid, torus_knot_path, i_beam_profile, icosahedron_solid, icosphere_solid, l_angle_profile, linear_array, mirror_shape, ngon_prism_solid, octahedron_solid, offset_polygon_2d, pad_polygon_xy, pocket_polygon_xy, pyramid_solid, rectangle_profile, rectangular_array, regular_ngon_profile, revolve_profile_z, revolve_profile_z_partial, ring_revolve_profile, rotate_shape, rounded_rectangle_profile, scale_shape, slot_profile, sphere_solid, spiral_staircase_solid, stairs_solid, star_profile, tetrahedron_solid, torus_revolve_profile, torus_solid, translate_shape, tube_solid, wedge_solid, FeatureTree, MirrorPlane},
     heal::{check_validity, fix_shape, shape_stats, HealOptions},
-    io::{export_step, import_brep, import_step, read_brep, read_obj, read_off, read_ply_ascii, read_stl, read_xyz, summarise_step, write_brep, write_dxf_3dface, write_obj, write_off, write_ply_ascii, write_stl_ascii, write_stl_binary, write_vtk_polydata, write_wrl, write_xyz, StlMesh},
+    io::{export_step, import_brep, import_step, import_step_brep, read_brep, read_obj, read_off, read_ply_ascii, read_step_trimesh, read_stl, read_xyz, summarise_step, write_brep, write_dxf_3dface, write_obj, write_off, write_ply_ascii, write_stl_ascii, write_stl_binary, write_vtk_polydata, write_wrl, write_xyz, StlMesh},
     measure::{bbox_volume, bounding_sphere, center_of_mass, closest_point_on_shape, distance as cad_distance, distance_edge_edge, distance_vertex_edge, divergence_volume, edge_length, edge_length_range, hausdorff_distance_vertex, inertia_tensor_full, is_convex_polygon, is_point_inside_solid, mesh_euler_genus, polygon_area, polygon_area_signed, polygon_centroid, polygon_contains_point, polygon_convex_hull, polygon_perimeter, principal_axes, signed_distance, surface_area, trimesh_aspect_ratio_stats, trimesh_bounding_box, trimesh_boundary_edges, trimesh_center_of_mass, trimesh_closest_point, trimesh_edge_length_stats, trimesh_inertia_tensor, trimesh_is_closed, trimesh_non_manifold_edges, trimesh_point_inside, trimesh_ray_intersect, trimesh_signed_distance, trimesh_surface_area, trimesh_volume},
     sketch::{Constraint as SkCons, EntityId as SkEid, Point2, PointId as SkPid, Sketch},
     tessel::{extract_edges, tessellate, tessellate_adaptive, TessellationOptions, TriMesh},
@@ -100,12 +100,20 @@ struct ServerState {
     cad_doc: Document,
     /// Map from GUI-facing shape string id ("shape_N") to arena ShapeId.
     cad_shape_map: HashMap<String, ShapeId>,
+    /// Imported triangle meshes (STL/OBJ/OFF/PLY/XYZ) keyed by GUI shape id.
+    /// These have no B-Rep arena entry — they are stored verbatim and returned
+    /// directly by the tessellate handlers so an imported CAD file can live in
+    /// the feature tree and render like any other shape.
+    imported_meshes: HashMap<String, TriMesh>,
+    /// Structured-grid cell indices classified as solid (inside a solid body) by
+    /// the last `mesh.generate` with `mask_solids`. Used as an immersed-boundary
+    /// blanking set: the fluid solver zeros velocity in these cells. Empty = no
+    /// masking. Indexed i + j*nx + k*nx*ny, matching mesh cell order.
+    solid_cells: Vec<usize>,
     /// Counter for cad shape string ids.
     next_cad_shape_id: u64,
     /// Applied pluggable physics manifest (Phase 7), as received from the GUI.
     physics_manifest: Option<Value>,
-    /// Imported triangle meshes registered as shape ids (beside the B-Rep arena).
-    imported_meshes: HashMap<String, ImportedMesh>,
     /// Persistent Gmsh session (professional OCC CAD + meshing), feature-gated.
     #[cfg(feature = "gmsh")]
     gmsh: Option<gfd_gmsh::GmshSession>,
@@ -123,12 +131,6 @@ struct PrimitiveBody {
 /// An imported triangle mesh (STL/OBJ/...) registered in the document tree as a
 /// shape id, alongside the B-Rep arena (the kernel is B-Rep, so imported soups
 /// live beside the arena and are served directly for tessellation/measurement).
-struct ImportedMesh {
-    positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
-    indices: Vec<u32>,
-}
-
 struct JobHandle {
     running: Arc<AtomicBool>,
     iteration: Arc<AtomicU64>,
@@ -142,6 +144,9 @@ struct JobResult {
     status: String,
     iterations: usize,
     residual: f64,
+    /// Per-equation final update residuals [vx, vy, vz, pressure]; f64::MAX = n/a
+    /// (e.g. thermal solves). `residual` above is the continuity/mass residual.
+    eq_residuals: [f64; 4],
     fields: HashMap<String, Vec<f64>>,
 }
 
@@ -157,9 +162,10 @@ impl ServerState {
             fields: HashMap::new(),
             cad_doc: Document::new(),
             cad_shape_map: HashMap::new(),
+            imported_meshes: HashMap::new(),
+            solid_cells: Vec::new(),
             next_cad_shape_id: 0,
             physics_manifest: None,
-            imported_meshes: HashMap::new(),
             #[cfg(feature = "gmsh")]
             gmsh: None,
             #[cfg(feature = "gmsh")]
@@ -471,6 +477,9 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.feature.primitive" => handle_cad_feature_primitive(state, req.id, &req.params),
         // --- Gmsh (OCC) backend: professional CAD + enclosure + meshing (feature-gated) ---
         "gmsh.primitive"      => handle_gmsh_primitive(state, req.id, &req.params),
+        "gmsh.transform"      => handle_gmsh_transform(state, req.id, &req.params),
+        "gmsh.delete"         => handle_gmsh_delete(state, req.id, &req.params),
+        "gmsh.measure"        => handle_gmsh_measure(state, req.id, &req.params),
         "gmsh.boolean"        => handle_gmsh_boolean(state, req.id, &req.params),
         "gmsh.heal"           => handle_gmsh_heal(state, req.id, &req.params),
         "gmsh.tessellate"     => handle_gmsh_tessellate(state, req.id, &req.params),
@@ -547,6 +556,8 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.import.off"        => handle_cad_import_mesh(req.id, &req.params, "off"),
         "cad.import.ply"        => handle_cad_import_mesh(req.id, &req.params, "ply"),
         "cad.import.xyz"        => handle_cad_import_mesh(req.id, &req.params, "xyz"),
+        "cad.import.mesh_to_tree" => handle_cad_import_mesh_to_tree(state, req.id, &req.params),
+        "cad.import.step_mesh"  => handle_cad_import_step_mesh(state, req.id, &req.params),
         "cad.measure.polygon_area" => handle_cad_measure_polygon_area(req.id, &req.params),
         "cad.measure.polygon_full" => handle_cad_measure_polygon_full(req.id, &req.params),
         "cad.measure.polygon_signed_area" => handle_cad_measure_polygon_signed_area(req.id, &req.params),
@@ -565,6 +576,10 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.measure.mesh_quality" => handle_cad_measure_mesh_quality(state, req.id, &req.params),
         "cad.measure.bbox_volume"  => handle_cad_measure_bbox_volume(state, req.id, &req.params),
         "cad.measure.distance"     => handle_cad_measure_distance(state, req.id, &req.params),
+        "cad.measure.shape_angle"  => handle_cad_measure_shape_angle(state, req.id, &req.params),
+        "cad.pick.face"            => handle_cad_pick_face(state, req.id, &req.params),
+        "cad.pick.edge"            => handle_cad_pick_edge(state, req.id, &req.params),
+        "cad.pick.vertex"          => handle_cad_pick_vertex(state, req.id, &req.params),
         "cad.measure.segment_segment" => handle_cad_measure_segment_segment(req.id, &req.params),
         "cad.measure.point_plane"     => handle_cad_measure_point_plane(req.id, &req.params),
         "cad.measure.ray_plane"       => handle_cad_measure_ray_plane(req.id, &req.params),
@@ -578,6 +593,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.import.brep"          => handle_cad_import_brep(state, req.id, &req.params),
         "cad.export.step"          => handle_cad_export_step(state, req.id, &req.params),
         "cad.import.step"          => handle_cad_import_step(state, req.id, &req.params),
+        "cad.import.step_brep"     => handle_cad_import_step_brep(state, req.id, &req.params),
         "cad.step.summary"         => handle_cad_step_summary(req.id, &req.params),
         "cad.export.stl"           => handle_cad_export_stl(state, req.id, &req.params),
         "cad.export.obj"           => handle_cad_export_obj(state, req.id, &req.params),
@@ -641,6 +657,12 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "field.export_vdb" => handle_field_export_vdb(state, req.id, &req.params),
         "field.export_nvdb" => handle_field_export_nvdb(state, req.id, &req.params),
         "field.vectors" => handle_field_vectors(state, req.id, &req.params),
+        "field.isosurface" => handle_field_isosurface(state, req.id, &req.params),
+        "field.vorticity" => handle_field_vorticity(state, req.id, &req.params),
+        "field.qcriterion" => handle_field_qcriterion(state, req.id, &req.params),
+        "field.probe" => handle_field_probe(state, req.id, &req.params),
+        "field.objective" => handle_field_objective(state, req.id, &req.params),
+        "field.export_vtk" => handle_field_export_vtk(state, req.id, &req.params),
         "field.streamlines" => handle_field_streamlines(state, req.id, &req.params),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
@@ -774,6 +796,8 @@ fn handle_cad_create_primitive(state: &mut ServerState, id: u64, params: &Value)
 fn handle_cad_document_new(state: &mut ServerState, id: u64) -> RpcResponse {
     state.cad_doc = Document::new();
     state.cad_shape_map.clear();
+    state.imported_meshes.clear();
+    state.solid_cells.clear();
     state.next_cad_shape_id = 0;
     RpcResponse::ok(id, serde_json::json!({ "ok": true }))
 }
@@ -817,6 +841,8 @@ fn handle_cad_document_from_string(state: &mut ServerState, id: u64, params: &Va
     };
     state.cad_doc = gfd_cad::Document::default();
     state.cad_shape_map.clear();
+    state.imported_meshes.clear();
+    state.solid_cells.clear();
     state.next_cad_shape_id = 0;
     let Some(arr) = doc.get("shapes").and_then(|v| v.as_array()) else {
         return RpcResponse::err(id, "doc missing 'shapes'");
@@ -892,6 +918,8 @@ fn handle_cad_document_load_json(state: &mut ServerState, id: u64, params: &Valu
     // Reset document (new arena + clear sketches).
     state.cad_doc = gfd_cad::Document::default();
     state.cad_shape_map.clear();
+    state.imported_meshes.clear();
+    state.solid_cells.clear();
     state.next_cad_shape_id = 0;
     let Some(arr) = doc.get("shapes").and_then(|v| v.as_array()) else {
         return RpcResponse::err(id, "doc missing 'shapes'");
@@ -947,6 +975,12 @@ macro_rules! gmsh_stub {
 }
 #[cfg(not(feature = "gmsh"))]
 gmsh_stub!(handle_gmsh_primitive);
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_transform);
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_delete);
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_measure);
 #[cfg(not(feature = "gmsh"))]
 gmsh_stub!(handle_gmsh_boolean);
 #[cfg(not(feature = "gmsh"))]
@@ -1016,6 +1050,78 @@ fn handle_gmsh_primitive(state: &mut ServerState, id: u64, params: &Value) -> Rp
     let bbox = s.bounding_box(tag).ok();
     let sid = register_gmsh_shape(state, tag);
     RpcResponse::ok(id, serde_json::json!({ "shape_id": sid, "tag": tag, "kind": kind, "bbox": bbox }))
+}
+
+/// In-place transform of a gmsh solid: translate / rotate / scale. The shape_id
+/// (and tag) are preserved so existing references stay valid. rotate/scale use
+/// the solid's bbox center as the default pivot.
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_transform(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let Some(sid) = params.get("shape_id").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing shape_id");
+    };
+    let tag = match gmsh_tag(state, sid) { Ok(t) => t, Err(e) => return RpcResponse::err(id, e) };
+    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("translate").to_string();
+    let p = |k: &str, d: f64| params.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+    let s = state.gmsh.as_ref().unwrap();
+    let center = || s.bounding_box(tag).map(|b| [(b[0]+b[3])*0.5, (b[1]+b[4])*0.5, (b[2]+b[5])*0.5]).unwrap_or([0.0;3]);
+    let res = match kind.as_str() {
+        "translate" => s.translate(tag, p("tx", 0.0), p("ty", 0.0), p("tz", 0.0)),
+        "rotate" => {
+            let c = center();
+            let (cx, cy, cz) = (p("cx", c[0]), p("cy", c[1]), p("cz", c[2]));
+            let ang = p("angle_deg", 90.0).to_radians();
+            s.rotate(tag, cx, cy, cz, p("ax", 0.0), p("ay", 0.0), p("az", 1.0), ang)
+        }
+        "scale" => {
+            let c = center();
+            let (cx, cy, cz) = (p("cx", c[0]), p("cy", c[1]), p("cz", c[2]));
+            // Uniform `s` or per-axis sx/sy/sz.
+            let uni = p("s", 1.0);
+            s.scale(tag, cx, cy, cz, p("sx", uni), p("sy", uni), p("sz", uni))
+        }
+        other => return RpcResponse::err(id, format!("unknown transform kind: {other}")),
+    };
+    if let Err(e) = res { return RpcResponse::err(id, e.to_string()); }
+    let _ = s.synchronize();
+    let bbox = s.bounding_box(tag).ok();
+    RpcResponse::ok(id, serde_json::json!({ "shape_id": sid, "tag": tag, "bbox": bbox }))
+}
+
+/// Delete a gmsh solid (and drop it from the shape map).
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_delete(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let Some(sid) = params.get("shape_id").and_then(|v| v.as_str()).map(String::from) else {
+        return RpcResponse::err(id, "missing shape_id");
+    };
+    let tag = match gmsh_tag(state, &sid) { Ok(t) => t, Err(e) => return RpcResponse::err(id, e) };
+    {
+        let s = state.gmsh.as_ref().unwrap();
+        if let Err(e) = s.remove(tag) { return RpcResponse::err(id, e.to_string()); }
+        let _ = s.synchronize();
+    }
+    state.gmsh_shapes.remove(&sid);
+    RpcResponse::ok(id, serde_json::json!({ "deleted": true, "shape_id": sid }))
+}
+
+/// Mass properties of a gmsh solid: volume, center of mass, surface area, bbox.
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_measure(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let Some(sid) = params.get("shape_id").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing shape_id");
+    };
+    let tag = match gmsh_tag(state, sid) { Ok(t) => t, Err(e) => return RpcResponse::err(id, e) };
+    let s = state.gmsh.as_ref().unwrap();
+    RpcResponse::ok(id, serde_json::json!({
+        "shape_id": sid,
+        "volume": s.volume(tag).ok(),
+        "center_of_mass": s.center_of_mass(tag).ok(),
+        "surface_area": s.surface_area(tag).ok(),
+        "bbox": s.bounding_box(tag).ok(),
+    }))
 }
 
 #[cfg(feature = "gmsh")]
@@ -1341,11 +1447,13 @@ fn handle_cad_tessellate_adaptive(state: &mut ServerState, id: u64, params: &Val
         Some(s) => s,
         None => return RpcResponse::err(id, "missing shape_id"),
     };
-    if let Some(im) = state.imported_meshes.get(str_id) {
-        let positions: Vec<f32> = im.positions.iter().flat_map(|p| p.iter().copied()).collect();
-        let normals: Vec<f32> = im.normals.iter().flat_map(|n| n.iter().copied()).collect();
+    // Imported triangle meshes have no B-Rep arena entry — return them verbatim.
+    if let Some(mesh) = state.imported_meshes.get(str_id) {
+        let positions: Vec<f32> = mesh.positions.iter().flat_map(|p| p.iter().copied()).collect();
+        let normals:   Vec<f32> = mesh.normals.iter().flat_map(|n| n.iter().copied()).collect();
         return RpcResponse::ok(id, serde_json::json!({
-            "positions": positions, "normals": normals, "indices": im.indices,
+            "positions": positions, "normals": normals, "indices": mesh.indices,
+            "triangle_count": mesh.indices.len() / 3,
         }));
     }
     let Some(arena_id) = state.cad_shape_map.get(str_id).copied() else {
@@ -2036,7 +2144,7 @@ fn handle_cad_import_stl_to_doc(state: &mut ServerState, id: u64, params: &Value
     let tri_count = mesh.triangle_count();
     state.imported_meshes.insert(
         shape_id.clone(),
-        ImportedMesh { positions: mesh.positions, normals: mesh.normals, indices: mesh.indices },
+        TriMesh { positions: mesh.positions, normals: mesh.normals, indices: mesh.indices },
     );
     let (mn, mx) = bbox.unwrap_or(([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]));
     RpcResponse::ok(id, serde_json::json!({
@@ -2065,6 +2173,317 @@ fn handle_cad_import_stl(id: u64, params: &Value) -> RpcResponse {
         }
         Err(e) => RpcResponse::err(id, format!("stl read failed: {}", e)),
     }
+}
+
+/// Import a triangle-mesh CAD file (STL / OBJ / OFF / PLY / XYZ) and register
+/// it in the document as a renderable shape so it can live in the feature tree.
+///
+/// Unlike `cad.import.{stl,obj,...}` (which return a loose mesh with no id),
+/// this allocates a `shape_N` id, stores the `TriMesh` verbatim in
+/// `imported_meshes`, and returns the id + axis-aligned bbox + counts. The
+/// tessellate handlers return stored meshes directly, so the command-core can
+/// add a `GeometryNode` and the viewport renders it like a primitive.
+fn handle_cad_import_mesh_to_tree(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing path");
+    };
+    // Infer format from explicit param or the file extension.
+    let fmt = params
+        .get("format")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_ascii_lowercase())
+        .or_else(|| {
+            std::path::Path::new(path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase())
+        })
+        .unwrap_or_default();
+    let p = std::path::Path::new(path);
+    let mesh: TriMesh = match fmt.as_str() {
+        "stl" => match read_stl(p) {
+            Ok(m) => TriMesh { positions: m.positions, normals: m.normals, indices: m.indices },
+            Err(e) => return RpcResponse::err(id, format!("stl import failed: {}", e)),
+        },
+        "obj" => match read_obj(p) { Ok(m) => m, Err(e) => return RpcResponse::err(id, format!("obj import failed: {}", e)) },
+        "off" => match read_off(p) { Ok(m) => m, Err(e) => return RpcResponse::err(id, format!("off import failed: {}", e)) },
+        "ply" => match read_ply_ascii(p) { Ok(m) => m, Err(e) => return RpcResponse::err(id, format!("ply import failed: {}", e)) },
+        "xyz" => match read_xyz(p) { Ok(m) => m, Err(e) => return RpcResponse::err(id, format!("xyz import failed: {}", e)) },
+        other => return RpcResponse::err(id, format!("unsupported mesh format: {}", other)),
+    };
+    if mesh.positions.is_empty() {
+        return RpcResponse::err(id, "imported mesh has no vertices");
+    }
+    // Axis-aligned bounding box over all vertices.
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for v in &mesh.positions {
+        for k in 0..3 {
+            if v[k] < min[k] { min[k] = v[k]; }
+            if v[k] > max[k] { max[k] = v[k]; }
+        }
+    }
+    let tri_count = mesh.indices.len() / 3;
+    let vert_count = mesh.positions.len();
+    state.next_cad_shape_id += 1;
+    let str_id = format!("shape_{}", state.next_cad_shape_id);
+    state.imported_meshes.insert(str_id.clone(), mesh);
+    RpcResponse::ok(id, serde_json::json!({
+        "shape_id":       str_id,
+        "arena_id":       0,
+        "kind":           format!("imported_{}", fmt),
+        "triangle_count": tri_count,
+        "vertex_count":   vert_count,
+        "bbox": {
+            "min": [min[0] as f64, min[1] as f64, min[2] as f64],
+            "max": [max[0] as f64, max[1] as f64, max[2] as f64],
+        },
+    }))
+}
+
+/// Import a STEP file as a reconstructed faceted solid (planar faces) and
+/// register it as a renderable mesh shape in the tree — same path as
+/// `cad.import.mesh_to_tree`, so STEP files render as solids, not point clouds.
+fn handle_cad_import_step_mesh(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing path");
+    };
+    let mesh = match read_step_trimesh(std::path::Path::new(path)) {
+        Ok(m) => m,
+        Err(e) => return RpcResponse::err(id, format!("step face import failed: {}", e)),
+    };
+    if mesh.positions.is_empty() {
+        return RpcResponse::err(id, "STEP file has no reconstructable faces");
+    }
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for v in &mesh.positions {
+        for k in 0..3 {
+            if v[k] < min[k] { min[k] = v[k]; }
+            if v[k] > max[k] { max[k] = v[k]; }
+        }
+    }
+    let tri_count = mesh.indices.len() / 3;
+    let vert_count = mesh.positions.len();
+    state.next_cad_shape_id += 1;
+    let str_id = format!("shape_{}", state.next_cad_shape_id);
+    state.imported_meshes.insert(str_id.clone(), mesh);
+    RpcResponse::ok(id, serde_json::json!({
+        "shape_id":       str_id,
+        "arena_id":       0,
+        "kind":           "imported_step",
+        "triangle_count": tri_count,
+        "vertex_count":   vert_count,
+        "bbox": {
+            "min": [min[0] as f64, min[1] as f64, min[2] as f64],
+            "max": [max[0] as f64, max[1] as f64, max[2] as f64],
+        },
+    }))
+}
+
+/// TriMesh for any GUI shape id — imported meshes verbatim, arena shapes by
+/// tessellation. The common "give me triangles for shape_N" lookup.
+fn shape_trimesh(state: &ServerState, str_id: &str) -> Result<TriMesh, String> {
+    if let Some(m) = state.imported_meshes.get(str_id) {
+        return Ok(m.clone());
+    }
+    let Some(arena_id) = state.cad_shape_map.get(str_id).copied() else {
+        return Err(format!("unknown shape_id: {}", str_id));
+    };
+    tessellate(&state.cad_doc.arena, arena_id, TessellationOptions::default())
+        .map_err(|e| format!("tessellate failed: {}", e))
+}
+
+/// Concatenate several shapes' triangle meshes into one (positions/normals
+/// pushed, indices re-emitted with a running vertex offset since TriMesh keeps
+/// three parallel Vecs). Used to build the union of solid bodies for immersed-
+/// boundary cell classification. If `ids` is empty, every shape the server
+/// knows (imported meshes + arena shapes) is included.
+fn combined_solid_trimesh(state: &ServerState, ids: &[String]) -> TriMesh {
+    let mut owned: Vec<String> = Vec::new();
+    let id_iter: Vec<&String> = if ids.is_empty() {
+        owned.extend(state.imported_meshes.keys().cloned());
+        owned.extend(state.cad_shape_map.keys().cloned());
+        owned.iter().collect()
+    } else {
+        ids.iter().collect()
+    };
+    let mut out = TriMesh::default();
+    for sid in id_iter {
+        let Ok(m) = shape_trimesh(state, sid) else { continue };
+        let base = out.positions.len() as u32;
+        out.positions.extend_from_slice(&m.positions);
+        out.normals.extend_from_slice(&m.normals);
+        out.indices.extend(m.indices.iter().map(|i| i + base));
+    }
+    out
+}
+
+/// Classify structured-grid cells as solid (cell center inside the given solid
+/// mesh). Returns the sorted list of solid cell indices (i + j*nx + k*nx*ny).
+/// Empty if the solid mesh is empty or not a closed manifold (inside tests are
+/// unreliable on open meshes, so we conservatively mask nothing).
+fn classify_solid_cells(mesh: &UnstructuredMesh, solid: &TriMesh) -> Vec<usize> {
+    if solid.indices.len() < 3 || solid.positions.is_empty() {
+        return Vec::new();
+    }
+    // The ray-cast parity test only gives correct inside/outside on a GEOMETRY-
+    // watertight surface. Weld coincident vertices (position-based) + prune, then
+    // require trimesh_is_closed: this ACCEPTS real watertight geometry (imported
+    // STL / STEP faces and every primitive — box/prism/pad via wire-bounded
+    // planar faces, cylinder/cone via wire-bounded disc caps, sphere) and
+    // conservatively REJECTS surfaces with gaps (masking nothing is safer than
+    // masking the wrong cells).
+    let mut welded = solid.clone();
+    let tol = welded
+        .aabb()
+        .map(|(mn, mx)| {
+            let d = (((mx[0] - mn[0]).powi(2) + (mx[1] - mn[1]).powi(2) + (mx[2] - mn[2]).powi(2)) as f32).sqrt();
+            (d * 1e-4).max(1e-6)
+        })
+        .unwrap_or(1e-6);
+    welded.weld(tol);
+    welded.prune_unused_vertices();
+    if welded.indices.len() < 3 || !trimesh_is_closed(&welded.indices) {
+        return Vec::new();
+    }
+    // Bounding box of the solid for an O(1) reject of far-away cells.
+    let (bmn, bmx) = welded.aabb().unwrap_or(([0.0; 3], [0.0; 3]));
+    let eps = 1e-6_f64;
+    let lo = [bmn[0] as f64 - eps, bmn[1] as f64 - eps, bmn[2] as f64 - eps];
+    let hi = [bmx[0] as f64 + eps, bmx[1] as f64 + eps, bmx[2] as f64 + eps];
+    let mut out = Vec::new();
+    for (i, cell) in mesh.cells.iter().enumerate() {
+        let c = cell.center;
+        if c[0] < lo[0] || c[0] > hi[0] || c[1] < lo[1] || c[1] > hi[1] || c[2] < lo[2] || c[2] > hi[2] {
+            continue;
+        }
+        if trimesh_point_inside(c, &welded.positions, &welded.indices) {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// Dominant PCA axis of a vertex cloud (power iteration on the covariance
+/// matrix). Returns a unit vector along the largest spatial extent — the
+/// shape's principal direction. None for degenerate clouds AND for rotationally
+/// symmetric shapes (cube/sphere/square plate) whose top eigenvalue is not
+/// strictly separated — for those a "principal axis" is geometrically
+/// ill-defined, so we report None rather than a seed-dependent fake direction.
+fn trimesh_principal_axis(positions: &[[f32; 3]]) -> Option<[f64; 3]> {
+    let n = positions.len();
+    if n < 2 {
+        return None;
+    }
+    let mut mean = [0.0f64; 3];
+    for p in positions {
+        for k in 0..3 {
+            mean[k] += p[k] as f64;
+        }
+    }
+    for m in &mut mean {
+        *m /= n as f64;
+    }
+    let mut cov = [[0.0f64; 3]; 3];
+    for p in positions {
+        let d = [p[0] as f64 - mean[0], p[1] as f64 - mean[1], p[2] as f64 - mean[2]];
+        for r in 0..3 {
+            for c in 0..3 {
+                cov[r][c] += d[r] * d[c];
+            }
+        }
+    }
+    // Power iteration; generic start avoids axis-aligned eigenvector traps.
+    let mut v = [0.577, 0.577, 0.578];
+    for _ in 0..64 {
+        let w = [
+            cov[0][0] * v[0] + cov[0][1] * v[1] + cov[0][2] * v[2],
+            cov[1][0] * v[0] + cov[1][1] * v[1] + cov[1][2] * v[2],
+            cov[2][0] * v[0] + cov[2][1] * v[1] + cov[2][2] * v[2],
+        ];
+        let len = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt();
+        if len < 1e-30 {
+            return None;
+        }
+        v = [w[0] / len, w[1] / len, w[2] / len];
+    }
+    // Reject degenerate eigenspaces: the dominant eigenvalue λ1 = vᵀ·cov·v must
+    // be strictly larger than the average of the other two ((trace−λ1)/2). For an
+    // isotropic shape (cube/sphere) all three are equal → λ1 == that average → the
+    // converged v is just the seed, geometrically meaningless.
+    let trace = cov[0][0] + cov[1][1] + cov[2][2];
+    if trace <= 1e-30 {
+        return None;
+    }
+    let mv = [
+        cov[0][0] * v[0] + cov[0][1] * v[1] + cov[0][2] * v[2],
+        cov[1][0] * v[0] + cov[1][1] * v[1] + cov[1][2] * v[2],
+        cov[2][0] * v[0] + cov[2][1] * v[1] + cov[2][2] * v[2],
+    ];
+    let lambda1 = mv[0] * v[0] + mv[1] * v[1] + mv[2] * v[2];
+    let others_avg = ((trace - lambda1) / 2.0).max(0.0);
+    if lambda1 - others_avg <= 1e-4 * trace {
+        return None; // no well-defined principal axis
+    }
+    Some(v)
+}
+
+/// Unsigned angle between two axes (orientation-free), in degrees ∈ [0, 90].
+fn axis_angle_deg(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let dot = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]).abs().clamp(0.0, 1.0);
+    dot.acos().to_degrees()
+}
+
+/// Angle between the principal axes of two shapes, or between one shape's
+/// principal axis and an explicit direction. Works for arena shapes AND
+/// imported meshes (PCA on the tessellated vertex cloud).
+fn handle_cad_measure_shape_angle(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(a_id) = params.get("a").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing shape id 'a'");
+    };
+    let mesh_a = match shape_trimesh(state, a_id) {
+        Ok(m) => m,
+        Err(e) => return RpcResponse::err(id, e),
+    };
+    let Some(axis_a) = trimesh_principal_axis(&mesh_a.positions) else {
+        return RpcResponse::err(id, format!("shape '{}' is degenerate (no principal axis)", a_id));
+    };
+
+    let (axis_b, b_label) = if let Some(b_id) = params.get("b").and_then(|v| v.as_str()) {
+        let mesh_b = match shape_trimesh(state, b_id) {
+            Ok(m) => m,
+            Err(e) => return RpcResponse::err(id, e),
+        };
+        match trimesh_principal_axis(&mesh_b.positions) {
+            Some(ax) => (ax, b_id.to_string()),
+            None => return RpcResponse::err(id, format!("shape '{}' is degenerate (no principal axis)", b_id)),
+        }
+    } else if let Some(dir) = params.get("direction").and_then(|v| v.as_array()) {
+        if dir.len() < 3 {
+            return RpcResponse::err(id, "direction must be [x,y,z]");
+        }
+        let d = [
+            dir[0].as_f64().unwrap_or(0.0),
+            dir[1].as_f64().unwrap_or(0.0),
+            dir[2].as_f64().unwrap_or(0.0),
+        ];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if len < 1e-30 {
+            return RpcResponse::err(id, "direction must be non-zero");
+        }
+        ([d[0] / len, d[1] / len, d[2] / len], "direction".to_string())
+    } else {
+        return RpcResponse::err(id, "need shape id 'b' or a 'direction' [x,y,z]");
+    };
+
+    RpcResponse::ok(id, serde_json::json!({
+        "angle_deg": axis_angle_deg(axis_a, axis_b),
+        "axis_a": axis_a,
+        "axis_b": axis_b,
+        "a": a_id,
+        "b": b_label,
+    }))
 }
 
 fn handle_cad_measure_polygon_area(id: u64, params: &Value) -> RpcResponse {
@@ -2315,8 +2734,9 @@ fn handle_cad_arena_delete_shape(state: &mut ServerState, id: u64, params: &Valu
     let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
         return RpcResponse::err(id, "missing shape_id");
     };
+    // Imported meshes live outside the arena — drop them directly.
     if state.imported_meshes.remove(str_id).is_some() {
-        return RpcResponse::ok(id, serde_json::json!({ "deleted": str_id }));
+        return RpcResponse::ok(id, serde_json::json!({ "deleted": str_id, "arena_id": 0 }));
     }
     let Some(aid) = state.cad_shape_map.remove(str_id) else {
         return RpcResponse::err(id, format!("unknown shape_id: {}", str_id));
@@ -2472,8 +2892,6 @@ fn handle_cad_measure_trimesh_sdf(id: u64, params: &Value) -> RpcResponse {
             closest_x.push(f64::NAN); closest_y.push(f64::NAN); closest_z.push(f64::NAN);
         }
     }
-    // Cheap second use of trimesh_point_inside (suppresses dead-code warning).
-    let _ = trimesh_point_inside;
     RpcResponse::ok(id, serde_json::json!({
         "sdf":       sdf,
         "closest_x": closest_x,
@@ -4299,6 +4717,37 @@ fn handle_cad_import_step(state: &mut ServerState, id: u64, params: &Value) -> R
     }
 }
 
+/// Reconstruct real B-Rep topology (vertices/edges/wires/faces/shells/solids)
+/// from a STEP file into the document arena — measurable / tessellatable, unlike
+/// the points-only `cad.import.step`.
+fn handle_cad_import_step_brep(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    use gfd_cad::topo::{collect_by_kind, ShapeKind};
+    let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing path");
+    };
+    match import_step_brep(std::path::Path::new(path), &mut state.cad_doc.arena) {
+        Ok(shape_id) => {
+            state.next_cad_shape_id += 1;
+            let str_id = format!("shape_{}", state.next_cad_shape_id);
+            state.cad_shape_map.insert(str_id.clone(), shape_id);
+            let arena = &state.cad_doc.arena;
+            // collect_by_kind counts traversal occurrences; dedup so shared
+            // edges/vertices report their true unique counts (a box → 12 / 8).
+            let uniq = |k| collect_by_kind(arena, shape_id, k).into_iter().collect::<std::collections::HashSet<_>>().len();
+            RpcResponse::ok(id, serde_json::json!({
+                "shape_id": str_id,
+                "arena_id": shape_id.0,
+                "solids": uniq(ShapeKind::Solid),
+                "shells": uniq(ShapeKind::Shell),
+                "faces": uniq(ShapeKind::Face),
+                "edges": uniq(ShapeKind::Edge),
+                "vertices": uniq(ShapeKind::Vertex),
+            }))
+        }
+        Err(e) => RpcResponse::err(id, format!("step B-Rep import failed: {}", e)),
+    }
+}
+
 fn handle_cad_import_brep(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
     let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
         return RpcResponse::err(id, "missing path");
@@ -4318,6 +4767,183 @@ fn handle_cad_import_brep(state: &mut ServerState, id: u64, params: &Value) -> R
             RpcResponse::ok(id, serde_json::json!({ "shape_id": shape_id }))
         }
         Err(e) => RpcResponse::err(id, format!("brep import failed: {}", e)),
+    }
+}
+
+/// Pick the face of an arena shape nearest to a 3D point: tessellates each face
+/// independently and returns the closest one's arena id + distance + centroid +
+/// surface kind. Lets the AI address a specific face ("the top face") rather
+/// than the whole shape. Arena shapes only (imported meshes have no B-Rep faces).
+fn handle_cad_pick_face(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    use gfd_cad::topo::{collect_by_kind, ShapeKind};
+    let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing shape_id");
+    };
+    let Some(arena_id) = state.cad_shape_map.get(str_id).copied() else {
+        return RpcResponse::err(id, format!("unknown shape_id (imported meshes have no faces): {}", str_id));
+    };
+    let Some(arr) = params.get("point").and_then(|v| v.as_array()) else {
+        return RpcResponse::err(id, "missing point [x,y,z]");
+    };
+    if arr.len() < 3 {
+        return RpcResponse::err(id, "point must be [x,y,z]");
+    }
+    let q = [
+        arr[0].as_f64().unwrap_or(0.0),
+        arr[1].as_f64().unwrap_or(0.0),
+        arr[2].as_f64().unwrap_or(0.0),
+    ];
+    let arena = &state.cad_doc.arena;
+    let faces = collect_by_kind(arena, arena_id, ShapeKind::Face);
+    if faces.is_empty() {
+        return RpcResponse::err(id, "shape has no faces");
+    }
+    let mut best: Option<(f64, gfd_cad::topo::ShapeId, [f64; 3], [f64; 3])> = None; // (dist, face, closest, centroid)
+    for f in faces {
+        let Ok(mesh) = tessellate(arena, f, TessellationOptions::default()) else { continue };
+        if mesh.positions.is_empty() {
+            continue;
+        }
+        let Some((cp, _tri, dist)) = trimesh_closest_point(q, &mesh.positions, &mesh.indices) else { continue };
+        if best.map_or(true, |(bd, ..)| dist < bd) {
+            // Centroid = mean of the face's vertices (sufficient for placement).
+            let mut ctr = [0.0f64; 3];
+            for p in &mesh.positions {
+                ctr[0] += p[0] as f64;
+                ctr[1] += p[1] as f64;
+                ctr[2] += p[2] as f64;
+            }
+            let inv = 1.0 / mesh.positions.len() as f64;
+            ctr = [ctr[0] * inv, ctr[1] * inv, ctr[2] * inv];
+            best = Some((dist, f, cp, ctr));
+        }
+    }
+    let Some((dist, face_id, cp, ctr)) = best else {
+        return RpcResponse::err(id, "no pickable face");
+    };
+    let kind = match arena.get(face_id) {
+        Ok(gfd_cad::topo::Shape::Face { surface, .. }) => match surface {
+            gfd_cad::topo::SurfaceGeom::Plane(_) => "plane",
+            gfd_cad::topo::SurfaceGeom::Cylinder(_) => "cylinder",
+            gfd_cad::topo::SurfaceGeom::Sphere(_) => "sphere",
+            gfd_cad::topo::SurfaceGeom::Cone(_) => "cone",
+            gfd_cad::topo::SurfaceGeom::Torus(_) => "torus",
+            gfd_cad::topo::SurfaceGeom::BSpline(_) => "bspline",
+            gfd_cad::topo::SurfaceGeom::Nurbs(_) => "nurbs",
+        },
+        _ => "unknown",
+    };
+    RpcResponse::ok(id, serde_json::json!({
+        "face_id": face_id.0,
+        "surface_kind": kind,
+        "distance": dist,
+        "closest_point": cp,
+        "centroid": ctr,
+    }))
+}
+
+/// Parse a `point: [x,y,z]` param.
+fn parse_point3(params: &Value) -> Result<[f64; 3], String> {
+    let arr = params.get("point").and_then(|v| v.as_array()).ok_or("missing point [x,y,z]")?;
+    if arr.len() < 3 {
+        return Err("point must be [x,y,z]".into());
+    }
+    Ok([
+        arr[0].as_f64().unwrap_or(0.0),
+        arr[1].as_f64().unwrap_or(0.0),
+        arr[2].as_f64().unwrap_or(0.0),
+    ])
+}
+
+/// Sample a curve into ~24 points along its parameter range (Line endpoints,
+/// Circle/BSpline along the arc) for nearest-edge distance.
+fn sample_curve_points(curve: &gfd_cad::topo::shape::CurveGeom) -> Vec<[f64; 3]> {
+    use gfd_cad::geom::Curve;
+    fn linspace<C: Curve>(c: &C) -> Vec<[f64; 3]> {
+        let (u0, u1) = c.u_range();
+        let n = 24usize;
+        (0..=n)
+            .filter_map(|i| {
+                let u = u0 + (u1 - u0) * i as f64 / n as f64;
+                c.eval(u).ok().map(|p| [p.x, p.y, p.z])
+            })
+            .collect()
+    }
+    match curve {
+        gfd_cad::topo::shape::CurveGeom::Line(c) => linspace(c),
+        gfd_cad::topo::shape::CurveGeom::Circle(c) => linspace(c),
+        gfd_cad::topo::shape::CurveGeom::BSpline(c) => linspace(c),
+    }
+}
+
+/// Pick the edge of an arena shape nearest to a 3D point.
+fn handle_cad_pick_edge(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    use gfd_cad::topo::{collect_by_kind, ShapeKind};
+    let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing shape_id");
+    };
+    let Some(arena_id) = state.cad_shape_map.get(str_id).copied() else {
+        return RpcResponse::err(id, format!("unknown shape_id (imported meshes have no edges): {}", str_id));
+    };
+    let q = match parse_point3(params) { Ok(q) => q, Err(e) => return RpcResponse::err(id, e) };
+    let arena = &state.cad_doc.arena;
+    let edges = collect_by_kind(arena, arena_id, ShapeKind::Edge);
+    if edges.is_empty() {
+        return RpcResponse::err(id, "shape has no edges");
+    }
+    let mut best: Option<(f64, gfd_cad::topo::ShapeId, [f64; 3])> = None; // (dist, edge, midpoint)
+    for e in edges {
+        let Ok(gfd_cad::topo::Shape::Edge { curve, .. }) = arena.get(e) else { continue };
+        let pts = sample_curve_points(curve);
+        if pts.is_empty() {
+            continue;
+        }
+        let mut emin = f64::MAX;
+        for p in &pts {
+            let d = ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt();
+            if d < emin { emin = d; }
+        }
+        if best.map_or(true, |(bd, ..)| emin < bd) {
+            best = Some((emin, e, pts[pts.len() / 2]));
+        }
+    }
+    match best {
+        Some((dist, edge_id, mid)) => RpcResponse::ok(id, serde_json::json!({
+            "edge_id": edge_id.0, "distance": dist, "midpoint": mid,
+        })),
+        None => RpcResponse::err(id, "no pickable edge"),
+    }
+}
+
+/// Pick the vertex of an arena shape nearest to a 3D point.
+fn handle_cad_pick_vertex(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    use gfd_cad::topo::{collect_by_kind, ShapeKind};
+    let Some(str_id) = params.get("shape_id").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing shape_id");
+    };
+    let Some(arena_id) = state.cad_shape_map.get(str_id).copied() else {
+        return RpcResponse::err(id, format!("unknown shape_id (imported meshes have no vertices): {}", str_id));
+    };
+    let q = match parse_point3(params) { Ok(q) => q, Err(e) => return RpcResponse::err(id, e) };
+    let arena = &state.cad_doc.arena;
+    let verts = collect_by_kind(arena, arena_id, ShapeKind::Vertex);
+    if verts.is_empty() {
+        return RpcResponse::err(id, "shape has no vertices");
+    }
+    let mut best: Option<(f64, gfd_cad::topo::ShapeId, [f64; 3])> = None;
+    for v in verts {
+        let Ok(gfd_cad::topo::Shape::Vertex { point }) = arena.get(v) else { continue };
+        let p = [point.x, point.y, point.z];
+        let d = ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt();
+        if best.map_or(true, |(bd, ..)| d < bd) {
+            best = Some((d, v, p));
+        }
+    }
+    match best {
+        Some((dist, vert_id, p)) => RpcResponse::ok(id, serde_json::json!({
+            "vertex_id": vert_id.0, "distance": dist, "point": p,
+        })),
+        None => RpcResponse::err(id, "no pickable vertex"),
     }
 }
 
@@ -4420,6 +5046,26 @@ fn handle_cad_measure_segment_segment(id: u64, params: &Value) -> RpcResponse {
 // Mesh handlers
 // ---------------------------------------------------------------------------
 
+/// Translate an unstructured mesh in place (positions + cached cell/face
+/// centroids). Volume/area/normal are translation-invariant and left untouched.
+fn translate_mesh(mesh: &mut UnstructuredMesh, off: [f64; 3]) {
+    for nd in &mut mesh.nodes {
+        for k in 0..3 {
+            nd.position[k] += off[k];
+        }
+    }
+    for c in &mut mesh.cells {
+        for k in 0..3 {
+            c.center[k] += off[k];
+        }
+    }
+    for fc in &mut mesh.faces {
+        for k in 0..3 {
+            fc.center[k] += off[k];
+        }
+    }
+}
+
 fn handle_mesh_generate(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
     let nx = params.get("nx").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
     let ny = params.get("ny").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
@@ -4445,7 +5091,14 @@ fn handle_mesh_generate(state: &mut ServerState, id: u64, params: &Value) -> Rpc
             (lx, ly, lz, 0.0, 0.0, 0.0)
         };
 
-    let mesh = StructuredMesh::uniform(nx, ny, nz, lx, ly, lz).to_unstructured();
+    let mut mesh = StructuredMesh::uniform(nx, ny, nz, lx, ly, lz).to_unstructured();
+
+    // The structured mesh is built at the origin; shift it to the domain min so
+    // the solved field (contour/vectors/isosurface/probe) aligns with the
+    // geometry in the live 3D view.
+    if origin_x != 0.0 || origin_y != 0.0 || origin_z != 0.0 {
+        translate_mesh(&mut mesh, [origin_x, origin_y, origin_z]);
+    }
 
     let n_cells = mesh.num_cells();
     let n_faces = mesh.num_faces();
@@ -4454,8 +5107,51 @@ fn handle_mesh_generate(state: &mut ServerState, id: u64, params: &Value) -> Rpc
     // Compute quality
     let quality = compute_mesh_quality(&mesh);
 
+    // Immersed-boundary masking: classify each cell as solid (inside a solid
+    // body) or fluid. The GUI passes `solid_shape_ids` = its geometry minus any
+    // enclosure box. An EXPLICIT empty list means "no solids" (mask nothing) —
+    // it must NOT fall back to "all shapes", which would mask against the
+    // fluid-domain enclosure and blank the whole field. Only a genuinely OMITTED
+    // key uses the "all known shapes" fallback.
+    let mask_solids = params.get("mask_solids").and_then(|v| v.as_bool()).unwrap_or(false);
+    let solid_ids: Option<Vec<String>> = params
+        .get("solid_shape_ids")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect());
+    let mut solid_cells: Vec<usize> = Vec::new();
+    if mask_solids {
+        match &solid_ids {
+            // Explicit list (even empty): mask exactly those shapes.
+            Some(ids) if !ids.is_empty() => {
+                let solid = combined_solid_trimesh(state, ids);
+                solid_cells = classify_solid_cells(&mesh, &solid);
+            }
+            Some(_) => { /* explicit empty → nothing is solid */ }
+            // Key omitted: fall back to every known shape.
+            None => {
+                let solid = combined_solid_trimesh(state, &[]);
+                solid_cells = classify_solid_cells(&mesh, &solid);
+            }
+        }
+    }
+    let n_solid = solid_cells.len();
+    let n_fluid = n_cells.saturating_sub(n_solid);
+
+    // Expose a 0/1 per-cell zone field for contour visualization (1 = solid).
+    state.fields.remove("cell_zone");
+    if mask_solids {
+        let mut zone = vec![0.0_f64; n_cells];
+        for &c in &solid_cells {
+            if c < n_cells {
+                zone[c] = 1.0;
+            }
+        }
+        state.fields.insert("cell_zone".to_string(), zone);
+    }
+
     state.mesh_params = Some((nx, ny, nz, lx, ly, lz));
     state.mesh = Some(mesh);
+    state.solid_cells = solid_cells;
 
     // Return enhanced response with domain info
     RpcResponse::ok(
@@ -4467,6 +5163,8 @@ fn handle_mesh_generate(state: &mut ServerState, id: u64, params: &Value) -> Rpc
             "nx": nx,
             "ny": ny,
             "nz": nz,
+            "solid_cells": n_solid,
+            "fluid_cells": n_fluid,
             "domain": {
                 "xmin": origin_x,
                 "xmax": origin_x + lx,
@@ -4611,6 +5309,8 @@ fn handle_solve_start(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
     // manifest's expression source terms. Changing the expression (e.g. via the
     // AI physics.set_term command) changes this force → changes the solved field.
     let momentum_source = build_momentum_source(&state.physics_manifest, &mesh);
+    // Immersed-boundary blanking set from the last solid-aware mesh.generate.
+    let blocked_cells = state.solid_cells.clone();
 
     thread::spawn(move || {
         if physics == "thermal" {
@@ -4642,6 +5342,7 @@ fn handle_solve_start(state: &mut ServerState, id: u64, params: &Value) -> RpcRe
                 &residual_t,
                 &result_t,
                 momentum_source,
+                blocked_cells,
             );
         }
         running_t.store(false, Ordering::SeqCst);
@@ -4900,6 +5601,7 @@ fn run_fluid_solve(
     residual: &Mutex<f64>,
     result_holder: &Mutex<Option<JobResult>>,
     momentum_source: Option<Vec<[f64; 3]>>,
+    blocked_cells: Vec<usize>,
 ) {
     let n = mesh.num_cells();
 
@@ -4920,6 +5622,20 @@ fn run_fluid_solve(
     if let Some(src) = momentum_source {
         solver.set_external_momentum_source(src);
     }
+    // Immersed-boundary blockage: mark solid cells so the SIMPLE solve penalizes
+    // their momentum diagonal (auto-scaled to K·a_p inside the solver) and drives
+    // velocity to ~0 — flow goes AROUND the body, not just the post-solve output
+    // mask below. Using the dedicated mask channel (not external_momentum_damping)
+    // keeps the auto-scaling separate from physical Carman-Kozeny damping.
+    if !blocked_cells.is_empty() {
+        let mut mask = vec![false; n];
+        for &c in &blocked_cells {
+            if c < n {
+                mask[c] = true;
+            }
+        }
+        solver.set_immersed_solid_mask(mask);
+    }
 
     // Parse boundary conditions
     let (boundary_velocities, boundary_pressure, wall_patches) =
@@ -4934,6 +5650,16 @@ fn run_fluid_solve(
     let mut final_status = "max_iterations".to_string();
     let mut final_residual = f64::MAX;
     let mut final_iter = 0;
+
+    // Per-equation update residuals: the normalized L2 change of each field
+    // between successive iterations. These are computed here (additively, without
+    // touching the gfd-fluid solver) so the AI can tell WHICH equation isn't
+    // converging — e.g. u-momentum stalled while v-momentum/pressure are fine.
+    let mut eq_res = [f64::MAX; 4];
+    let mut prev_vx = vec![0.0_f64; n];
+    let mut prev_vy = vec![0.0_f64; n];
+    let mut prev_vz = vec![0.0_f64; n];
+    let mut prev_p = vec![0.0_f64; n];
 
     for iter in 0..max_iter {
         if !running.load(Ordering::SeqCst) {
@@ -4956,6 +5682,33 @@ fn run_fluid_solve(
                 if let Ok(mut guard) = residual.lock() {
                     *guard = r;
                 }
+
+                // Per-component update residual for this iteration.
+                let vel = state.velocity.values();
+                let pre = state.pressure.values();
+                let mut s = [0.0_f64; 4];
+                for i in 0..n {
+                    let dvx = vel[i][0] - prev_vx[i];
+                    let dvy = vel[i][1] - prev_vy[i];
+                    let dvz = vel[i][2] - prev_vz[i];
+                    let dp = pre[i] - prev_p[i];
+                    s[0] += dvx * dvx;
+                    s[1] += dvy * dvy;
+                    s[2] += dvz * dvz;
+                    s[3] += dp * dp;
+                    prev_vx[i] = vel[i][0];
+                    prev_vy[i] = vel[i][1];
+                    prev_vz[i] = vel[i][2];
+                    prev_p[i] = pre[i];
+                }
+                let inv = if n > 0 { 1.0 / n as f64 } else { 1.0 };
+                eq_res = [
+                    (s[0] * inv).sqrt(),
+                    (s[1] * inv).sqrt(),
+                    (s[2] * inv).sqrt(),
+                    (s[3] * inv).sqrt(),
+                ];
+
                 if r < tolerance {
                     final_status = "converged".to_string();
                     break;
@@ -4965,6 +5718,19 @@ fn run_fluid_solve(
                 final_status = "diverged".to_string();
                 final_iter = iter + 1;
                 break;
+            }
+        }
+    }
+
+    // Immersed-boundary cleanup: the Brinkman damping above already drives solid-
+    // cell velocity to ~0 in the solve; snap those residuals to exactly 0 so the
+    // reported field shows no flow through solids. (Damping is the physical
+    // blockage; this is just a clean-zero of the near-zero remainder.)
+    if !blocked_cells.is_empty() {
+        let vel = state.velocity.values_mut();
+        for &c in &blocked_cells {
+            if c < n {
+                vel[c] = [0.0, 0.0, 0.0];
             }
         }
     }
@@ -4991,6 +5757,7 @@ fn run_fluid_solve(
             status: final_status,
             iterations: final_iter,
             residual: final_residual,
+            eq_residuals: eq_res,
             fields,
         });
     }
@@ -5064,6 +5831,7 @@ fn run_thermal_solve(
             status,
             iterations: 1,
             residual: final_res,
+            eq_residuals: [f64::MAX; 4], // n/a for single-equation thermal solves
             fields,
         });
     }
@@ -5163,13 +5931,22 @@ fn handle_solve_status(state: &mut ServerState, id: u64, params: &Value) -> RpcR
                 "elapsed_ms": elapsed_ms,
             });
 
-            // If finished, include the final status, iterations and residual
+            // If finished, include the final status, iterations and residual, plus
+            // the per-equation update residuals (n/a values emitted as null).
             if !is_running {
                 if let Ok(guard) = handle.result.lock() {
                     if let Some(ref jr) = *guard {
                         resp["status"] = Value::String(jr.status.clone());
                         resp["iteration"] = serde_json::json!(jr.iterations);
                         resp["residual"] = serde_json::json!(jr.residual);
+                        let conv = |x: f64| if x.is_finite() && x < 1e30 { serde_json::json!(x) } else { Value::Null };
+                        resp["residuals"] = serde_json::json!({
+                            "vx": conv(jr.eq_residuals[0]),
+                            "vy": conv(jr.eq_residuals[1]),
+                            "vz": conv(jr.eq_residuals[2]),
+                            "pressure": conv(jr.eq_residuals[3]),
+                            "continuity": conv(jr.residual),
+                        });
                     }
                 }
             }
@@ -5495,6 +6272,404 @@ fn handle_field_vectors(state: &mut ServerState, id: u64, params: &Value) -> Rpc
         "origins": origins, "vectors": vectors,
         "max_magnitude": max_mag, "count": origins.len() / 3,
     }))
+}
+
+/// Marching tetrahedra on a single tet: append isosurface triangles (flat xyz
+/// floats) where the scalar `val` crosses `iso`. Table-free — splits by how many
+/// corners are below the level. Winding is not normalized (the renderer uses
+/// double-sided material + computed normals), which keeps this provably simple.
+fn march_tet(pos: &[[f64; 3]; 4], val: &[f64; 4], iso: f64, out: &mut Vec<f64>) {
+    let lerp = |lo: usize, hi: usize| -> [f64; 3] {
+        let denom = val[hi] - val[lo];
+        let t = if denom.abs() < 1e-30 { 0.5 } else { (iso - val[lo]) / denom };
+        [
+            pos[lo][0] + t * (pos[hi][0] - pos[lo][0]),
+            pos[lo][1] + t * (pos[hi][1] - pos[lo][1]),
+            pos[lo][2] + t * (pos[hi][2] - pos[lo][2]),
+        ]
+    };
+    let mut push = |p: [f64; 3]| out.extend_from_slice(&p);
+    let below: Vec<usize> = (0..4).filter(|&i| val[i] < iso).collect();
+    let above: Vec<usize> = (0..4).filter(|&i| val[i] >= iso).collect();
+    match below.len() {
+        1 => {
+            let lo = below[0];
+            let (a, b, c) = (lerp(lo, above[0]), lerp(lo, above[1]), lerp(lo, above[2]));
+            push(a); push(b); push(c);
+        }
+        3 => {
+            let hi = above[0];
+            let (a, b, c) = (lerp(below[0], hi), lerp(below[1], hi), lerp(below[2], hi));
+            push(a); push(b); push(c);
+        }
+        2 => {
+            let (b0, b1) = (below[0], below[1]);
+            let (a0, a1) = (above[0], above[1]);
+            let q0 = lerp(b0, a0);
+            let q1 = lerp(b0, a1);
+            let q2 = lerp(b1, a1);
+            let q3 = lerp(b1, a0);
+            push(q0); push(q1); push(q2);
+            push(q0); push(q2); push(q3);
+        }
+        _ => {} // 0 or 4 below: no crossing
+    }
+}
+
+/// Extract an isosurface of a cell-centered scalar field over the structured
+/// grid (marching tetrahedra on the dual grid of cell centers). Returns a flat
+/// triangle-soup `positions` buffer; the GUI computes normals.
+fn handle_field_isosurface(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let field_name = params.get("field").and_then(|v| v.as_str()).unwrap_or("velocity_magnitude");
+    let Some((nx, ny, nz, _lx, _ly, _lz)) = state.mesh_params else {
+        return RpcResponse::err(id, "No structured mesh (isosurface needs mesh.generate)");
+    };
+    let mesh = match &state.mesh {
+        Some(m) => m,
+        None => return RpcResponse::err(id, "No mesh"),
+    };
+    let values = match state.fields.get(field_name) {
+        Some(v) => v,
+        None => return RpcResponse::err(id, format!("Field '{}' not found; run a solve first", field_name)),
+    };
+    // Default isovalue = field mean over finite values.
+    let iso = params.get("isovalue").and_then(|v| v.as_f64()).unwrap_or_else(|| {
+        let (mut s, mut c) = (0.0, 0usize);
+        for &v in values.iter() {
+            if v.is_finite() {
+                s += v;
+                c += 1;
+            }
+        }
+        if c == 0 { 0.0 } else { s / c as f64 }
+    });
+
+    let (nxu, nyu, nzu) = (nx.max(1), ny.max(1), nz.max(1));
+    let cidx = |i: usize, j: usize, k: usize| i + j * nxu + k * nxu * nyu;
+    // Corner (dx,dy,dz) offsets and the 6-tet decomposition sharing diagonal 0-7.
+    const OFF: [[usize; 3]; 8] = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]];
+    const TETS: [[usize; 4]; 6] = [[0, 1, 3, 7], [0, 3, 2, 7], [0, 2, 6, 7], [0, 6, 4, 7], [0, 4, 5, 7], [0, 5, 1, 7]];
+
+    let mut positions: Vec<f64> = Vec::new();
+    if nxu >= 2 && nyu >= 2 && nzu >= 2 {
+        for k in 0..nzu - 1 {
+            for j in 0..nyu - 1 {
+                for i in 0..nxu - 1 {
+                    let mut cp = [[0.0f64; 3]; 8];
+                    let mut cv = [0.0f64; 8];
+                    let mut ok = true;
+                    for (c, off) in OFF.iter().enumerate() {
+                        let idx = cidx(i + off[0], j + off[1], k + off[2]);
+                        match mesh.cell(idx) {
+                            Ok(cell) => {
+                                cp[c] = cell.center;
+                                cv[c] = values.get(idx).copied().unwrap_or(0.0);
+                            }
+                            Err(_) => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if !ok || cv.iter().any(|v| !v.is_finite()) {
+                        continue;
+                    }
+                    for tet in &TETS {
+                        let pos = [cp[tet[0]], cp[tet[1]], cp[tet[2]], cp[tet[3]]];
+                        let val = [cv[tet[0]], cv[tet[1]], cv[tet[2]], cv[tet[3]]];
+                        march_tet(&pos, &val, iso, &mut positions);
+                    }
+                }
+            }
+        }
+    }
+    RpcResponse::ok(id, serde_json::json!({
+        "positions": positions,
+        "triangle_count": positions.len() / 9,
+        "isovalue": iso,
+        "field": field_name,
+    }))
+}
+
+/// Vorticity magnitude |∇×u| per cell over the structured grid via central
+/// differences (one-sided at boundaries). Standalone + pure so it is unit-tested.
+fn compute_vorticity_magnitude(
+    nx: usize, ny: usize, nz: usize, lx: f64, ly: f64, lz: f64,
+    vx: &[f64], vy: &[f64], vz: &[f64],
+) -> Vec<f64> {
+    let (nxu, nyu, nzu) = (nx.max(1), ny.max(1), nz.max(1));
+    let n = nxu * nyu * nzu;
+    let dx = lx / nxu as f64;
+    let dy = ly / nyu as f64;
+    let dz = lz / nzu as f64;
+    let idx = |i: usize, j: usize, k: usize| i + j * nxu + k * nxu * nyu;
+    // ∂f/∂(axis) at cell (i,j,k); axis 0=x,1=y,2=z.
+    let partial = |f: &[f64], axis: usize, i: usize, j: usize, k: usize| -> f64 {
+        let (n_ax, h, coord) = match axis { 0 => (nxu, dx, i), 1 => (nyu, dy, j), _ => (nzu, dz, k) };
+        if n_ax < 2 || h <= 0.0 { return 0.0; }
+        let val = |c: usize| -> f64 {
+            let (a, b, d) = match axis { 0 => (c, j, k), 1 => (i, c, k), _ => (i, j, c) };
+            f.get(idx(a, b, d)).copied().unwrap_or(0.0)
+        };
+        if coord == 0 { (val(1) - val(0)) / h }
+        else if coord == n_ax - 1 { (val(coord) - val(coord - 1)) / h }
+        else { (val(coord + 1) - val(coord - 1)) / (2.0 * h) }
+    };
+    let mut out = vec![0.0; n];
+    for k in 0..nzu {
+        for j in 0..nyu {
+            for i in 0..nxu {
+                let c = idx(i, j, k);
+                if c >= out.len() { continue; }
+                let wx = partial(vz, 1, i, j, k) - partial(vy, 2, i, j, k);
+                let wy = partial(vx, 2, i, j, k) - partial(vz, 0, i, j, k);
+                let wz = partial(vy, 0, i, j, k) - partial(vx, 1, i, j, k);
+                out[c] = (wx * wx + wy * wy + wz * wz).sqrt();
+            }
+        }
+    }
+    out
+}
+
+/// Compute the vorticity-magnitude field from the solved velocity and register
+/// it as `vorticity_magnitude` so contour / isosurface / load_field can use it.
+fn handle_field_vorticity(state: &mut ServerState, id: u64, _params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let Some((nx, ny, nz, lx, ly, lz)) = state.mesh_params else {
+        return RpcResponse::err(id, "No structured mesh (vorticity needs mesh.generate)");
+    };
+    let Some(vx) = state.fields.get("vx").cloned() else {
+        return RpcResponse::err(id, "No 'vx' field; run a fluid solve first");
+    };
+    let vy = state.fields.get("vy").cloned().unwrap_or_else(|| vec![0.0; vx.len()]);
+    let vz = state.fields.get("vz").cloned().unwrap_or_else(|| vec![0.0; vx.len()]);
+    let vort = compute_vorticity_magnitude(nx, ny, nz, lx, ly, lz, &vx, &vy, &vz);
+    let (mut mn, mut mx, mut sum, mut cnt) = (f64::MAX, f64::MIN, 0.0, 0usize);
+    for &v in &vort {
+        if v.is_finite() {
+            mn = mn.min(v);
+            mx = mx.max(v);
+            sum += v;
+            cnt += 1;
+        }
+    }
+    let mean = if cnt > 0 { sum / cnt as f64 } else { 0.0 };
+    if cnt == 0 {
+        mn = 0.0;
+        mx = 0.0;
+    }
+    state.fields.insert("vorticity_magnitude".to_string(), vort);
+    RpcResponse::ok(id, serde_json::json!({
+        "field": "vorticity_magnitude", "min": mn, "max": mx, "mean": mean,
+    }))
+}
+
+/// Q-criterion per cell: Q = ½(‖Ω‖² − ‖S‖²) where S/Ω are the symmetric /
+/// antisymmetric parts of the velocity-gradient tensor. Q>0 marks vortex cores
+/// (rotation dominates strain). Central differences on the structured grid.
+fn compute_q_criterion(
+    nx: usize, ny: usize, nz: usize, lx: f64, ly: f64, lz: f64,
+    vx: &[f64], vy: &[f64], vz: &[f64],
+) -> Vec<f64> {
+    let (nxu, nyu, nzu) = (nx.max(1), ny.max(1), nz.max(1));
+    let n = nxu * nyu * nzu;
+    let dx = lx / nxu as f64;
+    let dy = ly / nyu as f64;
+    let dz = lz / nzu as f64;
+    let idx = |i: usize, j: usize, k: usize| i + j * nxu + k * nxu * nyu;
+    let partial = |f: &[f64], axis: usize, i: usize, j: usize, k: usize| -> f64 {
+        let (n_ax, h, coord) = match axis { 0 => (nxu, dx, i), 1 => (nyu, dy, j), _ => (nzu, dz, k) };
+        if n_ax < 2 || h <= 0.0 { return 0.0; }
+        let val = |c: usize| -> f64 {
+            let (a, b, d) = match axis { 0 => (c, j, k), 1 => (i, c, k), _ => (i, j, c) };
+            f.get(idx(a, b, d)).copied().unwrap_or(0.0)
+        };
+        if coord == 0 { (val(1) - val(0)) / h }
+        else if coord == n_ax - 1 { (val(coord) - val(coord - 1)) / h }
+        else { (val(coord + 1) - val(coord - 1)) / (2.0 * h) }
+    };
+    let comps = [vx, vy, vz];
+    let mut out = vec![0.0; n];
+    for k in 0..nzu {
+        for j in 0..nyu {
+            for i in 0..nxu {
+                let c = idx(i, j, k);
+                if c >= out.len() { continue; }
+                // jac[row][col] = ∂u_row / ∂x_col
+                let mut jac = [[0.0f64; 3]; 3];
+                for (r, comp) in comps.iter().enumerate() {
+                    for a in 0..3 {
+                        jac[r][a] = partial(comp, a, i, j, k);
+                    }
+                }
+                let (mut s2, mut o2) = (0.0f64, 0.0f64);
+                for r in 0..3 {
+                    for a in 0..3 {
+                        let s = 0.5 * (jac[r][a] + jac[a][r]);
+                        let o = 0.5 * (jac[r][a] - jac[a][r]);
+                        s2 += s * s;
+                        o2 += o * o;
+                    }
+                }
+                out[c] = 0.5 * (o2 - s2);
+            }
+        }
+    }
+    out
+}
+
+/// Field-stats summary over finite values: (min, max, mean).
+fn field_stats(values: &[f64]) -> (f64, f64, f64) {
+    let (mut mn, mut mx, mut sum, mut cnt) = (f64::MAX, f64::MIN, 0.0, 0usize);
+    for &v in values {
+        if v.is_finite() {
+            mn = mn.min(v);
+            mx = mx.max(v);
+            sum += v;
+            cnt += 1;
+        }
+    }
+    if cnt == 0 { (0.0, 0.0, 0.0) } else { (mn, mx, sum / cnt as f64) }
+}
+
+/// Compute the Q-criterion from the solved velocity and register it as the
+/// `q_criterion` field (usable by contour / isosurface).
+fn handle_field_qcriterion(state: &mut ServerState, id: u64, _params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let Some((nx, ny, nz, lx, ly, lz)) = state.mesh_params else {
+        return RpcResponse::err(id, "No structured mesh (q-criterion needs mesh.generate)");
+    };
+    let Some(vx) = state.fields.get("vx").cloned() else {
+        return RpcResponse::err(id, "No 'vx' field; run a fluid solve first");
+    };
+    let vy = state.fields.get("vy").cloned().unwrap_or_else(|| vec![0.0; vx.len()]);
+    let vz = state.fields.get("vz").cloned().unwrap_or_else(|| vec![0.0; vx.len()]);
+    let q = compute_q_criterion(nx, ny, nz, lx, ly, lz, &vx, &vy, &vz);
+    let (mn, mx, mean) = field_stats(&q);
+    state.fields.insert("q_criterion".to_string(), q);
+    RpcResponse::ok(id, serde_json::json!({
+        "field": "q_criterion", "min": mn, "max": mx, "mean": mean,
+    }))
+}
+
+/// Probe a solved scalar field at a 3D point (nearest cell centroid). Lets the
+/// AI inspect a specific location instead of fetching the whole field.
+fn handle_field_probe(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let field_name = params.get("field").and_then(|v| v.as_str()).unwrap_or("velocity_magnitude");
+    let Some(arr) = params.get("point").and_then(|v| v.as_array()) else {
+        return RpcResponse::err(id, "missing point [x,y,z]");
+    };
+    if arr.len() < 3 {
+        return RpcResponse::err(id, "point must be [x,y,z]");
+    }
+    let p = [
+        arr[0].as_f64().unwrap_or(0.0),
+        arr[1].as_f64().unwrap_or(0.0),
+        arr[2].as_f64().unwrap_or(0.0),
+    ];
+    let mesh = match &state.mesh {
+        Some(m) => m,
+        None => return RpcResponse::err(id, "No mesh (probe needs an FVM solve with a mesh)"),
+    };
+    let values = match state.fields.get(field_name) {
+        Some(v) => v,
+        None => return RpcResponse::err(id, format!("Field '{}' not found; run a solve first", field_name)),
+    };
+    let mut best = usize::MAX;
+    let mut best_d = f64::MAX;
+    let mut best_center = [0.0; 3];
+    for i in 0..mesh.num_cells() {
+        if let Ok(c) = mesh.cell(i) {
+            let dx = c.center[0] - p[0];
+            let dy = c.center[1] - p[1];
+            let dz = c.center[2] - p[2];
+            let d = dx * dx + dy * dy + dz * dz;
+            if d < best_d {
+                best_d = d;
+                best = i;
+                best_center = c.center;
+            }
+        }
+    }
+    if best == usize::MAX {
+        return RpcResponse::err(id, "empty mesh");
+    }
+    let val = values.get(best).copied().unwrap_or(0.0);
+    RpcResponse::ok(id, serde_json::json!({
+        "field": field_name,
+        "value": val,
+        "cell": best,
+        "cell_center": best_center,
+        "distance": best_d.sqrt(),
+        "point": p,
+    }))
+}
+
+/// Scalar objectives from the current solved fields (no re-solve), so an AI can
+/// cheaply track an optimization target across re-runs (cf. the expensive
+/// finite-difference calc.sensitivity).
+fn handle_field_objective(state: &mut ServerState, id: u64, _params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let f = &state.fields;
+    let to_null = |x: Option<f64>| x.map(|v| serde_json::json!(v)).unwrap_or(Value::Null);
+
+    // Kinetic energy Σ ½|u|² over cells.
+    let ke = f.get("vx").map(|vx| {
+        let vy = f.get("vy");
+        let vz = f.get("vz");
+        let mut s = 0.0;
+        for i in 0..vx.len() {
+            let a = vx[i];
+            let b = vy.and_then(|v| v.get(i).copied()).unwrap_or(0.0);
+            let c = vz.and_then(|v| v.get(i).copied()).unwrap_or(0.0);
+            s += 0.5 * (a * a + b * b + c * c);
+        }
+        s
+    });
+    let vstat = f.get("velocity_magnitude").map(|v| field_stats(v));
+    let pstat = f.get("pressure").map(|v| field_stats(v));
+
+    if ke.is_none() && vstat.is_none() && pstat.is_none() {
+        return RpcResponse::err(id, "No solved fields; run a solve first");
+    }
+    RpcResponse::ok(id, serde_json::json!({
+        "kinetic_energy": to_null(ke),
+        "max_velocity":   to_null(vstat.map(|s| s.1)),
+        "mean_velocity":  to_null(vstat.map(|s| s.2)),
+        "min_pressure":   to_null(pstat.map(|s| s.0)),
+        "max_pressure":   to_null(pstat.map(|s| s.1)),
+        "mean_pressure":  to_null(pstat.map(|s| s.2)),
+        "pressure_range": to_null(pstat.map(|s| s.1 - s.0)),
+    }))
+}
+
+/// Export the solved mesh + all cell-centered fields to a VTK Legacy
+/// UNSTRUCTURED_GRID file (.vtk) for ParaView / professional post-processing —
+/// the loop's "take the result out" link.
+fn handle_field_export_vtk(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    collect_finished_job_fields(state);
+    let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing path");
+    };
+    let mesh = match &state.mesh {
+        Some(m) => m,
+        None => return RpcResponse::err(id, "No mesh (export needs an FVM solve with a mesh)"),
+    };
+    if state.fields.is_empty() {
+        return RpcResponse::err(id, "No solved fields; run a solve first");
+    }
+    let mut fields: gfd_core::FieldSet = std::collections::HashMap::new();
+    for (name, vals) in &state.fields {
+        fields.insert(name.clone(), gfd_core::FieldData::Scalar(ScalarField::from_vec(name, vals.clone())));
+    }
+    match gfd_io::vtk_writer::write_vtk(path, mesh, &fields) {
+        Ok(_) => RpcResponse::ok(id, serde_json::json!({
+            "ok": true, "path": path, "fields": fields.len(), "cells": mesh.num_cells(),
+        })),
+        Err(e) => RpcResponse::err(id, format!("vtk export failed: {}", e)),
+    }
 }
 
 /// Sample velocity at a point by nearest cell centroid.
@@ -5858,5 +7033,333 @@ fn main() {
         let resp = handle_request(&mut state, &req);
         let _ = writeln!(out, "{}", serde_json::to_string(&resp).unwrap());
         let _ = out.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn march_tet_one_below_emits_one_triangle_at_crossings() {
+        // corner 0 below (val 0), corners 1..3 above (val 1), iso 0.5 → edge midpoints.
+        let pos = [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]];
+        let val = [0.0, 1.0, 1.0, 1.0];
+        let mut out = Vec::new();
+        march_tet(&pos, &val, 0.5, &mut out);
+        assert_eq!(out.len(), 9, "exactly one triangle");
+        assert_eq!(&out, &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn march_tet_two_below_emits_a_quad() {
+        let pos = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let val = [0.0, 0.0, 1.0, 1.0];
+        let mut out = Vec::new();
+        march_tet(&pos, &val, 0.5, &mut out);
+        assert_eq!(out.len(), 18, "two triangles for the 2-2 split");
+    }
+
+    #[test]
+    fn march_tet_no_crossing_emits_nothing() {
+        let pos = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut out = Vec::new();
+        march_tet(&pos, &[1.0, 1.0, 1.0, 1.0], 0.5, &mut out);
+        assert!(out.is_empty());
+        march_tet(&pos, &[0.0, 0.0, 0.0, 0.0], 0.5, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn vorticity_of_solid_body_rotation_is_twice_omega() {
+        // u = (-Ω y, Ω x, 0) with Ω = 1 ⇒ ω_z = ∂v/∂x − ∂u/∂y = 2Ω = 2 everywhere.
+        let (nx, ny, nz) = (4usize, 4usize, 1usize);
+        let (lx, ly, lz) = (4.0, 4.0, 1.0); // dx = dy = 1
+        let n = nx * ny * nz;
+        let mut vx = vec![0.0; n];
+        let mut vy = vec![0.0; n];
+        let vz = vec![0.0; n];
+        for j in 0..ny {
+            for i in 0..nx {
+                let c = i + j * nx;
+                let x = (i as f64 + 0.5) * (lx / nx as f64);
+                let y = (j as f64 + 0.5) * (ly / ny as f64);
+                vx[c] = -y;
+                vy[c] = x;
+            }
+        }
+        let vort = compute_vorticity_magnitude(nx, ny, nz, lx, ly, lz, &vx, &vy, &vz);
+        for v in vort {
+            assert!((v - 2.0).abs() < 1e-9, "expected |ω| = 2, got {}", v);
+        }
+    }
+
+    /// Axis-aligned box vertex cloud spanning the given extents.
+    fn box_cloud(lx: f32, ly: f32, lz: f32) -> Vec<[f32; 3]> {
+        let mut v = Vec::new();
+        for &x in &[0.0, lx] {
+            for &y in &[0.0, ly] {
+                for &z in &[0.0, lz] {
+                    v.push([x, y, z]);
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn principal_axis_finds_the_long_direction() {
+        let ax = trimesh_principal_axis(&box_cloud(10.0, 1.0, 1.0)).unwrap();
+        assert!(ax[0].abs() > 0.99, "expected X-dominant axis, got {:?}", ax);
+        let ay = trimesh_principal_axis(&box_cloud(1.0, 10.0, 1.0)).unwrap();
+        assert!(ay[1].abs() > 0.99, "expected Y-dominant axis, got {:?}", ay);
+    }
+
+    #[test]
+    fn axis_angle_between_perpendicular_boxes_is_90() {
+        let ax = trimesh_principal_axis(&box_cloud(10.0, 1.0, 1.0)).unwrap();
+        let ay = trimesh_principal_axis(&box_cloud(1.0, 10.0, 1.0)).unwrap();
+        let angle = axis_angle_deg(ax, ay);
+        assert!((angle - 90.0).abs() < 1.0, "expected ~90°, got {}", angle);
+        // Same axis (or flipped) → 0°, since axes are orientation-free.
+        assert!(axis_angle_deg(ax, [-ax[0], -ax[1], -ax[2]]) < 1.0e-6);
+    }
+
+    /// Watertight axis-aligned cube TriMesh (8 verts, 12 tris) over [min,max]^3.
+    fn cube_trimesh(mn: [f32; 3], mx: [f32; 3]) -> TriMesh {
+        let v = [
+            [mn[0], mn[1], mn[2]], [mx[0], mn[1], mn[2]], [mx[0], mx[1], mn[2]], [mn[0], mx[1], mn[2]],
+            [mn[0], mn[1], mx[2]], [mx[0], mn[1], mx[2]], [mx[0], mx[1], mx[2]], [mn[0], mx[1], mx[2]],
+        ];
+        let tris: [[u32; 3]; 12] = [
+            [0, 3, 2], [0, 2, 1], // bottom
+            [4, 5, 6], [4, 6, 7], // top
+            [0, 1, 5], [0, 5, 4], // front
+            [3, 7, 6], [3, 6, 2], // back
+            [0, 4, 7], [0, 7, 3], // left
+            [1, 2, 6], [1, 6, 5], // right
+        ];
+        let mut indices = Vec::new();
+        for t in tris {
+            indices.extend_from_slice(&t);
+        }
+        TriMesh { positions: v.to_vec(), normals: vec![], indices }
+    }
+
+    #[test]
+    fn classify_solid_cells_marks_cells_inside_the_cube() {
+        // 4x4x4 grid over [0,4]^3 (cell centers at 0.5,1.5,2.5,3.5); a cube over
+        // [1,3]^3 contains the centers at 1.5 and 2.5 on each axis → 2^3 = 8 cells.
+        let mesh = StructuredMesh::uniform(4, 4, 4, 4.0, 4.0, 4.0).to_unstructured();
+        let cube = cube_trimesh([1.0, 1.0, 1.0], [3.0, 3.0, 3.0]);
+        assert!(trimesh_is_closed(&cube.indices), "cube must be watertight");
+        let solid = classify_solid_cells(&mesh, &cube);
+        assert_eq!(solid.len(), 8, "expected 8 solid cells, got {}", solid.len());
+        // Every solid cell center must actually be inside [1,3]^3.
+        for &c in &solid {
+            let ctr = mesh.cells[c].center;
+            for k in 0..3 {
+                assert!(ctr[k] > 1.0 && ctr[k] < 3.0, "solid cell center {:?} not inside cube", ctr);
+            }
+        }
+    }
+
+    #[test]
+    fn classify_solid_cells_returns_empty_for_open_mesh() {
+        let mesh = StructuredMesh::uniform(2, 2, 2, 2.0, 2.0, 2.0).to_unstructured();
+        // A single triangle is not closed → masking is suppressed (conservative).
+        let open = TriMesh { positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], normals: vec![], indices: vec![0, 1, 2] };
+        assert!(classify_solid_cells(&mesh, &open).is_empty());
+    }
+
+    #[test]
+    fn combined_solid_trimesh_offsets_indices_without_double_count() {
+        let mut state = ServerState::new();
+        state.imported_meshes.insert("shape_1".into(), cube_trimesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]));
+        state.imported_meshes.insert("shape_2".into(), cube_trimesh([2.0, 2.0, 2.0], [3.0, 3.0, 3.0]));
+        let combined = combined_solid_trimesh(&state, &[]);
+        assert_eq!(combined.positions.len(), 16, "two cubes → 16 vertices");
+        assert_eq!(combined.indices.len(), 72, "two cubes → 24 triangles × 3 indices");
+        let max_idx = *combined.indices.iter().max().unwrap();
+        assert!((max_idx as usize) < combined.positions.len(), "indices must stay in range after offset");
+        // Explicit id list selects a single shape.
+        let one = combined_solid_trimesh(&state, &["shape_1".to_string()]);
+        assert_eq!(one.positions.len(), 8);
+    }
+
+    #[test]
+    fn classify_solid_cells_rejects_a_non_watertight_mesh() {
+        // A cube missing one triangle has open boundary edges → not watertight
+        // → masking is suppressed (we must not mask the wrong cells).
+        let mesh = StructuredMesh::uniform(4, 4, 4, 4.0, 4.0, 4.0).to_unstructured();
+        let mut holed = cube_trimesh([1.0, 1.0, 1.0], [3.0, 3.0, 3.0]);
+        holed.indices.truncate(holed.indices.len() - 3); // drop the last triangle
+        assert!(classify_solid_cells(&mesh, &holed).is_empty(), "non-watertight mesh must mask nothing");
+    }
+
+    #[test]
+    fn mesh_generate_masks_imported_solid_and_respects_explicit_empty() {
+        // Imported watertight cube over [1,3]^3 inside a [0,4]^3 4x4x4 domain.
+        let domain = serde_json::json!({ "xmin": 0.0, "xmax": 4.0, "ymin": 0.0, "ymax": 4.0, "zmin": 0.0, "zmax": 4.0 });
+        let solid_count = |state: &mut ServerState, params: serde_json::Value| -> u64 {
+            let resp = handle_mesh_generate(state, 1, &params);
+            resp.result.unwrap()["solid_cells"].as_u64().unwrap()
+        };
+
+        let mut state = ServerState::new();
+        state.imported_meshes.insert("shape_1".into(), cube_trimesh([1.0, 1.0, 1.0], [3.0, 3.0, 3.0]));
+
+        // Explicit shape id → masks the 8 interior cells.
+        let listed = solid_count(&mut state, serde_json::json!({
+            "nx": 4, "ny": 4, "nz": 4, "domain": domain,
+            "mask_solids": true, "solid_shape_ids": ["shape_1"],
+        }));
+        assert_eq!(listed, 8, "imported watertight cube should mask 8 cells");
+        assert_eq!(state.solid_cells.len(), 8);
+
+        // Explicit EMPTY list → masks NOTHING (must not fall back to "all shapes",
+        // which would treat the cube — or a fluid enclosure — as solid).
+        let empty = solid_count(&mut state, serde_json::json!({
+            "nx": 4, "ny": 4, "nz": 4, "domain": domain,
+            "mask_solids": true, "solid_shape_ids": [],
+        }));
+        assert_eq!(empty, 0, "explicit empty solid_shape_ids must mask nothing");
+        assert!(state.solid_cells.is_empty());
+    }
+
+    #[test]
+    fn classify_solid_cells_masks_a_tessellated_box_primitive() {
+        // The REAL arena → tessellate → weld → classify path. Before the
+        // wire-bounded planar tessellation fix this was a silent no-op (the box
+        // tessellated non-watertight); now box_solid(2,2,2) → [-1,1]^3 watertight.
+        let mut state = ServerState::new();
+        let bid = box_solid(&mut state.cad_doc.arena, 2.0, 2.0, 2.0).unwrap();
+        state.cad_shape_map.insert("shape_1".into(), bid);
+        let solid = combined_solid_trimesh(&state, &["shape_1".to_string()]);
+        // 4x4x4 grid translated to [-2,2]^3 → centers at ±1.5,±0.5; box [-1,1]^3
+        // contains the ±0.5 centers → 2^3 = 8 cells.
+        let mut mesh = StructuredMesh::uniform(4, 4, 4, 4.0, 4.0, 4.0).to_unstructured();
+        translate_mesh(&mut mesh, [-2.0, -2.0, -2.0]);
+        let cells = classify_solid_cells(&mesh, &solid);
+        assert_eq!(cells.len(), 8, "tessellated box primitive should mask 8 interior cells, got {}", cells.len());
+    }
+
+    #[test]
+    fn classify_solid_cells_masks_a_tessellated_cylinder_primitive() {
+        // Cylinder masking now works because the caps are watertight discs
+        // (wire-bounded). cylinder_solid(0.5, 2.0): radius 0.5 about the z-axis,
+        // z ∈ [0,2]. Domain [-1,1]×[-1,1]×[0,2], 4^3 grid → xy centers ±0.25,±0.75;
+        // only the four ±0.25 columns are within r=0.5 → 4 per layer × 4 = 16.
+        let mut state = ServerState::new();
+        let cid = cylinder_solid(&mut state.cad_doc.arena, 0.5, 2.0).unwrap();
+        state.cad_shape_map.insert("shape_1".into(), cid);
+        let solid = combined_solid_trimesh(&state, &["shape_1".to_string()]);
+        let mut mesh = StructuredMesh::uniform(4, 4, 4, 2.0, 2.0, 2.0).to_unstructured();
+        translate_mesh(&mut mesh, [-1.0, -1.0, 0.0]);
+        let cells = classify_solid_cells(&mesh, &solid);
+        assert_eq!(cells.len(), 16, "cylinder should mask 16 interior cells, got {}", cells.len());
+        for &c in &cells {
+            let ctr = mesh.cells[c].center;
+            assert!((ctr[0] * ctr[0] + ctr[1] * ctr[1]).sqrt() < 0.5, "masked cell outside cylinder radius");
+        }
+    }
+
+    #[test]
+    fn pick_face_returns_the_nearest_face_of_a_box() {
+        // box_solid(2,2,2) → [-1,1]^3. A point well above the top picks the +Z
+        // face: a plane whose centroid sits at z = 1.
+        let mut state = ServerState::new();
+        let bid = box_solid(&mut state.cad_doc.arena, 2.0, 2.0, 2.0).unwrap();
+        state.cad_shape_map.insert("shape_1".into(), bid);
+        let resp = handle_cad_pick_face(&state, 1, &serde_json::json!({
+            "shape_id": "shape_1", "point": [0.0, 0.0, 5.0],
+        }));
+        let r = resp.result.expect("pick.face should succeed");
+        assert_eq!(r["surface_kind"].as_str().unwrap(), "plane");
+        let ctr = r["centroid"].as_array().unwrap();
+        assert!((ctr[2].as_f64().unwrap() - 1.0).abs() < 1e-6, "top face centroid z should be 1");
+        assert!((r["distance"].as_f64().unwrap() - 4.0).abs() < 1e-6, "distance from z=5 to z=1 is 4");
+    }
+
+    #[test]
+    fn import_step_brep_reconstructs_topology() {
+        // Export a box to STEP, import it back as a real B-Rep via the handler.
+        let mut src = gfd_cad::topo::ShapeArena::new();
+        let bid = box_solid(&mut src, 1.0, 1.0, 1.0).unwrap();
+        let path = std::env::temp_dir().join(format!("gfd_srv_brep_{}.stp",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        gfd_cad::io::export_step(&path, &src, bid).unwrap();
+        let mut state = ServerState::new();
+        let resp = handle_cad_import_step_brep(&mut state, 1, &serde_json::json!({ "path": path.to_str().unwrap() }));
+        let _ = std::fs::remove_file(&path);
+        let r = resp.result.expect("step_brep import ok");
+        assert_eq!(r["faces"].as_u64(), Some(6), "box should import 6 faces");
+        assert_eq!(r["solids"].as_u64(), Some(1), "box should import 1 solid");
+        assert!(r["shape_id"].as_str().is_some());
+    }
+
+    #[test]
+    fn pick_edge_and_vertex_return_nearest() {
+        // box_solid(2,2,2) → [-1,1]^3. A query near the (1,1,1) corner picks the
+        // nearest vertex there; a query near a top edge picks an edge.
+        let mut state = ServerState::new();
+        let bid = box_solid(&mut state.cad_doc.arena, 2.0, 2.0, 2.0).unwrap();
+        state.cad_shape_map.insert("shape_1".into(), bid);
+
+        let vr = handle_cad_pick_vertex(&state, 1, &serde_json::json!({ "shape_id": "shape_1", "point": [1.2, 1.1, 1.05] }));
+        let v = vr.result.expect("pick.vertex ok");
+        let p = v["point"].as_array().unwrap();
+        assert!((p[0].as_f64().unwrap() - 1.0).abs() < 1e-9 && (p[1].as_f64().unwrap() - 1.0).abs() < 1e-9 && (p[2].as_f64().unwrap() - 1.0).abs() < 1e-9,
+            "nearest vertex should be the (1,1,1) corner, got {:?}", p);
+
+        let er = handle_cad_pick_edge(&state, 1, &serde_json::json!({ "shape_id": "shape_1", "point": [0.0, 1.1, 1.1] }));
+        let e = er.result.expect("pick.edge ok");
+        assert!(e["edge_id"].as_u64().is_some(), "edge pick should return an edge id");
+        assert!(e["distance"].as_f64().unwrap() < 0.5, "nearest top edge should be close to the query");
+    }
+
+    #[test]
+    fn principal_axis_is_none_for_symmetric_shapes() {
+        // A cube's covariance is isotropic → no well-defined principal axis.
+        assert!(trimesh_principal_axis(&box_cloud(2.0, 2.0, 2.0)).is_none(), "cube must have no principal axis");
+        // An elongated box still resolves a clear axis.
+        assert!(trimesh_principal_axis(&box_cloud(10.0, 1.0, 1.0)).is_some());
+    }
+
+    #[test]
+    fn translate_mesh_shifts_positions_and_centroids() {
+        let mut mesh = StructuredMesh::uniform(2, 2, 1, 2.0, 2.0, 1.0).to_unstructured();
+        let n0 = mesh.nodes[0].position;
+        let c0 = mesh.cells[0].center;
+        let f0 = mesh.faces[0].center;
+        let vol0 = mesh.cells[0].volume;
+        translate_mesh(&mut mesh, [10.0, -5.0, 3.0]);
+        assert_eq!(mesh.nodes[0].position, [n0[0] + 10.0, n0[1] - 5.0, n0[2] + 3.0]);
+        assert_eq!(mesh.cells[0].center, [c0[0] + 10.0, c0[1] - 5.0, c0[2] + 3.0]);
+        assert_eq!(mesh.faces[0].center, [f0[0] + 10.0, f0[1] - 5.0, f0[2] + 3.0]);
+        // Volume is translation-invariant.
+        assert!((mesh.cells[0].volume - vol0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn q_criterion_of_solid_body_rotation_is_positive_omega_squared() {
+        // Rigid rotation: strain S = 0, so Q = ½‖Ω‖² = ½·2 = 1 for Ω = 1.
+        let (nx, ny, nz) = (4usize, 4usize, 1usize);
+        let (lx, ly, lz) = (4.0, 4.0, 1.0);
+        let n = nx * ny * nz;
+        let mut vx = vec![0.0; n];
+        let mut vy = vec![0.0; n];
+        let vz = vec![0.0; n];
+        for j in 0..ny {
+            for i in 0..nx {
+                let c = i + j * nx;
+                vx[c] = -((j as f64 + 0.5) * (ly / ny as f64));
+                vy[c] = (i as f64 + 0.5) * (lx / nx as f64);
+            }
+        }
+        let q = compute_q_criterion(nx, ny, nz, lx, ly, lz, &vx, &vy, &vz);
+        for v in q {
+            assert!((v - 1.0).abs() < 1e-9, "expected Q = 1, got {}", v);
+        }
     }
 }

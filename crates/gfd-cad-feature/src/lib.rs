@@ -40,7 +40,7 @@ pub use offset::offset_polygon_2d;
 pub use array::{circular_array, linear_array, rectangular_array};
 pub use transform::{rotate_shape, scale_shape, translate_shape};
 pub use wedge::wedge_solid;
-pub use pad::{pad_polygon_along, pad_polygon_xy, pad_polygon_xy_signed};
+pub use pad::{pad_polygon_along, pad_polygon_xy, pad_polygon_xy_signed, plate_with_hole_solid};
 pub use pocket::pocket_polygon_xy;
 pub use primitive::{box_solid, cone_solid, cube_solid, cylinder_solid, honeycomb_pattern_solid, rectangular_prism_solid, sphere_solid, spiral_staircase_solid, stairs_solid, torus_solid};
 pub use pyramid::{ngon_prism_solid, pyramid_solid};

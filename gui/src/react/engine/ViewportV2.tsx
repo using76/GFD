@@ -12,7 +12,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber';
-import { OrbitControls, Grid, GizmoHelper, GizmoViewcube, Outlines } from '@react-three/drei';
+import { OrbitControls, Grid, GizmoHelper, GizmoViewcube, Outlines, Edges } from '@react-three/drei';
 import * as THREE from 'three';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
@@ -29,6 +29,7 @@ bufferProto.disposeBoundsTree = disposeBoundsTree;
 
 function ShapeMesh({ node, selected }: { node: GeometryNode; selected: boolean }) {
   const dispatch = useDispatch();
+  const display = useAppState().display;
   const geomRef = useRef<THREE.BufferGeometry | null>(null);
   const meshRef = useRef<THREE.Mesh>(null);
 
@@ -61,9 +62,24 @@ function ShapeMesh({ node, selected }: { node: GeometryNode; selected: boolean }
     void dispatch('selection.set', { ids: [node.id] });
   };
 
+  // shaded_edges / mesh-view → show the triangulation as wireframe overlay.
+  // (ShapeMesh assigns its geometry imperatively, so an <Edges> child can't read
+  // it; a second wireframe mesh sharing the geometry is the robust overlay.)
+  const wire = display.renderMode === 'wireframe';
+  const showEdges = display.renderMode === 'shaded_edges' || display.layers.mesh;
+  const transparent = display.opacity < 1;
   return (
     <mesh ref={meshRef} onClick={onClick} visible={node.visible} userData={{ shapeId: node.id }}>
-      <meshStandardMaterial color={selected ? '#4096ff' : '#9aa7b4'} metalness={0.1} roughness={0.6} side={THREE.DoubleSide} />
+      <meshStandardMaterial
+        color={selected ? '#4096ff' : '#9aa7b4'}
+        metalness={0.1}
+        roughness={0.6}
+        side={THREE.DoubleSide}
+        wireframe={wire || (showEdges && transparent)}
+        transparent={transparent}
+        opacity={display.opacity}
+        depthWrite={!transparent}
+      />
       {selected && <Outlines thickness={3} color="#ffd54a" />}
     </mesh>
   );
@@ -71,6 +87,7 @@ function ShapeMesh({ node, selected }: { node: GeometryNode; selected: boolean }
 
 function GeometryLayer() {
   const state = useAppState();
+  if (!state.display.layers.geometry) return null;
   const selected = new Set(state.selection.ids);
   const nodes = Object.values(state.doc.geometry.nodes).filter((n) => n.visible);
   return (
@@ -211,9 +228,55 @@ function StreamlineLayer() {
   );
 }
 
-/** Renders the whole-model triangulation from the Gmsh (OCC) backend as one mesh. */
+/** Isosurface (marching-tet level set) of the active solved scalar field. */
+function IsosurfaceLayer() {
+  const state = useAppState();
+  const dispatch = useDispatch();
+  const viz = state.viz;
+  const activeField = state.results?.activeField ?? null;
+  const tag = `${activeField}:${state.solver.iteration}:${state.solver.status}:${viz.isovalue}`;
+  const [geo, setGeo] = useState<THREE.BufferGeometry | null>(null);
+
+  useEffect(() => {
+    if (!viz.showIsosurface || !activeField) {
+      setGeo(null);
+      return;
+    }
+    let cancelled = false;
+    const params: Record<string, string | number> = { field: activeField };
+    if (viz.isovalue !== 0) params.isovalue = viz.isovalue;
+    void dispatch('results.isosurface', params).then((o) => {
+      if (cancelled || !o.ok || !o.result) return;
+      const r = o.result as { positions: number[] };
+      if (!r.positions || r.positions.length < 9) {
+        setGeo(null);
+        return;
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(r.positions, 3));
+      g.computeVertexNormals();
+      setGeo(g);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [viz.showIsosurface, viz.isovalue, activeField, tag, dispatch]);
+  useEffect(() => () => geo?.dispose(), [geo]);
+
+  if (!viz.showIsosurface || !geo) return null;
+  return (
+    <mesh geometry={geo}>
+      <meshStandardMaterial color="#33dd88" metalness={0.1} roughness={0.5} side={THREE.DoubleSide} transparent opacity={0.85} />
+    </mesh>
+  );
+}
+
+/** Renders the whole-model triangulation from the Gmsh (OCC) backend as one mesh.
+ *  Honors the display render mode (shaded / wireframe / edges), opacity, and the
+ *  geometry/mesh layer toggles. */
 function GmshSceneLayer() {
   const gm = useAppState().gmsh.mesh;
+  const display = useAppState().display;
   const [geo, setGeo] = useState<THREE.BufferGeometry | null>(null);
   const tri = gm?.triangleCount ?? 0;
   const plen = gm?.positions.length ?? 0;
@@ -232,10 +295,24 @@ function GmshSceneLayer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tri, plen]);
   useEffect(() => () => geo?.dispose(), [geo]);
-  if (!geo) return null;
+  if (!geo || !display.layers.geometry) return null;
+  const wire = display.renderMode === 'wireframe';
+  // 'mesh view' = overlay the surface triangulation as edges.
+  const showEdges = display.renderMode === 'shaded_edges' || display.layers.mesh;
+  const transparent = display.opacity < 1;
   return (
     <mesh geometry={geo}>
-      <meshStandardMaterial color="#7fb3d5" metalness={0.1} roughness={0.55} side={THREE.DoubleSide} />
+      <meshStandardMaterial
+        color="#7fb3d5"
+        metalness={0.1}
+        roughness={0.55}
+        side={THREE.DoubleSide}
+        wireframe={wire}
+        transparent={transparent}
+        opacity={display.opacity}
+        depthWrite={!transparent}
+      />
+      {showEdges && !wire && <Edges threshold={15} color="#2b3946" />}
     </mesh>
   );
 }
@@ -272,18 +349,29 @@ function CameraSync({ controls }: { controls: React.RefObject<OrbitControlsImpl 
   return null;
 }
 
-/** Apply AppState.display.sectionPlane as a global clipping plane. */
+/** Apply AppState.display.sectionPlane as a global clipping plane — axis-aligned
+ *  (x/y/z) or an arbitrary normal when axis is 'custom'. */
 function SectionClip() {
   const { gl } = useThree();
   const section = useAppState().display.sectionPlane;
+  const nx = section.normal?.[0] ?? 1, ny = section.normal?.[1] ?? 0, nz = section.normal?.[2] ?? 0;
   useEffect(() => {
     if (!section.enabled) {
       gl.clippingPlanes = [];
       return;
     }
-    const normal = section.axis === 'x' ? new THREE.Vector3(1, 0, 0) : section.axis === 'y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+    let normal: THREE.Vector3;
+    if (section.axis === 'custom') {
+      normal = new THREE.Vector3(nx, ny, nz);
+      if (normal.lengthSq() < 1e-9) normal.set(1, 0, 0);
+      normal.normalize();
+    } else {
+      normal = section.axis === 'x' ? new THREE.Vector3(1, 0, 0)
+        : section.axis === 'y' ? new THREE.Vector3(0, 1, 0)
+        : new THREE.Vector3(0, 0, 1);
+    }
     gl.clippingPlanes = [new THREE.Plane(normal, -section.offset)];
-  }, [gl, section.enabled, section.axis, section.offset]);
+  }, [gl, section.enabled, section.axis, section.offset, nx, ny, nz]);
   return null;
 }
 
@@ -319,6 +407,19 @@ function ScreenshotRegistrar() {
   return null;
 }
 
+/** All solver-result overlays, gated by the master results-layer toggle. */
+function ResultsLayers() {
+  if (!useAppState().display.layers.results) return null;
+  return (
+    <>
+      <ResultsFieldLayer />
+      <IsosurfaceLayer />
+      <VectorGlyphLayer />
+      <StreamlineLayer />
+    </>
+  );
+}
+
 export function ViewportV2() {
   const dispatch = useDispatch();
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
@@ -340,9 +441,7 @@ export function ViewportV2() {
       <ScreenshotRegistrar />
       <GeometryLayer />
       <GmshSceneLayer />
-      <ResultsFieldLayer />
-      <VectorGlyphLayer />
-      <StreamlineLayer />
+      <ResultsLayers />
       <GizmoHelper alignment="bottom-right" margin={[70, 70]}>
         <GizmoViewcube />
       </GizmoHelper>

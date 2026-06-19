@@ -1,0 +1,56 @@
+{
+  "_comment": "Flood-sim config DRAFT schema (FLOOD_PLAN Phase 0). Ritter/Stoker 1D dam-break on a flat dry/wet bed — the first SWE validation case (Phase 10). Not yet consumed by the solver; the shallow_water solver (Phase 6) + flood.* RPC (Phase 9) will read this shape.",
+  "case": "dambreak_1d",
+  "schema_version": 1,
+
+  "terrain": {
+    "_comment": "Either an inline flat bed (here) or a DEM file. A real case uses {\"asc\": \"path/to/dem.asc\"} (Phase 1 reader) + crs.",
+    "flat_bed": { "ncols": 1000, "nrows": 1, "cellsize": 1.0, "origin": [0.0, 0.0], "z_b": 0.0 }
+  },
+
+  "crs": {
+    "_comment": "Phase 2. For projected DEMs: shift to a local origin before meshing (f32 precision, FLOOD_PLAN §3).",
+    "epsg": null,
+    "local_origin": [0.0, 0.0, 0.0]
+  },
+
+  "physics": {
+    "model": "swe_2d",
+    "gravity": 9.81,
+    "manning_n": 0.0,
+    "h_dry": 1.0e-4,
+    "cfl": 0.45,
+    "scheme": { "flux": "hllc", "well_balanced": "audusse", "order": 1, "limiter": "minmod", "time": "ssp_rk2" }
+  },
+
+  "initial": {
+    "_comment": "Dam-break Riemann IC: still water, step in depth at x = dam_position.",
+    "type": "dam_break",
+    "dam_position": 500.0,
+    "left_depth": 10.0,
+    "right_depth": 0.0
+  },
+
+  "boundaries": {
+    "_comment": "Phase 7. xmin/xmax = transmissive (open) so the rarefaction/bore leave cleanly.",
+    "xmin": { "type": "transmissive" },
+    "xmax": { "type": "transmissive" },
+    "ymin": { "type": "wall" },
+    "ymax": { "type": "wall" }
+  },
+
+  "time": { "end_time": 20.0, "output_interval": 1.0, "max_steps": 100000 },
+
+  "output": {
+    "_comment": "Phase 9. VTK per interval; GeoTIFF unshifts the local origin back to the CRS.",
+    "vtk": true,
+    "geotiff": false,
+    "fields": ["depth", "velocity", "max_depth", "arrival_time"]
+  },
+
+  "validation": {
+    "_comment": "Ritter (frictionless, dry bed) analytic: front celerity 2√(g·h_left), tip at x = dam + 2√(g·h_left)·t.",
+    "analytic": "ritter",
+    "tolerance_l1": 0.02
+  }
+}
