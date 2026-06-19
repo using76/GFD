@@ -16,6 +16,7 @@ import { FeatureTreePanel } from './FeatureTreePanel';
 import { ResultsPanel } from './ResultsPanel';
 import { ViewportV2 } from './engine/ViewportV2';
 import { DisplayToolbar } from './DisplayToolbar';
+import { McpControlResponder } from './McpControlResponder';
 
 function StatusBar() {
   const s = useAppState();
@@ -84,6 +85,7 @@ const btn: React.CSSProperties = {
 export function AppV2({ core }: { core?: Core }) {
   return (
     <CoreProvider core={core}>
+      <McpControlResponder />
       <Shell />
     </CoreProvider>
   );

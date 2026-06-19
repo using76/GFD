@@ -46,3 +46,19 @@ contextBridge.exposeInMainWorld('gfdAPI', {
     };
   },
 });
+
+/**
+ * MCP control channel — lets an external MCP client (e.g. Claude Code CLI),
+ * relayed by the Electron main WebSocket server, drive this running GUI's
+ * command-core (the same surface the in-app chat uses).
+ */
+contextBridge.exposeInMainWorld('gfdMcp', {
+  /** Register the renderer's responder. cb receives {id, op, name?, args?}. */
+  onControl: (callback) => {
+    const handler = (_event, msg) => callback(msg);
+    ipcRenderer.on('mcp:control', handler);
+    return () => ipcRenderer.removeListener('mcp:control', handler);
+  },
+  /** Reply to a control request by id. */
+  sendResult: (id, result) => ipcRenderer.send('mcp:result', { id, result }),
+});

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "gfd": {
+      "command": "node",
+      "args": ["gui/electron/mcp-server.cjs"],
+      "env": {}
+    }
+  }
+}
