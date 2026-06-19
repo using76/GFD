@@ -20,6 +20,7 @@ members = [
     "crates/gfd-vdb",
     "crates/gfd-gpu",
     "crates/gfd-mesh",
+    "crates/gfd-geo",
     "crates/gfd-cad-geom",
     "crates/gfd-cad-topo",
     "crates/gfd-cad-bool",

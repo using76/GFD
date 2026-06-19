@@ -37,7 +37,7 @@
 | STL 리더 | `gfd-mesh/src/geometry/stl_reader.rs`, `gfd-io/src/mesh_reader/stl.rs` | 지형/건물 메시 입력 |
 | 압축성 Riemann + CFL | `crates/gfd-fluid/src/compressible/mod.rs::compute_cfl_timestep` | **SWE HLLC 솔버의 변형 원형** |
 | 3D 자유수면 | `gfd-fluid/src/multiphase/{vof,level_set,euler_euler}.rs` | 줌인 트랙(중력 `gravity:[f64;3]` 지원) |
-| STEP B-Rep import | `crates/gfd-cad-io/src/step.rs:854 import_step_brep` | 보조 BIM 경로(IFC→STEP 변환 시) |
+| STEP B-Rep import | `gfd-cad-io/src/lib.rs:67 import_step_brep` → `step.rs:854 read_step_brep` | 보조 BIM 경로(IFC→STEP 변환 시) |
 | 아핀 변환 | `crates/gfd-cad-feature/src/transform.rs` | 건물 지오레퍼런싱 배치 |
 | 경계조건 프레임워크 | `crates/gfd-boundary/` | inlet/outlet/wall/symmetry → 홍수 BC 래퍼 기반 |
 | VTK writer / Gmsh 리더 | `crates/gfd-io/` | 결과 출력 / 외부 메시 입력 |
@@ -152,18 +152,18 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 
 ## 6. Phase Plan (iteration 단위)
 
-### Phase 0 — Scaffolding ⬜
-- [ ] `docs/FLOOD_PLAN.md` 작성 (이 문서)
-- [ ] `crates/gfd-geo/` 크레이트 스캐폴드 + workspace 등록 (Layer 1, deps: gfd-core, gfd-cad-io, gfd-mesh)
-- [ ] `crates/gfd-fluid/src/shallow_water/mod.rs` 모듈 스캐폴드
-- [ ] `examples/flood_*.json` 설정 스키마 초안
+### Phase 0 — Scaffolding ✅
+- [x] `docs/FLOOD_PLAN.md` 작성 (이 문서)
+- [x] `crates/gfd-geo/` 크레이트 스캐폴드 + workspace 등록 (Layer 1, deps: gfd-core; tiff/las/proj는 Phase 1+에서 추가)
+- [x] `crates/gfd-fluid/src/shallow_water/mod.rs` 모듈 스캐폴드 (SwState `[h,hu,hv]`+z_b, SwParams, wetting/drying velocity, SWE CFL dt)
+- [x] `examples/flood_dambreak_1d.json` 설정 스키마 초안 (Ritter 검증 케이스)
 
-### Phase 1 — DEM I/O (`gfd-geo::dem`) ⬜
-- [ ] **`.asc`(ESRI ASCII grid) 리더** — 헤더 6줄(ncols/nrows/xllcorner/yllcorner/cellsize/NODATA) + 격자값. **첫 타깃, 가장 단순.**
-- [ ] `Dem { ncols, nrows, cellsize, origin:[f64;2], nodata, z: Vec<f64> }` + bilinear 샘플러
+### Phase 1 — DEM I/O (`gfd-geo::dem`) ⚠️
+- [x] **`.asc`(ESRI ASCII grid) 리더** — 헤더(ncols/nrows/xll·yll corner|center/cellsize/NODATA, 순서·대소문자·NODATA누락 허용) + 격자값. 첫 타깃 완료.
+- [x] `Dem { ncols, nrows, cellsize, origin:[f64;2], nodata, z: Vec<f64> }` + bilinear 샘플러(+NODATA 폴백) + crop/downsample + elevation_range/bounds/cell_center
 - [ ] **GeoTIFF 리더** (`tiff` crate; GeoKeyDirectory에서 EPSG 추출)
 - [ ] **LAS/LAZ 포인트 클라우드** (`las` crate) → 격자화(IDW/최근접) → DEM (선택, 후순위)
-- [ ] DEM 다운샘플/크롭(해석 도메인 한정)
+- [x] DEM 다운샘플/크롭(해석 도메인 한정) — `Dem::crop`/`Dem::downsample`
 
 ### Phase 2 — CRS & Georeferencing (`gfd-geo::crs`, `::georef`) ⬜
 - [ ] EPSG↔로컬 재투영 (`proj` PROJ 바인딩 우선, 순수 Rust `proj4rs` 대안 평가)
@@ -287,8 +287,8 @@ docs/
 
 | Phase | Status | Summary |
 |---|---|---|
-| 0 Scaffolding | ⬜ 미착수 | gfd-geo 크레이트 + shallow_water 모듈 + 설정 스키마 |
-| 1 DEM I/O | ⬜ | .asc → GeoTIFF → LAS 리더 + 샘플러 |
+| 0 Scaffolding | ✅ 완료 | gfd-geo 크레이트(workspace 등록) + `shallow_water` 모듈 + `examples/flood_dambreak_1d.json` 스키마 초안 |
+| 1 DEM I/O | ⚠️ 부분 | `.asc` 리더 + `Dem`(bilinear 샘플러·crop·downsample) ✅ / GeoTIFF·LAS·proj는 후순위 ⬜ |
 | 2 CRS/Georef | ⬜ | EPSG 재투영 + 로컬원점 시프트 + 한국 좌표계 프리셋 + f32 정밀도 가드 |
 | 3 IFC Reader | ⬜ | 네이티브 IFC4 파서, 외피 추출, MapConversion 지오레퍼런싱, ExtrudedAreaSolid/Brep 형상 |
 | 4 DEM→Mesh | ⬜ | 2D Cartesian+z_b / 3D 하이트필드 STL→cut-cell |

@@ -400,6 +400,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gfd-geo"
+version = "0.1.0"
+dependencies = [
+ "gfd-core",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "gfd-gmsh"
 version = "0.1.0"
 dependencies = [
