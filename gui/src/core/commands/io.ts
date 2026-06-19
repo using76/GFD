@@ -351,11 +351,35 @@ export const exportVtk: CommandDef<ExportVtkParams, { ok: boolean; path: string;
   },
 };
 
+export const exportNvdb: CommandDef<ExportVdbParams, { ok: boolean; path: string; voxels: number; dims: number[] }> = {
+  id: 'results.export_nvdb',
+  category: 'results',
+  group: 'Export',
+  title: 'Export NanoVDB',
+  titleKo: 'NanoVDB 내보내기',
+  description:
+    'Write a solved scalar field to a NanoVDB (.nvdb) volume (header-compatible dense container) for NVIDIA Omniverse / Isaac Sim.',
+  capability: 'read',
+  paramsSchema: {
+    type: 'object',
+    properties: { field: { type: 'string' }, path: { type: 'string' } },
+    required: ['field', 'path'],
+  },
+  async run(params, ctx) {
+    const r = await ctx.rpc.request<{ ok: boolean; path: string; voxels: number; dims: number[] }>('field.export_nvdb', {
+      field: params.field,
+      path: params.path,
+    });
+    return { ok: true, result: r };
+  },
+};
+
 export function registerIoCommands(registry: CommandRegistry): void {
   registry.register(exportStl);
   registry.register(exportUsd);
   registry.register(exportVdb);
   registry.register(exportVtk);
+  registry.register(exportNvdb);
   registry.register(importMesh);
   registry.register(importStep);
   registry.register(importBrep);
