@@ -767,6 +767,298 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
     Ok(mesh)
 }
 
+/// Reconstruct a real B-Rep topology (vertices → edges → wires → faces →
+/// shells → solids) from a STEP file into `arena`, returning the root shape id.
+///
+/// Unlike `read_step_trimesh` (which throws topology away and emits triangles),
+/// this builds `Shape` entities with proper `CurveGeom`/`SurfaceGeom`, so the
+/// imported model can be measured, healed, and tessellated as a true B-Rep.
+/// Each EDGE_CURVE becomes exactly one shared `Shape::Edge`, so face adjacency
+/// pairs correctly. Unmapped surface kinds fall back to a plane fit.
+pub fn read_step_brep(path: &Path, arena: &mut ShapeArena) -> IoResult<ShapeId> {
+    use gfd_cad_geom::curve::{BSplineCurve, Circle, Line};
+    use gfd_cad_geom::surface::{Cone, Cylinder, Plane, Sphere, Torus};
+    use gfd_cad_geom::{Direction3, Point3, Vector3};
+    use gfd_cad_topo::shape::{CurveGeom, SurfaceGeom};
+    use gfd_cad_topo::Orientation;
+    use std::collections::HashMap;
+
+    let text = fs::read_to_string(path)?;
+
+    // ---- Pass 1: scan records into id-keyed maps -------------------------
+    let mut cps: HashMap<u32, [f64; 3]> = HashMap::new();
+    let mut vps: HashMap<u32, u32> = HashMap::new(); // vertex -> cartesian point
+    let mut dirs: HashMap<u32, [f64; 3]> = HashMap::new();
+    // placement -> (location, axis/z, ref_dir/x)
+    let mut placements: HashMap<u32, (u32, Option<u32>, Option<u32>)> = HashMap::new();
+    let mut circles: HashMap<u32, (u32, f64)> = HashMap::new();
+    let mut planes: HashMap<u32, u32> = HashMap::new();
+    let mut cyls: HashMap<u32, (u32, f64)> = HashMap::new();
+    let mut sphs: HashMap<u32, (u32, f64)> = HashMap::new();
+    let mut cones: HashMap<u32, (u32, f64, f64)> = HashMap::new(); // placement, radius, semi_angle
+    let mut tori: HashMap<u32, (u32, f64, f64)> = HashMap::new();  // placement, major, minor
+    #[allow(clippy::type_complexity)]
+    let mut surf_bspline: HashMap<u32, (usize, usize, usize, usize, Vec<u32>, Vec<f64>, Vec<f64>)> = HashMap::new();
+    let mut curve_bspline: HashMap<u32, (usize, Vec<u32>, Vec<f64>)> = HashMap::new();
+    let mut edge_curves: HashMap<u32, (u32, u32, Option<u32>)> = HashMap::new(); // va, vb, curve
+    let mut oriented: HashMap<u32, (u32, bool)> = HashMap::new(); // edge_curve, forward
+    let mut edge_loops: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut face_bounds: HashMap<u32, (u32, bool)> = HashMap::new(); // loop, is_outer
+    let mut adv_faces: Vec<(u32, Vec<u32>, u32, bool)> = Vec::new(); // id, bound refs, surface, forward
+    let mut shells: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut solids: Vec<u32> = Vec::new(); // outer shell refs
+
+    let expand_knots = |mults: &[f64], knots: &[f64]| -> Vec<f64> {
+        let mut out = Vec::new();
+        for (k, m) in knots.iter().zip(mults.iter()) {
+            for _ in 0..(*m as usize) { out.push(*k); }
+        }
+        out
+    };
+    let trailing_forward = |args: &str| -> bool {
+        // The same-sense / orientation flag is the last .T./.F. token.
+        args.rfind(".T.").map(|t| args.rfind(".F.").map_or(true, |f| t > f)).unwrap_or(true)
+    };
+
+    for record in text.split(';') {
+        let record = record.trim();
+        if !record.starts_with('#') { continue; }
+        let Some(eq) = record.find('=') else { continue };
+        let Ok(id) = record[1..eq].trim().parse::<u32>() else { continue };
+        let rhs = record[eq + 1..].trim();
+        let Some(paren) = rhs.find('(') else { continue };
+        let typ = rhs[..paren].trim();
+        let args = &rhs[paren..];
+        match typ {
+            "CARTESIAN_POINT" => { let f = extract_floats(args); if f.len() >= 3 { cps.insert(id, [f[0], f[1], f[2]]); } }
+            "VERTEX_POINT" => { if let Some(&cp) = extract_refs(args).first() { vps.insert(id, cp); } }
+            "DIRECTION" => {
+                let f = extract_floats(args);
+                if f.len() >= 3 {
+                    let len = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
+                    if len > 1e-12 { dirs.insert(id, [f[0] / len, f[1] / len, f[2] / len]); }
+                }
+            }
+            "AXIS2_PLACEMENT_3D" => {
+                let r = extract_refs(args);
+                if let Some(&loc) = r.first() {
+                    placements.insert(id, (loc, r.get(1).copied(), r.get(2).copied()));
+                }
+            }
+            "CIRCLE" => { let r = extract_refs(args); if let (Some(&pl), Some(&rad)) = (r.first(), extract_floats(args).last()) { circles.insert(id, (pl, rad)); } }
+            "PLANE" => { if let Some(&pl) = extract_refs(args).first() { planes.insert(id, pl); } }
+            "CYLINDRICAL_SURFACE" => { let r = extract_refs(args); if let (Some(&pl), Some(&rad)) = (r.first(), extract_floats(args).last()) { cyls.insert(id, (pl, rad)); } }
+            "SPHERICAL_SURFACE" => { let r = extract_refs(args); if let (Some(&pl), Some(&rad)) = (r.first(), extract_floats(args).last()) { sphs.insert(id, (pl, rad)); } }
+            "CONICAL_SURFACE" => {
+                let r = extract_refs(args); let f = extract_floats(args);
+                if let Some(&pl) = r.first() { if f.len() >= 2 { cones.insert(id, (pl, f[f.len() - 2], f[f.len() - 1])); } }
+            }
+            "TOROIDAL_SURFACE" => {
+                let r = extract_refs(args); let f = extract_floats(args);
+                if let Some(&pl) = r.first() { if f.len() >= 2 { tori.insert(id, (pl, f[f.len() - 2], f[f.len() - 1])); } }
+            }
+            "B_SPLINE_SURFACE_WITH_KNOTS" => {
+                let f = split_top_level(args);
+                if f.len() >= 12 { if let Some(rec) = parse_bspline_record(&f[1], &f[2], &f[3], &f[8], &f[9], &f[10], &f[11]) { surf_bspline.insert(id, rec); } }
+            }
+            "B_SPLINE_CURVE_WITH_KNOTS" => {
+                // ['', degree, cp_list, form, b, b, mults, knots, spec]
+                let f = split_top_level(args);
+                if f.len() >= 8 {
+                    if let Ok(deg) = f[1].trim().parse::<usize>() {
+                        let cp_refs = extract_refs(&f[2]);
+                        let knots = expand_knots(&extract_floats(&f[6]), &extract_floats(&f[7]));
+                        if cp_refs.len() >= deg + 1 { curve_bspline.insert(id, (deg, cp_refs, knots)); }
+                    }
+                }
+            }
+            "EDGE_CURVE" => {
+                let r = extract_refs(args);
+                if r.len() >= 2 { edge_curves.insert(id, (r[0], r[1], r.get(2).copied())); }
+            }
+            "ORIENTED_EDGE" => {
+                // refs: [*, *, edge_curve] (the *'s are '$'); the last ref is the edge.
+                if let Some(&e) = extract_refs(args).last() { oriented.insert(id, (e, trailing_forward(args))); }
+            }
+            "EDGE_LOOP" => { edge_loops.insert(id, extract_refs(args)); }
+            "FACE_OUTER_BOUND" => { if let Some(&l) = extract_refs(args).first() { face_bounds.insert(id, (l, true)); } }
+            "FACE_BOUND" => { if let Some(&l) = extract_refs(args).first() { face_bounds.insert(id, (l, false)); } }
+            "ADVANCED_FACE" | "FACE_SURFACE" => {
+                let r = extract_refs(args);
+                if r.len() >= 2 {
+                    let surf = *r.last().unwrap();
+                    let bounds: Vec<u32> = r[..r.len() - 1].to_vec();
+                    adv_faces.push((id, bounds, surf, trailing_forward(args)));
+                }
+            }
+            "CLOSED_SHELL" | "OPEN_SHELL" => { shells.insert(id, extract_refs(args)); }
+            "MANIFOLD_SOLID_BREP" | "BREP_WITH_VOIDS" => { if let Some(&sh) = extract_refs(args).first() { solids.push(sh); } }
+            // AP214/AP242 complex instance carrying a B_SPLINE_SURFACE_WITH_KNOTS.
+            "" if rhs.starts_with('(') && rhs.contains("B_SPLINE_SURFACE_WITH_KNOTS") => {
+                if let (Some(bs), Some(wk)) = (find_entity_args(rhs, "B_SPLINE_SURFACE("), find_entity_args(rhs, "B_SPLINE_SURFACE_WITH_KNOTS(")) {
+                    let b = split_top_level(&bs);
+                    let w = split_top_level(&wk);
+                    if b.len() >= 3 && w.len() >= 4 {
+                        if let Some(rec) = parse_bspline_record(&b[0], &b[1], &b[2], &w[0], &w[1], &w[2], &w[3]) { surf_bspline.insert(id, rec); }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ---- helpers --------------------------------------------------------
+    let dir_of = |id: Option<u32>| -> Option<Direction3> {
+        let d = dirs.get(&id?)?;
+        Some(Direction3 { x: d[0], y: d[1], z: d[2] })
+    };
+    let point_of = |id: u32| -> Option<Point3> { cps.get(&id).map(|p| Point3::new(p[0], p[1], p[2])) };
+    // (origin, z axis, x ref) for a placement, deriving an arbitrary x if absent.
+    let frame = |pl: u32| -> Option<(Point3, Direction3, Direction3)> {
+        let &(loc, zr, xr) = placements.get(&pl)?;
+        let o = point_of(loc)?;
+        let z = dir_of(zr).unwrap_or(Direction3::Z);
+        let x = dir_of(xr).unwrap_or_else(|| {
+            // any unit vector perpendicular to z
+            let zv = z.as_vec();
+            let t = if zv.x.abs() < 0.9 { Vector3::new(1.0, 0.0, 0.0) } else { Vector3::new(0.0, 1.0, 0.0) };
+            t.cross(zv).to_direction().unwrap_or(Direction3::X)
+        });
+        Some((o, z, x))
+    };
+
+    // ---- Pass 2: build B-Rep bottom-up ----------------------------------
+    let mut vp_shape: HashMap<u32, ShapeId> = HashMap::new();
+    for (&vid, &cp) in &vps {
+        if let Some(p) = point_of(cp) { vp_shape.insert(vid, arena.push(Shape::vertex(p))); }
+    }
+
+    let mut ec_shape: HashMap<u32, ShapeId> = HashMap::new();
+    for (&eid, &(va, vb, curve)) in &edge_curves {
+        let (Some(&sva), Some(&svb)) = (vp_shape.get(&va), vp_shape.get(&vb)) else { continue };
+        let (pa, pb) = match (vps.get(&va).and_then(|c| point_of(*c)), vps.get(&vb).and_then(|c| point_of(*c))) {
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
+        };
+        let geom = if let Some(cid) = curve {
+            if let Some(&(pl, rad)) = circles.get(&cid) {
+                frame(pl).map(|(o, z, x)| CurveGeom::Circle(Circle::new(o, z, x, rad)))
+            } else if let Some((deg, refs, knots)) = curve_bspline.get(&cid) {
+                let cp: Vec<Point3> = refs.iter().filter_map(|r| point_of(*r)).collect();
+                if cp.len() == refs.len() {
+                    BSplineCurve::new(*deg, cp, knots.clone()).ok().map(CurveGeom::BSpline)
+                } else { None }
+            } else { None }
+        } else { None };
+        // Default / fallback: a straight line between the two endpoints.
+        let geom = geom.or_else(|| Line::from_points(pa, pb).ok().map(CurveGeom::Line));
+        let Some(curve_geom) = geom else { continue };
+        ec_shape.insert(eid, arena.push(Shape::Edge { curve: curve_geom, vertices: [sva, svb], orient: Orientation::Forward }));
+    }
+
+    let mut loop_shape: HashMap<u32, ShapeId> = HashMap::new();
+    for (&lid, elems) in &edge_loops {
+        let mut edges: Vec<(ShapeId, Orientation)> = Vec::new();
+        for el in elems {
+            let (ec, fwd) = if let Some(&(ec, f)) = oriented.get(el) { (ec, f) } else { (*el, true) };
+            if let Some(&es) = ec_shape.get(&ec) {
+                edges.push((es, if fwd { Orientation::Forward } else { Orientation::Reversed }));
+            }
+        }
+        if !edges.is_empty() { loop_shape.insert(lid, arena.push(Shape::Wire { edges })); }
+    }
+
+    // Resolve a STEP surface ref to a SurfaceGeom (plane fit fallback handled by caller).
+    let surface_geom = |surf: u32, fallback_pts: &[Point3]| -> Option<SurfaceGeom> {
+        if let Some(&pl) = planes.get(&surf) {
+            return frame(pl).map(|(o, z, x)| SurfaceGeom::Plane(Plane::new(o, z, x)));
+        }
+        if let Some(&(pl, rad)) = cyls.get(&surf) {
+            return frame(pl).map(|(o, z, x)| SurfaceGeom::Cylinder(Cylinder::new(o, z, x, rad, 1.0)));
+        }
+        if let Some(&(pl, rad)) = sphs.get(&surf) {
+            return frame(pl).map(|(o, _z, _x)| SurfaceGeom::Sphere(Sphere::new(o, rad)));
+        }
+        if let Some(&(pl, rad, semi)) = cones.get(&surf) {
+            // r1 at the placement plane, r2 one unit up along the axis.
+            return frame(pl).map(|(o, z, x)| SurfaceGeom::Cone(Cone::new(o, z, x, rad, rad + semi.tan(), 1.0)));
+        }
+        if let Some(&(pl, major, minor)) = tori.get(&surf) {
+            return frame(pl).map(|(o, z, x)| SurfaceGeom::Torus(Torus::new(o, z, x, major, minor)));
+        }
+        if let Some(rec) = surf_bspline.get(&surf) {
+            let (u_deg, v_deg, n_u, n_v, refs, uk, vk) = rec;
+            let cp: Vec<Point3> = refs.iter().filter_map(|r| point_of(*r)).collect();
+            if cp.len() == refs.len() {
+                return BSplineSurface::new(*u_deg, *v_deg, *n_u, *n_v, cp, uk.clone(), vk.clone()).ok().map(SurfaceGeom::BSpline);
+            }
+        }
+        // Fallback: fit a plane through the first three boundary points.
+        if fallback_pts.len() >= 3 {
+            return Plane::from_three_points(fallback_pts[0], fallback_pts[1], fallback_pts[2]).ok().map(SurfaceGeom::Plane);
+        }
+        None
+    };
+
+    // Gather the 3D corner points of a loop (for the plane-fit fallback).
+    let loop_points = |lid: u32| -> Vec<Point3> {
+        let mut pts = Vec::new();
+        if let Some(elems) = edge_loops.get(&lid) {
+            for el in elems {
+                let ec = oriented.get(el).map(|(e, _)| *e).unwrap_or(*el);
+                if let Some(&(va, _, _)) = edge_curves.get(&ec) {
+                    if let Some(p) = vps.get(&va).and_then(|c| point_of(*c)) { pts.push(p); }
+                }
+            }
+        }
+        pts
+    };
+
+    let mut face_by_id: HashMap<u32, ShapeId> = HashMap::new();
+    let mut all_faces: Vec<ShapeId> = Vec::new();
+    for (fid, bounds, surf, _fwd) in &adv_faces {
+        // Order wires outer-first.
+        let mut wires: Vec<ShapeId> = Vec::new();
+        let mut fallback_pts: Vec<Point3> = Vec::new();
+        let mut ordered: Vec<(u32, bool)> = bounds.iter().filter_map(|b| face_bounds.get(b).map(|&(l, o)| (l, o))).collect();
+        ordered.sort_by_key(|(_, outer)| if *outer { 0 } else { 1 });
+        for (lid, _outer) in &ordered {
+            if let Some(&ws) = loop_shape.get(lid) { wires.push(ws); }
+            if fallback_pts.is_empty() { fallback_pts = loop_points(*lid); }
+        }
+        let Some(sg) = surface_geom(*surf, &fallback_pts) else { continue };
+        let fs = arena.push(Shape::Face { surface: sg, wires, orient: Orientation::Forward });
+        face_by_id.insert(*fid, fs);
+        all_faces.push(fs);
+    }
+
+    let mut shell_shape: HashMap<u32, ShapeId> = HashMap::new();
+    for (&sid, face_refs) in &shells {
+        let faces: Vec<(ShapeId, Orientation)> = face_refs.iter().filter_map(|f| face_by_id.get(f).map(|&fs| (fs, Orientation::Forward))).collect();
+        if !faces.is_empty() { shell_shape.insert(sid, arena.push(Shape::Shell { faces })); }
+    }
+
+    let mut solid_ids: Vec<ShapeId> = Vec::new();
+    for sh in &solids {
+        if let Some(&ss) = shell_shape.get(sh) { solid_ids.push(arena.push(Shape::Solid { shells: vec![ss] })); }
+    }
+
+    // ---- root ----------------------------------------------------------
+    let root = if solid_ids.len() == 1 {
+        solid_ids[0]
+    } else if !solid_ids.is_empty() {
+        arena.push(Shape::Compound { children: solid_ids })
+    } else if !shell_shape.is_empty() {
+        let children: Vec<ShapeId> = shell_shape.values().copied().collect();
+        if children.len() == 1 { children[0] } else { arena.push(Shape::Compound { children }) }
+    } else if !all_faces.is_empty() {
+        if all_faces.len() == 1 { all_faces[0] } else { arena.push(Shape::Compound { children: all_faces }) }
+    } else {
+        return Err(IoError::Parse("STEP file produced no B-Rep topology".into()));
+    };
+    Ok(root)
+}
+
 /// Summary of a STEP file's contents — counts of each entity kind we know
 /// how to recognise. Used for import sanity checks and UI preview.
 #[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -881,6 +1173,43 @@ mod tests {
     /// Minimal STEP body around handcrafted entity records.
     fn step_doc(entities: &str) -> String {
         format!("ISO-10303-21;\nDATA;\n{}\nENDSEC;\nEND-ISO-10303-21;\n", entities)
+    }
+
+    #[test]
+    fn read_step_brep_reconstructs_a_circle_edge() {
+        // An EDGE_CURVE referencing a CIRCLE must rebuild a CurveGeom::Circle.
+        use gfd_cad_topo::{collect_by_kind, Shape, ShapeKind};
+        use gfd_cad_topo::shape::CurveGeom;
+        let entities = "\
+#1=CARTESIAN_POINT('',(1.,0.,0.));
+#2=CARTESIAN_POINT('',(1.,0.,0.));
+#3=CARTESIAN_POINT('',(0.,0.,0.));
+#4=DIRECTION('',(0.,0.,1.));
+#5=DIRECTION('',(1.,0.,0.));
+#6=AXIS2_PLACEMENT_3D('',#3,#4,#5);
+#7=CIRCLE('',#6,1.0);
+#8=VERTEX_POINT('',#1);
+#9=VERTEX_POINT('',#2);
+#10=EDGE_CURVE('',#8,#9,#7,.T.);
+#11=ORIENTED_EDGE('',*,*,#10,.T.);
+#12=EDGE_LOOP('',(#11));
+#13=FACE_OUTER_BOUND('',#12,.T.);
+#14=PLANE('',#6);
+#15=ADVANCED_FACE('',(#13),#14,.T.);";
+        let path = std::env::temp_dir().join(format!("gfd_brep_circle_{}.stp",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::write(&path, step_doc(entities)).unwrap();
+        let mut arena = ShapeArena::new();
+        let root = read_step_brep(&path, &mut arena).unwrap();
+        let _ = fs::remove_file(&path);
+        let edges = collect_by_kind(&arena, root, ShapeKind::Edge);
+        assert_eq!(edges.len(), 1, "should reconstruct one edge");
+        match arena.get(edges[0]).unwrap() {
+            Shape::Edge { curve: CurveGeom::Circle(c), .. } => {
+                assert!((c.radius - 1.0).abs() < 1e-9, "circle radius should be 1, got {}", c.radius);
+            }
+            other => panic!("expected a circle edge, got {:?}", other),
+        }
     }
 
     #[test]

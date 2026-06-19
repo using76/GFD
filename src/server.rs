@@ -29,7 +29,7 @@ use gfd_cad::{
     bool_::{compound_merge, mesh_boolean, MeshOp},
     feature::{box_solid, c_channel_profile, t_beam_profile, z_section_profile, chamfered_box_solid, chamfered_box_top_edges, circular_array, cone_solid, capsule_revolve_profile, cup_revolve_profile, cylinder_solid, disc_solid, dodecahedron_solid, ellipse_profile, filleted_box_solid, filleted_box_top_edges, filleted_cylinder_solid, frustum_revolve_profile, gear_profile_simple, airfoil_naca4_profile, archimedean_spiral_path, helix_length, helix_path, honeycomb_pattern_solid, torus_knot_path, i_beam_profile, icosahedron_solid, icosphere_solid, l_angle_profile, linear_array, mirror_shape, ngon_prism_solid, octahedron_solid, offset_polygon_2d, pad_polygon_xy, pocket_polygon_xy, pyramid_solid, rectangle_profile, rectangular_array, regular_ngon_profile, revolve_profile_z, revolve_profile_z_partial, ring_revolve_profile, rotate_shape, rounded_rectangle_profile, scale_shape, slot_profile, sphere_solid, spiral_staircase_solid, stairs_solid, star_profile, tetrahedron_solid, torus_revolve_profile, torus_solid, translate_shape, tube_solid, wedge_solid, FeatureTree, MirrorPlane},
     heal::{check_validity, fix_shape, shape_stats, HealOptions},
-    io::{export_step, import_brep, import_step, read_brep, read_obj, read_off, read_ply_ascii, read_step_trimesh, read_stl, read_xyz, summarise_step, write_brep, write_dxf_3dface, write_obj, write_off, write_ply_ascii, write_stl_ascii, write_stl_binary, write_vtk_polydata, write_wrl, write_xyz, StlMesh},
+    io::{export_step, import_brep, import_step, import_step_brep, read_brep, read_obj, read_off, read_ply_ascii, read_step_trimesh, read_stl, read_xyz, summarise_step, write_brep, write_dxf_3dface, write_obj, write_off, write_ply_ascii, write_stl_ascii, write_stl_binary, write_vtk_polydata, write_wrl, write_xyz, StlMesh},
     measure::{bbox_volume, bounding_sphere, center_of_mass, closest_point_on_shape, distance as cad_distance, distance_edge_edge, distance_vertex_edge, divergence_volume, edge_length, edge_length_range, hausdorff_distance_vertex, inertia_tensor_full, is_convex_polygon, is_point_inside_solid, mesh_euler_genus, polygon_area, polygon_area_signed, polygon_centroid, polygon_contains_point, polygon_convex_hull, polygon_perimeter, principal_axes, signed_distance, surface_area, trimesh_aspect_ratio_stats, trimesh_bounding_box, trimesh_boundary_edges, trimesh_center_of_mass, trimesh_closest_point, trimesh_edge_length_stats, trimesh_inertia_tensor, trimesh_is_closed, trimesh_non_manifold_edges, trimesh_point_inside, trimesh_ray_intersect, trimesh_signed_distance, trimesh_surface_area, trimesh_volume},
     sketch::{Constraint as SkCons, EntityId as SkEid, Point2, PointId as SkPid, Sketch},
     tessel::{extract_edges, tessellate, tessellate_adaptive, TessellationOptions, TriMesh},
@@ -586,6 +586,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.import.brep"          => handle_cad_import_brep(state, req.id, &req.params),
         "cad.export.step"          => handle_cad_export_step(state, req.id, &req.params),
         "cad.import.step"          => handle_cad_import_step(state, req.id, &req.params),
+        "cad.import.step_brep"     => handle_cad_import_step_brep(state, req.id, &req.params),
         "cad.step.summary"         => handle_cad_step_summary(req.id, &req.params),
         "cad.export.stl"           => handle_cad_export_stl(state, req.id, &req.params),
         "cad.export.obj"           => handle_cad_export_obj(state, req.id, &req.params),
@@ -4593,6 +4594,34 @@ fn handle_cad_import_step(state: &mut ServerState, id: u64, params: &Value) -> R
     }
 }
 
+/// Reconstruct real B-Rep topology (vertices/edges/wires/faces/shells/solids)
+/// from a STEP file into the document arena — measurable / tessellatable, unlike
+/// the points-only `cad.import.step`.
+fn handle_cad_import_step_brep(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    use gfd_cad::topo::{collect_by_kind, ShapeKind};
+    let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing path");
+    };
+    match import_step_brep(std::path::Path::new(path), &mut state.cad_doc.arena) {
+        Ok(shape_id) => {
+            state.next_cad_shape_id += 1;
+            let str_id = format!("shape_{}", state.next_cad_shape_id);
+            state.cad_shape_map.insert(str_id.clone(), shape_id);
+            let arena = &state.cad_doc.arena;
+            RpcResponse::ok(id, serde_json::json!({
+                "shape_id": str_id,
+                "arena_id": shape_id.0,
+                "solids": collect_by_kind(arena, shape_id, ShapeKind::Solid).len(),
+                "shells": collect_by_kind(arena, shape_id, ShapeKind::Shell).len(),
+                "faces": collect_by_kind(arena, shape_id, ShapeKind::Face).len(),
+                "edges": collect_by_kind(arena, shape_id, ShapeKind::Edge).len(),
+                "vertices": collect_by_kind(arena, shape_id, ShapeKind::Vertex).len(),
+            }))
+        }
+        Err(e) => RpcResponse::err(id, format!("step B-Rep import failed: {}", e)),
+    }
+}
+
 fn handle_cad_import_brep(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
     let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
         return RpcResponse::err(id, "missing path");
@@ -7092,6 +7121,23 @@ mod tests {
         let ctr = r["centroid"].as_array().unwrap();
         assert!((ctr[2].as_f64().unwrap() - 1.0).abs() < 1e-6, "top face centroid z should be 1");
         assert!((r["distance"].as_f64().unwrap() - 4.0).abs() < 1e-6, "distance from z=5 to z=1 is 4");
+    }
+
+    #[test]
+    fn import_step_brep_reconstructs_topology() {
+        // Export a box to STEP, import it back as a real B-Rep via the handler.
+        let mut src = gfd_cad::topo::ShapeArena::new();
+        let bid = box_solid(&mut src, 1.0, 1.0, 1.0).unwrap();
+        let path = std::env::temp_dir().join(format!("gfd_srv_brep_{}.stp",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        gfd_cad::io::export_step(&path, &src, bid).unwrap();
+        let mut state = ServerState::new();
+        let resp = handle_cad_import_step_brep(&mut state, 1, &serde_json::json!({ "path": path.to_str().unwrap() }));
+        let _ = std::fs::remove_file(&path);
+        let r = resp.result.expect("step_brep import ok");
+        assert_eq!(r["faces"].as_u64(), Some(6), "box should import 6 faces");
+        assert_eq!(r["solids"].as_u64(), Some(1), "box should import 1 solid");
+        assert!(r["shape_id"].as_str().is_some());
     }
 
     #[test]

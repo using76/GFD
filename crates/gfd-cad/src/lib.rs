@@ -100,6 +100,28 @@ mod integration_tests {
     }
 
     #[test]
+    fn step_brep_roundtrips_box_topology_and_volume() {
+        use io::{export_step, import_step_brep};
+        use topo::{collect_by_kind, ShapeKind};
+        // Write a box solid, reconstruct its real B-Rep, check topology + volume.
+        let mut src = ShapeArena::new();
+        let bid = box_solid(&mut src, 2.0, 3.0, 4.0).unwrap();
+        let path = std::env::temp_dir().join(format!("gfd_cad_brep_{}.stp",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        export_step(&path, &src, bid).unwrap();
+        let mut dst = ShapeArena::new();
+        let root = import_step_brep(&path, &mut dst).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(collect_by_kind(&dst, root, ShapeKind::Solid).len(), 1, "one solid");
+        assert_eq!(collect_by_kind(&dst, root, ShapeKind::Face).len(), 6, "six faces");
+        let v = volume(&dst, root).unwrap();
+        assert!((v - 24.0).abs() < 1e-6, "reconstructed box volume {} != 24", v);
+        // The reconstructed B-Rep tessellates to a non-empty mesh.
+        let mesh = tessellate(&dst, root, TessellationOptions::default()).unwrap();
+        assert!(mesh.indices.len() >= 12, "box B-Rep should tessellate");
+    }
+
+    #[test]
     fn plate_with_hole_volume_and_tessellation() {
         // 4×3×1 plate with a 12-gon hole (r=0.5) → volume = box − hole·height,
         // and the cap tessellation cuts the hole out (multi-wire planar face).
