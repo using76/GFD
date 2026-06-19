@@ -8,6 +8,30 @@
 검증 게이트(매 iteration): `cargo build --bin gfd-server`, `cd gui && npx tsc
 --noEmit` (0 errors), `cd gui && npm test`.
 
+## Hard backlog 구현 (branch `feat/loop-backlog`, PR #8 적층)
+
+가장 깊은 3종(face-flux 완전 cut-cell, rational/trimmed NURBS, STEP B-rep 완전
+재구성)을 구현. understand 워크플로(4 reader) → 구현 → 21-에이전트 adversarial
+리뷰 → 확정 10버그(critical 1 + high 4) 수정.
+
+- **face-flux 완전 cut-cell**: `simple.rs` momentum **및** pressure-correction
+  loop 동시 처리 — fluid↔solid 면을 no-slip wall(off-diagonal 0, wall friction D)
+  로, pcorr에서 횡단 보정유속 0, solid 셀 p'=0 pin + 속도 정확히 0 pin. 누설을
+  diagonal penalty 잔류(~1/K) 너머로 제거. mask==None은 byte-identical(기존 테스트
+  무영향). 연속 residual도 wall 면 제외 → 수렴.
+- **rational NURBS**: sibling `NurbsSurface`(weighted, projective eval/quotient
+  partial) + `SurfaceGeom::Nurbs` + tessel/transform/mirror/measure arms + STEP
+  `RATIONAL_B_SPLINE_SURFACE` 파싱(trimmed 포함, read_step_brep도).
+- **trimmed 곡면**: 일반 Newton uv-inversion + uv point-in-polygon cull, 주기적
+  seam unwrap(critical 수정). full-surface fallback로 기존 primitive 무영향.
+- **STEP B-rep 완전 재구성**: `read_step_brep` — vertices→edges→wires→faces→
+  shells→solids, 적절한 CurveGeom/SurfaceGeom, EDGE_CURVE 공유로 adjacency.
+  cylinder/cone 높이는 wire에서 유도, AXIS2_PLACEMENT Gram-Schmidt, writer는
+  좌표·edge 공유 + ORIENTED_EDGE sense로 watertight round-trip. `cad.import.step_brep`
+  RPC + `cadClient.importStepBrep`.
+- 검증: gfd-fluid 148, geom 49, tessel 28, measure 28, feature 64, io 28, cad 11,
+  server bin 19, tsc 0, vitest 129 — 전부 green.
+
 ## Deep backlog 전량 구현 (branch `feat/loop-backlog`, PR #8 적층, "전부 구현")
 
 plan의 보류 항목 4종 + SurfaceGeom 확장을 모두 구현. understand 워크플로(6 reader,
