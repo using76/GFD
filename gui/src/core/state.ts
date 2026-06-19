@@ -115,7 +115,13 @@ export interface SetupState {
 
 export interface DisplayState {
   renderMode: 'shaded' | 'wireframe' | 'shaded_edges';
-  sectionPlane: { enabled: boolean; axis: 'x' | 'y' | 'z'; offset: number };
+  /** Surface opacity 0–1 (1 = opaque). < 1 renders geometry semi-transparent. */
+  opacity: number;
+  /** Master show/hide per render layer (independent of per-shape visibility). */
+  layers: { geometry: boolean; mesh: boolean; results: boolean };
+  /** Section/clipping plane. `axis` picks an axis-aligned normal; when `axis` is
+   *  'custom' the explicit `normal` is used (arbitrary plane). */
+  sectionPlane: { enabled: boolean; axis: 'x' | 'y' | 'z' | 'custom'; offset: number; normal?: [number, number, number] };
 }
 
 /** Results visualization toggles/parameters (contour / vectors / streamlines). */
@@ -211,7 +217,12 @@ export function createInitialState(): AppState {
     fov: 50,
     projection: 'perspective',
   };
-  const display: DisplayState = { renderMode: 'shaded', sectionPlane: { enabled: false, axis: 'x', offset: 0 } };
+  const display: DisplayState = {
+    renderMode: 'shaded',
+    opacity: 1,
+    layers: { geometry: true, mesh: true, results: true },
+    sectionPlane: { enabled: false, axis: 'x', offset: 0 },
+  };
   const viz: VizState = {
     showContour: true,
     showVectors: false,

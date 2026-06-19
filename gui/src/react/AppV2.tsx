@@ -15,6 +15,7 @@ import { CommandFormPanel } from './CommandFormPanel';
 import { FeatureTreePanel } from './FeatureTreePanel';
 import { ResultsPanel } from './ResultsPanel';
 import { ViewportV2 } from './engine/ViewportV2';
+import { DisplayToolbar } from './DisplayToolbar';
 
 function StatusBar() {
   const s = useAppState();
@@ -59,7 +60,8 @@ function Shell() {
             <ResultsPanel />
           </div>
         </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
+          <DisplayToolbar />
           <ViewportV2 />
         </div>
       </div>
