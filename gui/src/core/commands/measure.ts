@@ -7,6 +7,10 @@
 import type { CommandDef } from '../command';
 import type { CommandRegistry } from '../registry';
 import type { Vec3 } from '../types';
+import { isGmshShape } from './gmsh';
+
+/** Mass properties of a gmsh (OCC) solid, fetched once and cached per call. */
+interface GmshMeasure { volume?: number; surface_area?: number; center_of_mass?: [number, number, number]; bbox?: number[] }
 
 export interface ShapeIdParams {
   shape_id: string;
@@ -28,6 +32,10 @@ export const measureVolume: CommandDef<ShapeIdParams, { volume: number }> = {
   capability: 'read',
   paramsSchema: shapeIdSchema,
   async run(params, ctx) {
+    if (isGmshShape(ctx.getState(), params.shape_id)) {
+      const m = await ctx.rpc.request<GmshMeasure>('gmsh.measure', { shape_id: params.shape_id });
+      return { ok: true, result: { volume: m.volume ?? 0 } };
+    }
     const r = await ctx.rpc.request<{ volume: number }>('cad.measure.volume', { shape_id: params.shape_id });
     return { ok: true, result: r };
   },
@@ -43,6 +51,10 @@ export const measureSurfaceArea: CommandDef<ShapeIdParams, { area: number }> = {
   capability: 'read',
   paramsSchema: shapeIdSchema,
   async run(params, ctx) {
+    if (isGmshShape(ctx.getState(), params.shape_id)) {
+      const m = await ctx.rpc.request<GmshMeasure>('gmsh.measure', { shape_id: params.shape_id });
+      return { ok: true, result: { area: m.surface_area ?? 0 } };
+    }
     const r = await ctx.rpc.request<{ area: number }>('cad.measure.surface_area', { shape_id: params.shape_id });
     return { ok: true, result: r };
   },
@@ -58,6 +70,11 @@ export const measureCenterOfMass: CommandDef<ShapeIdParams, { x: number; y: numb
   capability: 'read',
   paramsSchema: shapeIdSchema,
   async run(params, ctx) {
+    if (isGmshShape(ctx.getState(), params.shape_id)) {
+      const m = await ctx.rpc.request<GmshMeasure>('gmsh.measure', { shape_id: params.shape_id });
+      const c = m.center_of_mass ?? [0, 0, 0];
+      return { ok: true, result: { x: c[0], y: c[1], z: c[2] } };
+    }
     const r = await ctx.rpc.request<{ x: number; y: number; z: number }>('cad.measure.center_of_mass', {
       shape_id: params.shape_id,
     });
@@ -75,6 +92,11 @@ export const measureBoundingBox: CommandDef<ShapeIdParams, { min: Vec3; max: Vec
   capability: 'read',
   paramsSchema: shapeIdSchema,
   async run(params, ctx) {
+    if (isGmshShape(ctx.getState(), params.shape_id)) {
+      const m = await ctx.rpc.request<GmshMeasure>('gmsh.measure', { shape_id: params.shape_id });
+      const b = m.bbox ?? [0, 0, 0, 0, 0, 0];
+      return { ok: true, result: { min: [b[0], b[1], b[2]], max: [b[3], b[4], b[5]] } };
+    }
     const node = ctx.getState().doc.geometry.nodes[params.shape_id];
     if (!node) return { ok: false, error: { code: 'UNKNOWN_SHAPE', message: `No shape "${params.shape_id}"` } };
     return { ok: true, result: { min: node.bbox.min, max: node.bbox.max } };

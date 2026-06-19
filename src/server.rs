@@ -474,6 +474,9 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "cad.feature.primitive" => handle_cad_feature_primitive(state, req.id, &req.params),
         // --- Gmsh (OCC) backend: professional CAD + enclosure + meshing (feature-gated) ---
         "gmsh.primitive"      => handle_gmsh_primitive(state, req.id, &req.params),
+        "gmsh.transform"      => handle_gmsh_transform(state, req.id, &req.params),
+        "gmsh.delete"         => handle_gmsh_delete(state, req.id, &req.params),
+        "gmsh.measure"        => handle_gmsh_measure(state, req.id, &req.params),
         "gmsh.boolean"        => handle_gmsh_boolean(state, req.id, &req.params),
         "gmsh.heal"           => handle_gmsh_heal(state, req.id, &req.params),
         "gmsh.tessellate"     => handle_gmsh_tessellate(state, req.id, &req.params),
@@ -968,6 +971,12 @@ macro_rules! gmsh_stub {
 #[cfg(not(feature = "gmsh"))]
 gmsh_stub!(handle_gmsh_primitive);
 #[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_transform);
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_delete);
+#[cfg(not(feature = "gmsh"))]
+gmsh_stub!(handle_gmsh_measure);
+#[cfg(not(feature = "gmsh"))]
 gmsh_stub!(handle_gmsh_boolean);
 #[cfg(not(feature = "gmsh"))]
 gmsh_stub!(handle_gmsh_heal);
@@ -1036,6 +1045,78 @@ fn handle_gmsh_primitive(state: &mut ServerState, id: u64, params: &Value) -> Rp
     let bbox = s.bounding_box(tag).ok();
     let sid = register_gmsh_shape(state, tag);
     RpcResponse::ok(id, serde_json::json!({ "shape_id": sid, "tag": tag, "kind": kind, "bbox": bbox }))
+}
+
+/// In-place transform of a gmsh solid: translate / rotate / scale. The shape_id
+/// (and tag) are preserved so existing references stay valid. rotate/scale use
+/// the solid's bbox center as the default pivot.
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_transform(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let Some(sid) = params.get("shape_id").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing shape_id");
+    };
+    let tag = match gmsh_tag(state, sid) { Ok(t) => t, Err(e) => return RpcResponse::err(id, e) };
+    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("translate").to_string();
+    let p = |k: &str, d: f64| params.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+    let s = state.gmsh.as_ref().unwrap();
+    let center = || s.bounding_box(tag).map(|b| [(b[0]+b[3])*0.5, (b[1]+b[4])*0.5, (b[2]+b[5])*0.5]).unwrap_or([0.0;3]);
+    let res = match kind.as_str() {
+        "translate" => s.translate(tag, p("tx", 0.0), p("ty", 0.0), p("tz", 0.0)),
+        "rotate" => {
+            let c = center();
+            let (cx, cy, cz) = (p("cx", c[0]), p("cy", c[1]), p("cz", c[2]));
+            let ang = p("angle_deg", 90.0).to_radians();
+            s.rotate(tag, cx, cy, cz, p("ax", 0.0), p("ay", 0.0), p("az", 1.0), ang)
+        }
+        "scale" => {
+            let c = center();
+            let (cx, cy, cz) = (p("cx", c[0]), p("cy", c[1]), p("cz", c[2]));
+            // Uniform `s` or per-axis sx/sy/sz.
+            let uni = p("s", 1.0);
+            s.scale(tag, cx, cy, cz, p("sx", uni), p("sy", uni), p("sz", uni))
+        }
+        other => return RpcResponse::err(id, format!("unknown transform kind: {other}")),
+    };
+    if let Err(e) = res { return RpcResponse::err(id, e.to_string()); }
+    let _ = s.synchronize();
+    let bbox = s.bounding_box(tag).ok();
+    RpcResponse::ok(id, serde_json::json!({ "shape_id": sid, "tag": tag, "bbox": bbox }))
+}
+
+/// Delete a gmsh solid (and drop it from the shape map).
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_delete(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let Some(sid) = params.get("shape_id").and_then(|v| v.as_str()).map(String::from) else {
+        return RpcResponse::err(id, "missing shape_id");
+    };
+    let tag = match gmsh_tag(state, &sid) { Ok(t) => t, Err(e) => return RpcResponse::err(id, e) };
+    {
+        let s = state.gmsh.as_ref().unwrap();
+        if let Err(e) = s.remove(tag) { return RpcResponse::err(id, e.to_string()); }
+        let _ = s.synchronize();
+    }
+    state.gmsh_shapes.remove(&sid);
+    RpcResponse::ok(id, serde_json::json!({ "deleted": true, "shape_id": sid }))
+}
+
+/// Mass properties of a gmsh solid: volume, center of mass, surface area, bbox.
+#[cfg(feature = "gmsh")]
+fn handle_gmsh_measure(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    if let Err(e) = ensure_gmsh(state) { return RpcResponse::err(id, e); }
+    let Some(sid) = params.get("shape_id").and_then(|v| v.as_str()) else {
+        return RpcResponse::err(id, "missing shape_id");
+    };
+    let tag = match gmsh_tag(state, sid) { Ok(t) => t, Err(e) => return RpcResponse::err(id, e) };
+    let s = state.gmsh.as_ref().unwrap();
+    RpcResponse::ok(id, serde_json::json!({
+        "shape_id": sid,
+        "volume": s.volume(tag).ok(),
+        "center_of_mass": s.center_of_mass(tag).ok(),
+        "surface_area": s.surface_area(tag).ok(),
+        "bbox": s.bounding_box(tag).ok(),
+    }))
 }
 
 #[cfg(feature = "gmsh")]
