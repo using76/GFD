@@ -198,6 +198,25 @@ fn ear_clip(points: &[(f64, f64)], indices: Vec<u32>) -> Vec<[u32; 3]> {
     triangles
 }
 
+/// Even-odd ray-cast point-in-polygon test for a 2D loop. Used to cull uv-grid
+/// cells outside a trimmed surface's parameter-space boundary.
+pub fn point_in_polygon(p: (f64, f64), poly: &[(f64, f64)]) -> bool {
+    if poly.len() < 3 { return false; }
+    let mut inside = false;
+    let mut j = poly.len() - 1;
+    for i in 0..poly.len() {
+        let (xi, yi) = poly[i];
+        let (xj, yj) = poly[j];
+        if ((yi > p.1) != (yj > p.1))
+            && (p.0 < (xj - xi) * (p.1 - yi) / (yj - yi) + xi)
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 fn signed_area(p: &[(f64, f64)]) -> f64 {
     let mut s = 0.0;
     for i in 0..p.len() {

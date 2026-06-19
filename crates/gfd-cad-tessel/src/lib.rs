@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 pub mod earclip;
 pub mod grid;
 
-pub use earclip::{triangulate_polygon, triangulate_polygon_with_holes};
+pub use earclip::{point_in_polygon, triangulate_polygon, triangulate_polygon_with_holes};
 use grid::uv_grid;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -658,6 +658,15 @@ fn tessellate_face(arena: &ShapeArena, surface: &SurfaceGeom, wires: &[ShapeId],
             return Ok(tessellate_disc(&circle, opts.u_steps));
         }
     }
+    // Curved surface bounded by a wire → uv-trim to the visible region (the wire
+    // vertices are inverted onto the surface, cells outside the trim loop are
+    // culled). Falls back to the full surface if inversion fails or the wire is
+    // empty (e.g. a full cylinder/sphere).
+    if !wires.is_empty() {
+        if let Some(mesh) = try_trim_curved(arena, surface, wires, opts) {
+            return Ok(mesh);
+        }
+    }
     tessellate_surface(surface, opts)
 }
 
@@ -707,6 +716,31 @@ pub fn auto_uv_steps(surface: &SurfaceGeom, chord_tolerance: f64) -> (usize, usi
         // Free-form patch: ~4 samples per control span on each axis, clamped.
         SurfaceGeom::BSpline(b) => (clamp(b.u_control_count as f64 * 4.0), clamp(b.v_control_count as f64 * 4.0)),
         SurfaceGeom::Nurbs(n) => (clamp(n.u_control_count as f64 * 4.0), clamp(n.v_control_count as f64 * 4.0)),
+    }
+}
+
+/// Try to tessellate a curved face trimmed to its wire boundary. Returns None
+/// (→ caller uses the full surface) for planes, infinite ranges, or when the
+/// boundary can't be inverted onto the surface.
+fn try_trim_curved(arena: &ShapeArena, surface: &SurfaceGeom, wires: &[ShapeId], opts: TessellationOptions) -> Option<TriMesh> {
+    fn trim_one<S: Surface>(arena: &ShapeArena, s: &S, wires: &[ShapeId], opts: TessellationOptions) -> Option<TriMesh> {
+        let (u0, u1) = s.u_range();
+        let (v0, v1) = s.v_range();
+        if !(u0.is_finite() && u1.is_finite() && v0.is_finite() && v1.is_finite()) {
+            return None;
+        }
+        let (outer, holes) = trim_loops_uv(arena, s, wires, u0, u1, v0, v1)?;
+        let m = sample_trimmed(s, opts, &outer, &holes, u0, u1, v0, v1).ok()?;
+        if m.indices.is_empty() { None } else { Some(m) }
+    }
+    match surface {
+        SurfaceGeom::Plane(_) => None,
+        SurfaceGeom::Cylinder(s) => trim_one(arena, s, wires, opts),
+        SurfaceGeom::Sphere(s) => trim_one(arena, s, wires, opts),
+        SurfaceGeom::Cone(s) => trim_one(arena, s, wires, opts),
+        SurfaceGeom::Torus(s) => trim_one(arena, s, wires, opts),
+        SurfaceGeom::BSpline(s) => trim_one(arena, s, wires, opts),
+        SurfaceGeom::Nurbs(s) => trim_one(arena, s, wires, opts),
     }
 }
 
@@ -767,6 +801,127 @@ pub fn sample<S: Surface>(s: &S, opts: TessellationOptions, _u_scale: f64, _v_sc
         Ok(([p.x as f32, p.y as f32, p.z as f32],
             [n.x as f32, n.y as f32, n.z as f32]))
     })?;
+    Ok(mesh)
+}
+
+/// Invert a 3D point onto a surface's (u,v) parameters: a coarse grid search for
+/// a seed, then Newton refinement with a numerical Jacobian (generic over the
+/// `Surface` trait — no per-surface parametrization knowledge needed). Returns
+/// None if the residual stays large (point off-surface / divergence).
+fn invert_surface_uv<S: Surface>(s: &S, p: Point3, u0: f64, u1: f64, v0: f64, v1: f64) -> Option<(f64, f64)> {
+    let d2 = |a: Point3| (a.x - p.x).powi(2) + (a.y - p.y).powi(2) + (a.z - p.z).powi(2);
+    // Coarse seed.
+    let (gu, gv) = (12usize, 12usize);
+    let (mut bu, mut bv, mut best) = (u0, v0, f64::INFINITY);
+    for j in 0..=gv {
+        let v = v0 + (v1 - v0) * j as f64 / gv as f64;
+        for i in 0..=gu {
+            let u = u0 + (u1 - u0) * i as f64 / gu as f64;
+            if let Ok(q) = s.eval(u, v) {
+                let dd = d2(q);
+                if dd < best { best = dd; bu = u; bv = v; }
+            }
+        }
+    }
+    // Newton with numerical partials.
+    let (mut u, mut v) = (bu, bv);
+    let (hu, hv) = ((u1 - u0) * 1e-5 + 1e-9, (v1 - v0) * 1e-5 + 1e-9);
+    for _ in 0..40 {
+        let s0 = s.eval(u, v).ok()?;
+        let r = Vector3::new(s0.x - p.x, s0.y - p.y, s0.z - p.z);
+        if r.norm() < 1e-7 { break; }
+        let su = {
+            let (up, un) = ((u + hu).min(u1), (u - hu).max(u0));
+            let a = s.eval(up, v).ok()?;
+            let b = s.eval(un, v).ok()?;
+            let inv = 1.0 / (up - un).max(1e-12);
+            Vector3::new((a.x - b.x) * inv, (a.y - b.y) * inv, (a.z - b.z) * inv)
+        };
+        let sv = {
+            let (vp, vn) = ((v + hv).min(v1), (v - hv).max(v0));
+            let a = s.eval(u, vp).ok()?;
+            let b = s.eval(u, vn).ok()?;
+            let inv = 1.0 / (vp - vn).max(1e-12);
+            Vector3::new((a.x - b.x) * inv, (a.y - b.y) * inv, (a.z - b.z) * inv)
+        };
+        // Solve the 2x2 normal equations [Su·Su, Su·Sv; Su·Sv, Sv·Sv][du;dv] = -[Su·r; Sv·r].
+        let (a, b, c) = (su.dot(su), su.dot(sv), sv.dot(sv));
+        let det = a * c - b * b;
+        if det.abs() < 1e-14 { break; }
+        let (rb1, rb2) = (-su.dot(r), -sv.dot(r));
+        let du = (rb1 * c - b * rb2) / det;
+        let dv = (a * rb2 - b * rb1) / det;
+        u = (u + du).clamp(u0, u1);
+        v = (v + dv).clamp(v0, v1);
+    }
+    let final_r = s.eval(u, v).ok().map(d2).unwrap_or(f64::INFINITY).sqrt();
+    let scale = (u1 - u0).abs().max((v1 - v0).abs()).max(1.0);
+    if final_r < 1e-4 * scale + 1e-6 { Some((u, v)) } else { None }
+}
+
+/// Extract trim loops in (u,v) space for a curved face: walk each wire's edges
+/// (orientation-aware, like `line_loop_for_wire`) and invert each start vertex
+/// onto the surface. Returns (outer, holes) or None if any inversion fails.
+fn trim_loops_uv<S: Surface>(
+    arena: &ShapeArena, surf: &S, wires: &[ShapeId], u0: f64, u1: f64, v0: f64, v1: f64,
+) -> Option<(Vec<(f64, f64)>, Vec<Vec<(f64, f64)>>)> {
+    let loop_uv = |wire_id: ShapeId| -> Option<Vec<(f64, f64)>> {
+        let Shape::Wire { edges } = arena.get(wire_id).ok()? else { return None };
+        if edges.is_empty() { return None; }
+        let mut uv = Vec::with_capacity(edges.len());
+        for (eid, orient) in edges {
+            let Shape::Edge { vertices, .. } = arena.get(*eid).ok()? else { return None };
+            let start = if matches!(orient, Orientation::Forward) { vertices[0] } else { vertices[1] };
+            let Shape::Vertex { point } = arena.get(start).ok()? else { return None };
+            uv.push(invert_surface_uv(surf, *point, u0, u1, v0, v1)?);
+        }
+        if uv.len() < 3 { None } else { Some(uv) }
+    };
+    let outer = loop_uv(*wires.first()?)?;
+    let mut holes = Vec::new();
+    for w in &wires[1..] {
+        holes.push(loop_uv(*w)?);
+    }
+    Some((outer, holes))
+}
+
+/// Sample a curved surface but keep only grid cells whose uv-center lies inside
+/// the trim boundary (outer minus holes). Produces a staircase-edged trimmed
+/// patch — display-quality, not watertight; see module docs.
+fn sample_trimmed<S: Surface>(
+    s: &S, opts: TessellationOptions, outer: &[(f64, f64)], holes: &[Vec<(f64, f64)>],
+    u0: f64, u1: f64, v0: f64, v1: f64,
+) -> TessellResult<TriMesh> {
+    let (us, vs) = (opts.u_steps.max(1), opts.v_steps.max(1));
+    let (nu, nv) = (us + 1, vs + 1);
+    let (du, dv) = ((u1 - u0) / us as f64, (v1 - v0) / vs as f64);
+    let mut mesh = TriMesh::default();
+    // Sample the full node lattice (so kept cells share vertices).
+    let mut node_index = vec![u32::MAX; nu * nv];
+    let inside = |u: f64, v: f64| point_in_polygon((u, v), outer) && !holes.iter().any(|h| point_in_polygon((u, v), h));
+    let mut push_node = |mesh: &mut TriMesh, node_index: &mut Vec<u32>, i: usize, j: usize| -> TessellResult<u32> {
+        let k = j * nu + i;
+        if node_index[k] != u32::MAX { return Ok(node_index[k]); }
+        let (u, v) = (u0 + du * i as f64, v0 + dv * j as f64);
+        let p = s.eval(u, v).map_err(|e| TessellError::Geom(e.to_string()))?;
+        let n = s.normal(u, v).map_err(|e| TessellError::Geom(e.to_string()))?;
+        let idx = mesh.positions.len() as u32;
+        mesh.positions.push([p.x as f32, p.y as f32, p.z as f32]);
+        mesh.normals.push([n.x as f32, n.y as f32, n.z as f32]);
+        node_index[k] = idx;
+        Ok(idx)
+    };
+    for j in 0..vs {
+        for i in 0..us {
+            let (uc, vc) = (u0 + du * (i as f64 + 0.5), v0 + dv * (j as f64 + 0.5));
+            if !inside(uc, vc) { continue; }
+            let a = push_node(&mut mesh, &mut node_index, i, j)?;
+            let b = push_node(&mut mesh, &mut node_index, i + 1, j)?;
+            let c = push_node(&mut mesh, &mut node_index, i, j + 1)?;
+            let d = push_node(&mut mesh, &mut node_index, i + 1, j + 1)?;
+            mesh.indices.extend_from_slice(&[a, b, d, a, d, c]);
+        }
+    }
     Ok(mesh)
 }
 
@@ -834,6 +989,49 @@ mod tests {
         // Adaptive path must also handle the BSpline arm without panicking.
         let adaptive = tessellate_adaptive(&arena, face, 0.05).unwrap();
         assert!(!adaptive.indices.is_empty());
+    }
+
+    #[test]
+    fn curved_face_is_trimmed_to_its_wire() {
+        use gfd_cad_geom::surface::BSplineSurface;
+        use gfd_cad_geom::curve::Line;
+        use gfd_cad_topo::shape::CurveGeom;
+        // Flat degree-1 patch over [0,1]^2 (eval(u,v) = (u,v,0)). A square trim
+        // wire over the inner [0.25,0.75]^2 must keep only interior cells, all
+        // within the sub-square — and fewer than the untrimmed patch.
+        let cps = vec![
+            Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0), Point3::new(1.0, 1.0, 0.0),
+        ];
+        let knots = vec![0.0, 0.0, 1.0, 1.0];
+        let surf = BSplineSurface::new(1, 1, 2, 2, cps, knots.clone(), knots).unwrap();
+        let mut arena = ShapeArena::new();
+        let corners = [
+            Point3::new(0.25, 0.25, 0.0), Point3::new(0.75, 0.25, 0.0),
+            Point3::new(0.75, 0.75, 0.0), Point3::new(0.25, 0.75, 0.0),
+        ];
+        let vids: Vec<ShapeId> = corners.iter().map(|p| arena.push(Shape::Vertex { point: *p })).collect();
+        let mut edges = Vec::new();
+        for i in 0..4 {
+            let j = (i + 1) % 4;
+            let line = Line::from_points(corners[i], corners[j]).unwrap();
+            let e = arena.push(Shape::Edge { curve: CurveGeom::Line(line), vertices: [vids[i], vids[j]], orient: Orientation::Forward });
+            edges.push((e, Orientation::Forward));
+        }
+        let wire = arena.push(Shape::Wire { edges });
+        let face = arena.push(Shape::Face { surface: SurfaceGeom::BSpline(surf), wires: vec![wire], orient: Orientation::Forward });
+        let opts = TessellationOptions { u_steps: 16, v_steps: 16, ..Default::default() };
+        let trimmed = tessellate(&arena, face, opts).unwrap();
+        assert!(!trimmed.indices.is_empty(), "trimmed patch should have triangles");
+        // Every kept vertex lies within the trim square (small tolerance for the
+        // staircase cells straddling the boundary).
+        for p in &trimmed.positions {
+            assert!(p[0] >= 0.25 - 0.1 && p[0] <= 0.75 + 0.1 && p[1] >= 0.25 - 0.1 && p[1] <= 0.75 + 0.1,
+                "vertex {:?} outside trim region", p);
+        }
+        // Far fewer triangles than the full 16×16 patch (512).
+        assert!(trimmed.indices.len() / 3 < 512, "trim should cull most of the patch");
+        assert!(trimmed.indices.len() / 3 > 50, "but keep the interior region");
     }
 
     #[test]
