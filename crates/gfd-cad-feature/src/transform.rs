@@ -66,6 +66,18 @@ where
                     dir_xform(p.normal),
                     dir_xform(p.x_axis),
                 )),
+                // A B-spline is defined entirely by its control net, so transform
+                // every control point (degrees/knots/counts are invariant).
+                SurfaceGeom::BSpline(b) => {
+                    let cps = b.control_points.iter().map(|p| xform(*p)).collect();
+                    match gfd_cad_geom::surface::BSplineSurface::new(
+                        b.u_degree, b.v_degree, b.u_control_count, b.v_control_count,
+                        cps, b.u_knots.clone(), b.v_knots.clone(),
+                    ) {
+                        Ok(s) => SurfaceGeom::BSpline(s),
+                        Err(_) => SurfaceGeom::BSpline(b),
+                    }
+                }
                 other => other,
             };
             let mut nw = Vec::with_capacity(wires.len());

@@ -4671,6 +4671,7 @@ fn handle_cad_pick_face(state: &ServerState, id: u64, params: &Value) -> RpcResp
             gfd_cad::topo::SurfaceGeom::Sphere(_) => "sphere",
             gfd_cad::topo::SurfaceGeom::Cone(_) => "cone",
             gfd_cad::topo::SurfaceGeom::Torus(_) => "torus",
+            gfd_cad::topo::SurfaceGeom::BSpline(_) => "bspline",
         },
         _ => "unknown",
     };

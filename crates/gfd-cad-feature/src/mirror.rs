@@ -81,6 +81,17 @@ pub fn mirror_shape(arena: &mut ShapeArena, id: ShapeId, plane: MirrorPlane) -> 
                         reflect_dir(p.normal),
                         reflect_dir(p.x_axis),
                     )),
+                    // Reflect every control point of a B-spline patch.
+                    SurfaceGeom::BSpline(b) => {
+                        let cps = b.control_points.iter().map(|p| reflect(*p)).collect();
+                        match gfd_cad_geom::surface::BSplineSurface::new(
+                            b.u_degree, b.v_degree, b.u_control_count, b.v_control_count,
+                            cps, b.u_knots.clone(), b.v_knots.clone(),
+                        ) {
+                            Ok(s) => SurfaceGeom::BSpline(s),
+                            Err(_) => SurfaceGeom::BSpline(b),
+                        }
+                    }
                     other => other,
                 };
                 let mut new_wires = Vec::with_capacity(wires.len());

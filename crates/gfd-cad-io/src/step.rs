@@ -13,9 +13,37 @@ use std::io::Write;
 use std::path::Path;
 
 use gfd_cad_topo::{Shape, ShapeArena, ShapeId};
-use gfd_cad_tessel::{triangulate_polygon, TriMesh};
+use gfd_cad_tessel::{sample, triangulate_polygon, TessellationOptions, TriMesh};
+use gfd_cad_geom::{surface::BSplineSurface, Point3};
 
 use crate::{IoError, IoResult};
+
+/// Split a STEP parenthesized argument string into its TOP-LEVEL comma-separated
+/// fields, respecting nested `(...)` (so a control-net `((..),(..))` stays one
+/// field). `args` must include its outer parens, e.g. `"('',1,((#1,#2)),...)"`.
+fn split_top_level(args: &str) -> Vec<String> {
+    let bytes = args.as_bytes();
+    let Some(start) = args.find('(') else { return Vec::new() };
+    let mut depth = 0i32;
+    let mut fields = Vec::new();
+    let mut cur = String::new();
+    let mut i = start + 1;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        match c {
+            '(' => { depth += 1; cur.push(c); }
+            ')' if depth == 0 => break, // closing the outer paren
+            ')' => { depth -= 1; cur.push(c); }
+            ',' if depth == 0 => { fields.push(cur.trim().to_string()); cur.clear(); }
+            _ => cur.push(c),
+        }
+        i += 1;
+    }
+    if !cur.trim().is_empty() {
+        fields.push(cur.trim().to_string());
+    }
+    fields
+}
 
 pub fn write_step(path: &Path, arena: &ShapeArena, root: ShapeId) -> IoResult<()> {
     let mut buf = String::new();
@@ -133,6 +161,46 @@ fn walk(arena: &ShapeArena, id: ShapeId, buf: &mut String, ctx: &mut StepCtx) {
                             "#{}=SPHERICAL_SURFACE('',#{},{:.6});\n",
                             ss_id, placement, s.radius));
                         format!("#{}", ss_id)
+                    }
+                    gfd_cad_topo::SurfaceGeom::BSpline(b) => {
+                        // Emit the control net as CARTESIAN_POINTs, then a
+                        // B_SPLINE_SURFACE_WITH_KNOTS (multiplicity-compressed knots).
+                        let mut row_refs: Vec<String> = Vec::with_capacity(b.u_control_count);
+                        for i in 0..b.u_control_count {
+                            let mut col_refs: Vec<String> = Vec::with_capacity(b.v_control_count);
+                            for j in 0..b.v_control_count {
+                                let p = b.control_points[i * b.v_control_count + j];
+                                let cp = ctx.alloc();
+                                buf.push_str(&format!("#{}=CARTESIAN_POINT('',({:.6},{:.6},{:.6}));\n", cp, p.x, p.y, p.z));
+                                col_refs.push(format!("#{}", cp));
+                            }
+                            row_refs.push(format!("({})", col_refs.join(",")));
+                        }
+                        let compress = |knots: &[f64]| -> (Vec<f64>, Vec<usize>) {
+                            let mut vals: Vec<f64> = Vec::new();
+                            let mut mults: Vec<usize> = Vec::new();
+                            for &k in knots {
+                                if let Some(last) = vals.last().copied() {
+                                    if (k - last).abs() < 1e-9 {
+                                        *mults.last_mut().unwrap() += 1;
+                                        continue;
+                                    }
+                                }
+                                vals.push(k);
+                                mults.push(1usize);
+                            }
+                            (vals, mults)
+                        };
+                        let (uk, um) = compress(&b.u_knots);
+                        let (vk, vm) = compress(&b.v_knots);
+                        let fmt_f = |v: &[f64]| v.iter().map(|x| format!("{:.6}", x)).collect::<Vec<_>>().join(",");
+                        let fmt_i = |v: &[usize]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+                        let bs = ctx.alloc();
+                        buf.push_str(&format!(
+                            "#{}=B_SPLINE_SURFACE_WITH_KNOTS('',{},{},({}),.UNSPECIFIED.,.F.,.F.,.F.,({}),({}),({}),({}),.UNSPECIFIED.);\n",
+                            bs, b.u_degree, b.v_degree, row_refs.join(","),
+                            fmt_i(&um), fmt_i(&vm), fmt_f(&uk), fmt_f(&vk)));
+                        format!("#{}", bs)
                     }
                     _ => "$".to_string(),
                 };
@@ -398,6 +466,9 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
     let mut placements: HashMap<u32, (u32, u32)> = HashMap::new(); // axis2_placement -> (point, z-dir)
     let mut surf_sph: HashMap<u32, (u32, f64)> = HashMap::new(); // sphere -> (placement, radius)
     let mut surf_cyl: HashMap<u32, (u32, f64)> = HashMap::new(); // cylinder -> (placement, radius)
+    // bspline surface id -> (u_deg, v_deg, n_u, n_v, cp_refs row-major, u_knots_full, v_knots_full)
+    #[allow(clippy::type_complexity)]
+    let mut surf_bspline: HashMap<u32, (usize, usize, usize, usize, Vec<u32>, Vec<f64>, Vec<f64>)> = HashMap::new();
 
     for record in text.split(';') {
         let record = record.trim();
@@ -472,6 +543,30 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
                     surf_cyl.insert(id, (pl, rad));
                 }
             }
+            "B_SPLINE_SURFACE_WITH_KNOTS" => {
+                // fields: ['', u_deg, v_deg, cp_grid, form, b,b,b, u_mult, v_mult, u_knots, v_knots, spec]
+                let fields = split_top_level(args);
+                if fields.len() >= 12 {
+                    if let (Ok(u_deg), Ok(v_deg)) = (fields[1].trim().parse::<usize>(), fields[2].trim().parse::<usize>()) {
+                        let rows = split_top_level(&fields[3]); // each row "(#a,#b,...)"
+                        let n_u = rows.len();
+                        let cp_refs: Vec<u32> = rows.iter().flat_map(|r| extract_refs(r)).collect();
+                        let n_v = if n_u > 0 { cp_refs.len() / n_u } else { 0 };
+                        let expand = |mults: &[f64], knots: &[f64]| -> Vec<f64> {
+                            let mut out = Vec::new();
+                            for (k, m) in knots.iter().zip(mults.iter()) {
+                                for _ in 0..(*m as usize) { out.push(*k); }
+                            }
+                            out
+                        };
+                        let u_knots = expand(&extract_floats(&fields[8]), &extract_floats(&fields[10]));
+                        let v_knots = expand(&extract_floats(&fields[9]), &extract_floats(&fields[11]));
+                        if n_u >= u_deg + 1 && n_v >= v_deg + 1 && cp_refs.len() == n_u * n_v {
+                            surf_bspline.insert(id, (u_deg, v_deg, n_u, n_v, cp_refs, u_knots, v_knots));
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -498,8 +593,32 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
         let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
         dx * dx + dy * dy + dz * dz
     };
+    // Build a BSplineSurface from a parsed record by resolving its control-point
+    // refs against the (now fully populated) CARTESIAN_POINT map.
+    let build_bspline = |rec: &(usize, usize, usize, usize, Vec<u32>, Vec<f64>, Vec<f64>)| -> Option<BSplineSurface> {
+        let (u_deg, v_deg, n_u, n_v, cp_refs, u_knots, v_knots) = rec;
+        let mut cp: Vec<Point3> = Vec::with_capacity(cp_refs.len());
+        for r in cp_refs {
+            let p = cps.get(r)?;
+            cp.push(Point3::new(p[0] as f64, p[1] as f64, p[2] as f64));
+        }
+        BSplineSurface::new(*u_deg, *v_deg, *n_u, *n_v, cp, u_knots.clone(), v_knots.clone()).ok()
+    };
+
     let mut mesh = TriMesh::default();
     for frefs in &faces {
+        // NURBS face: sample the full surface patch into the mesh.
+        if let Some(surf) = frefs.iter().find_map(|r| surf_bspline.get(r)).and_then(build_bspline) {
+            let opts = TessellationOptions { u_steps: (surf.u_control_count * 6).clamp(8, 64), v_steps: (surf.v_control_count * 6).clamp(8, 64), ..Default::default() };
+            if let Ok(patch) = sample(&surf, opts, 1.0, 1.0) {
+                // Match the polygon path: leave normals empty (consumer recomputes),
+                // so positions/normals stay consistent across mixed faces.
+                let base = mesh.positions.len() as u32;
+                mesh.positions.extend_from_slice(&patch.positions);
+                mesh.indices.extend(patch.indices.iter().map(|i| i + base));
+            }
+            continue;
+        }
         let curved = resolve_surf(frefs);
         for br in frefs {
             let Some(&loop_id) = bounds.get(br) else { continue };
@@ -570,6 +689,7 @@ pub struct StepSummary {
     pub planes: usize,
     pub cylindrical_surfaces: usize,
     pub spherical_surfaces: usize,
+    pub bspline_surfaces: usize,
 }
 
 /// Scan a STEP file and count how many of each recognised entity it contains.
@@ -590,6 +710,7 @@ pub fn summarise_step(path: &Path) -> IoResult<StepSummary> {
         if line.contains("PLANE(") { s.planes += 1; }
         if line.contains("CYLINDRICAL_SURFACE") { s.cylindrical_surfaces += 1; }
         if line.contains("SPHERICAL_SURFACE") { s.spherical_surfaces += 1; }
+        if line.contains("B_SPLINE_SURFACE") { s.bspline_surfaces += 1; }
     }
     Ok(s)
 }
@@ -666,6 +787,59 @@ mod tests {
     /// Minimal STEP body around handcrafted entity records.
     fn step_doc(entities: &str) -> String {
         format!("ISO-10303-21;\nDATA;\n{}\nENDSEC;\nEND-ISO-10303-21;\n", entities)
+    }
+
+    #[test]
+    fn read_step_trimesh_reconstructs_a_bspline_surface() {
+        // A bilinear (degree 1) 2x2 B-spline patch lying flat in z=0 over [0,1]^2.
+        // Knots clamped: distinct (0,1) with multiplicities (2,2).
+        let entities = "\
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(1.,0.,0.));
+#3=CARTESIAN_POINT('',(0.,1.,0.));
+#4=CARTESIAN_POINT('',(1.,1.,0.));
+#5=B_SPLINE_SURFACE_WITH_KNOTS('',1,1,((#1,#2),(#3,#4)),.UNSPECIFIED.,.F.,.F.,.F.,(2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);
+#6=ADVANCED_FACE('',(),#5,.T.);";
+        let path = std::env::temp_dir().join(format!("gfd_step_bspline_{}.stp",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::write(&path, step_doc(entities)).unwrap();
+        let mesh = read_step_trimesh(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(mesh.indices.len() >= 3, "bspline patch should tessellate to triangles");
+        for p in &mesh.positions {
+            assert!(p[2].abs() < 1e-4, "flat patch vertex off z=0: {:?}", p);
+            assert!(p[0] >= -1e-4 && p[0] <= 1.0 + 1e-4 && p[1] >= -1e-4 && p[1] <= 1.0 + 1e-4, "vertex {:?} outside patch", p);
+        }
+    }
+
+    #[test]
+    fn write_step_emits_bspline_surface_entity() {
+        use gfd_cad_geom::{curve::Line, surface::BSplineSurface, Point3};
+        use gfd_cad_topo::{shape::CurveGeom, Orientation};
+        // A degree-1 2x2 flat patch as a face with a triangular line-edge wire.
+        let cps = vec![
+            Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0), Point3::new(1.0, 1.0, 0.0),
+        ];
+        let surf = BSplineSurface::new(1, 1, 2, 2, cps, vec![0.0, 0.0, 1.0, 1.0], vec![0.0, 0.0, 1.0, 1.0]).unwrap();
+        let mut arena = ShapeArena::new();
+        let pts = [Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)];
+        let v: Vec<ShapeId> = pts.iter().map(|p| arena.push(Shape::vertex(*p))).collect();
+        let mut edges = Vec::new();
+        for i in 0..3 {
+            let j = (i + 1) % 3;
+            let line = Line::from_points(pts[i], pts[j]).unwrap();
+            let e = arena.push(Shape::Edge { curve: CurveGeom::Line(line), vertices: [v[i], v[j]], orient: Orientation::Forward });
+            edges.push((e, Orientation::Forward));
+        }
+        let wire = arena.push(Shape::Wire { edges });
+        let face = arena.push(Shape::Face { surface: gfd_cad_topo::shape::SurfaceGeom::BSpline(surf), wires: vec![wire], orient: Orientation::Forward });
+        let path = std::env::temp_dir().join(format!("gfd_step_bsw_{}.stp",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        write_step(&path, &arena, face).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(text.contains("B_SPLINE_SURFACE_WITH_KNOTS"), "writer must emit the B-spline surface entity");
     }
 
     #[test]

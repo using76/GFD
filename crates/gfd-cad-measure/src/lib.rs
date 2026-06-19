@@ -855,6 +855,12 @@ fn surface_face_aabb(surface: &gfd_cad_topo::SurfaceGeom) -> Option<(Point3, Poi
             ];
             Some(bb_from(&[(t.origin, e)]))
         }
+        // The control net's convex hull bounds the B-spline surface — a safe
+        // (conservative) AABB without sampling.
+        SurfaceGeom::BSpline(b) => {
+            let pts: Vec<(Point3, [f64; 3])> = b.control_points.iter().map(|p| (*p, [0.0; 3])).collect();
+            if pts.is_empty() { None } else { Some(bb_from(&pts)) }
+        }
         SurfaceGeom::Plane(_) => None,
     }
 }
@@ -1691,6 +1697,7 @@ pub fn surface_area(arena: &ShapeArena, id: ShapeId) -> MeasureResult<f64> {
                     any = true;
                 }
                 SurfaceGeom::Plane(_) => {} // open plane carries infinite area
+                SurfaceGeom::BSpline(_) => {} // no closed-form area (tessellated approx elsewhere)
             }
         }
     }
@@ -1716,7 +1723,7 @@ fn analytic_solid_volume(arena: &ShapeArena, id: ShapeId) -> Option<f64> {
             SurfaceGeom::Cone(c) => Some(PI * c.height / 3.0 * (c.r1 * c.r1 + c.r1 * c.r2 + c.r2 * c.r2)),
             SurfaceGeom::Sphere(s) => Some(4.0 / 3.0 * PI * s.radius.powi(3)),
             SurfaceGeom::Torus(t) => Some(2.0 * PI * PI * t.major * t.minor * t.minor),
-            SurfaceGeom::Plane(_) => None,
+            SurfaceGeom::Plane(_) | SurfaceGeom::BSpline(_) => None,
         };
         if let Some(vol) = v {
             if found.is_some() {

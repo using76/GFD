@@ -684,6 +684,8 @@ pub fn auto_uv_steps(surface: &SurfaceGeom, chord_tolerance: f64) -> (usize, usi
             let nv = clamp(std::f64::consts::PI / (chord_tolerance / t.minor).max(1e-3));
             (nu, nv)
         }
+        // Free-form patch: ~4 samples per control span on each axis, clamped.
+        SurfaceGeom::BSpline(b) => (clamp(b.u_control_count as f64 * 4.0), clamp(b.v_control_count as f64 * 4.0)),
     }
 }
 
@@ -700,6 +702,7 @@ pub fn tessellate_surface(surface: &SurfaceGeom, opts: TessellationOptions) -> T
         }
         SurfaceGeom::Cone(c)     => sample(c, opts, 1.0, 1.0),
         SurfaceGeom::Torus(t)    => sample(t, opts, 1.0, 1.0),
+        SurfaceGeom::BSpline(b)  => sample(b, opts, 1.0, 1.0),
     }
 }
 
@@ -786,6 +789,29 @@ mod tests {
         }
         assert_eq!(mn, [0.0, 0.0, 0.0]);
         assert_eq!(mx, [1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn bspline_surface_face_tessellates() {
+        use gfd_cad_geom::surface::BSplineSurface;
+        // Flat bilinear patch over [0,1]^2 at z=0 as an arena face (empty wire →
+        // full-surface sample path). Exercises the SurfaceGeom::BSpline arms in
+        // tessellate_surface + auto_uv_steps (walk and walk_adaptive).
+        let cps = vec![
+            Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0), Point3::new(1.0, 1.0, 0.0),
+        ];
+        let surf = BSplineSurface::new(1, 1, 2, 2, cps, vec![0.0, 0.0, 1.0, 1.0], vec![0.0, 0.0, 1.0, 1.0]).unwrap();
+        let mut arena = ShapeArena::new();
+        let face = arena.push(Shape::Face { surface: SurfaceGeom::BSpline(surf), wires: vec![], orient: Orientation::Forward });
+        let mesh = tessellate(&arena, face, TessellationOptions::default()).unwrap();
+        assert!(mesh.indices.len() >= 3, "bspline face should tessellate");
+        for p in &mesh.positions {
+            assert!(p[2].abs() < 1e-4, "flat patch vertex off z=0");
+        }
+        // Adaptive path must also handle the BSpline arm without panicking.
+        let adaptive = tessellate_adaptive(&arena, face, 0.05).unwrap();
+        assert!(!adaptive.indices.is_empty());
     }
 
     #[test]
