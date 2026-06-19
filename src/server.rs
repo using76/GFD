@@ -4608,14 +4608,17 @@ fn handle_cad_import_step_brep(state: &mut ServerState, id: u64, params: &Value)
             let str_id = format!("shape_{}", state.next_cad_shape_id);
             state.cad_shape_map.insert(str_id.clone(), shape_id);
             let arena = &state.cad_doc.arena;
+            // collect_by_kind counts traversal occurrences; dedup so shared
+            // edges/vertices report their true unique counts (a box → 12 / 8).
+            let uniq = |k| collect_by_kind(arena, shape_id, k).into_iter().collect::<std::collections::HashSet<_>>().len();
             RpcResponse::ok(id, serde_json::json!({
                 "shape_id": str_id,
                 "arena_id": shape_id.0,
-                "solids": collect_by_kind(arena, shape_id, ShapeKind::Solid).len(),
-                "shells": collect_by_kind(arena, shape_id, ShapeKind::Shell).len(),
-                "faces": collect_by_kind(arena, shape_id, ShapeKind::Face).len(),
-                "edges": collect_by_kind(arena, shape_id, ShapeKind::Edge).len(),
-                "vertices": collect_by_kind(arena, shape_id, ShapeKind::Vertex).len(),
+                "solids": uniq(ShapeKind::Solid),
+                "shells": uniq(ShapeKind::Shell),
+                "faces": uniq(ShapeKind::Face),
+                "edges": uniq(ShapeKind::Edge),
+                "vertices": uniq(ShapeKind::Vertex),
             }))
         }
         Err(e) => RpcResponse::err(id, format!("step B-Rep import failed: {}", e)),
