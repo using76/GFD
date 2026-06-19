@@ -239,8 +239,13 @@ pub fn plate_with_hole_solid(
     hole_r: f64,
     sides: usize,
 ) -> TopoResult<ShapeId> {
-    if sides < 3 || hole_r <= 0.0 || width <= 0.0 || depth <= 0.0 {
+    if sides < 3 || hole_r <= 0.0 || width <= 0.0 || depth <= 0.0 || height <= 0.0 {
         return Err(TopoError::Geom(gfd_cad_geom::GeomError::Degenerate("invalid plate/hole dimensions")));
+    }
+    // The hole must be strictly interior, else the cut yields a self-intersecting
+    // / non-watertight solid (its negative volume would be masked by abs()).
+    if cx - hole_r <= 0.0 || cx + hole_r >= width || cy - hole_r <= 0.0 || cy + hole_r >= depth {
+        return Err(TopoError::Geom(gfd_cad_geom::GeomError::Degenerate("hole must be strictly inside the plate")));
     }
     // Outer rectangle CCW.
     let outer_xy = vec![(0.0, 0.0), (width, 0.0), (width, depth), (0.0, depth)];
@@ -318,6 +323,18 @@ mod tests {
         let id = pad_polygon_xy(&mut a, &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], 0.5).unwrap();
         let faces = collect_by_kind(&a, id, ShapeKind::Face);
         assert_eq!(faces.len(), 6); // 4 lateral + 2 caps
+    }
+
+    #[test]
+    fn plate_with_hole_rejects_invalid_dimensions() {
+        let mut a = ShapeArena::new();
+        // hole bigger than plate / overlapping boundary / non-positive height all error.
+        assert!(plate_with_hole_solid(&mut a, 4.0, 3.0, 1.0, 2.0, 1.5, 5.0, 12).is_err(), "oversized hole");
+        assert!(plate_with_hole_solid(&mut a, 4.0, 3.0, 1.0, 0.0, 0.0, 1.0, 12).is_err(), "corner-overlapping hole");
+        assert!(plate_with_hole_solid(&mut a, 4.0, 3.0, -2.0, 2.0, 1.5, 0.5, 12).is_err(), "negative height");
+        assert!(plate_with_hole_solid(&mut a, 4.0, 3.0, 0.0, 2.0, 1.5, 0.5, 12).is_err(), "zero height");
+        // A strictly-interior hole still builds.
+        assert!(plate_with_hole_solid(&mut a, 4.0, 3.0, 1.0, 2.0, 1.5, 0.5, 12).is_ok(), "valid plate");
     }
 
     #[test]

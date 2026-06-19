@@ -77,9 +77,11 @@ pub fn triangulate_polygon_with_holes(
     (points, tris)
 }
 
-/// Splice a hole loop into an outer ring via a bridge edge (rightmost hole
-/// vertex → nearest visible ring vertex along +x). Returns the merged ring, or
-/// None if no bridge target is found.
+/// Splice a hole loop into an outer ring via a bridge edge, using the standard
+/// Eberly/FIST visible-vertex rule: cast a +x ray from the hole's rightmost
+/// vertex M, find the nearest ring edge it hits, and bridge to a ring vertex
+/// guaranteed visible from M (so the bridge stays inside the polygon even when
+/// the outer ring is non-convex). Returns the merged ring, or None if no bridge.
 fn bridge_hole(points: &[(f64, f64)], ring: &[u32], hole: &[u32]) -> Option<Vec<u32>> {
     // M = hole vertex with the largest x.
     let m_pos = (0..hole.len()).max_by(|&a, &b| {
@@ -87,34 +89,72 @@ fn bridge_hole(points: &[(f64, f64)], ring: &[u32], hole: &[u32]) -> Option<Vec<
     })?;
     let m = hole[m_pos];
     let mp = points[m as usize];
-    // Find the ring vertex with the largest x that lies to the right of M
-    // (a robust, if not minimal, bridge target for interior holes).
-    let mut best: Option<usize> = None;
-    let mut best_x = mp.0;
-    for (i, &rv) in ring.iter().enumerate() {
-        let p = points[rv as usize];
-        if p.0 >= mp.0 - 1e-12 && p.0 > best_x - 1e-12 {
-            // Prefer the closest in y to M among the rightmost candidates.
-            match best {
-                Some(bi) => {
-                    let bp = points[ring[bi] as usize];
-                    if p.0 > best_x + 1e-9 || (p.0 >= best_x - 1e-9 && (p.1 - mp.1).abs() < (bp.1 - mp.1).abs()) {
-                        best = Some(i); best_x = p.0;
-                    }
-                }
-                None => { best = Some(i); best_x = p.0; }
+
+    // 1. Cast a +x ray from M; find the nearest intersection I with a ring edge
+    //    (edge crossing the horizontal line y = M.y at x >= M.x).
+    let n = ring.len();
+    let mut best_ix = f64::INFINITY;
+    let mut best_edge: Option<usize> = None; // edge i = (ring[i], ring[i+1])
+    for i in 0..n {
+        let a = points[ring[i] as usize];
+        let b = points[ring[(i + 1) % n] as usize];
+        // Does the edge straddle y = mp.1?
+        if (a.1 > mp.1) == (b.1 > mp.1) {
+            continue;
+        }
+        let t = (mp.1 - a.1) / (b.1 - a.1);
+        let ix = a.0 + t * (b.0 - a.0);
+        if ix >= mp.0 - 1e-12 && ix < best_ix {
+            best_ix = ix;
+            best_edge = Some(i);
+        }
+    }
+    let ei = best_edge?;
+    let ea = points[ring[ei] as usize];
+    let eb = points[ring[(ei + 1) % n] as usize];
+    let ipt = (best_ix, mp.1);
+
+    // 2. Candidate P = the edge endpoint with the larger x (the one toward M's
+    //    interior side). If the intersection IS essentially that vertex, use it.
+    let (mut p_pos, p0) = if ea.0 >= eb.0 { (ei, ea) } else { ((ei + 1) % n, eb) };
+    let pcand = points[ring[p_pos] as usize];
+
+    // 3. If P0 is not directly visible (a reflex ring vertex lies inside the
+    //    triangle M–I–P0), bridge instead to the reflex vertex minimizing the
+    //    angle to the +x ray (ties: nearest to M). Eberly's visibility rule.
+    if (pcand.0 - ipt.0).abs() > 1e-12 || (pcand.1 - ipt.1).abs() > 1e-12 {
+        let tri = (mp, ipt, p0);
+        let mut best_ang = f64::INFINITY;
+        let mut best_d = f64::INFINITY;
+        for (i, &rv) in ring.iter().enumerate() {
+            let r = points[rv as usize];
+            // Only ring vertices strictly right of M can occlude.
+            if r.0 < mp.0 - 1e-12 {
+                continue;
+            }
+            if !point_in_triangle(r, tri.0, tri.1, tri.2) {
+                continue;
+            }
+            // Reflex test would refine further; angle/distance suffices in practice.
+            let ang = ((r.1 - mp.1).abs()).atan2(r.0 - mp.0);
+            let d = (r.0 - mp.0).powi(2) + (r.1 - mp.1).powi(2);
+            if ang < best_ang - 1e-12 || (ang <= best_ang + 1e-12 && d < best_d) {
+                best_ang = ang;
+                best_d = d;
+                p_pos = i;
             }
         }
     }
-    let p_pos = best?;
-    // Splice: ring[..=p_pos], then hole starting at M around back to M, then ring[p_pos..].
+
+    // 4. Splice: ring[..=p_pos], the hole starting at M around back to M, then
+    //    re-enter the outer ring at P (P and M each duplicated → zero-width bridge).
     let mut merged: Vec<u32> = Vec::with_capacity(ring.len() + hole.len() + 2);
     merged.extend_from_slice(&ring[..=p_pos]);
     for k in 0..hole.len() {
         merged.push(hole[(m_pos + k) % hole.len()]);
     }
-    merged.push(m); // close the hole back to M
-    merged.extend_from_slice(&ring[p_pos..]); // re-enter outer at P (duplicated)
+    merged.push(m);
+    merged.extend_from_slice(&ring[p_pos..]);
     Some(merged)
 }
 
@@ -228,5 +268,21 @@ mod tests {
         };
         let total: f64 = tris.iter().map(tri_area).sum();
         assert!((total - 12.0).abs() < 1e-9, "outer−hole area should be 12, got {}", total);
+    }
+
+    #[test]
+    fn nonconvex_outer_with_offset_hole_cuts_correctly() {
+        // L-shaped outer (area 20, non-convex) with a hole on its LEFT arm — the
+        // bridge target must be a visible vertex, not the global max-x corner, or
+        // the bridge crosses the concave notch and the hole is not cut.
+        let outer = [(0.0, 0.0), (6.0, 0.0), (6.0, 2.0), (2.0, 2.0), (2.0, 6.0), (0.0, 6.0)];
+        let hole = vec![(0.5, 3.0), (0.5, 5.0), (1.5, 5.0), (1.5, 3.0)]; // CW, area 2
+        let (pts, tris) = triangulate_polygon_with_holes(&outer, &[hole]);
+        let tri_area = |t: &[u32; 3]| {
+            let (a, b, c) = (pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize]);
+            0.5 * ((b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1)).abs()
+        };
+        let total: f64 = tris.iter().map(tri_area).sum();
+        assert!((total - 18.0).abs() < 1e-9, "L-shape − hole area should be 18, got {}", total);
     }
 }

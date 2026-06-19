@@ -45,6 +45,57 @@ fn split_top_level(args: &str) -> Vec<String> {
     fields
 }
 
+/// In a STEP record body, find `name(` and return its balanced `(...)` argument
+/// substring (including the outer parens). Used to pull a sub-entity out of an
+/// AP214/AP242 complex (multi-supertype) instance. `name_with_paren` MUST end in
+/// `(` so e.g. `"B_SPLINE_SURFACE("` does not match `B_SPLINE_SURFACE_WITH_KNOTS`.
+fn find_entity_args(s: &str, name_with_paren: &str) -> Option<String> {
+    let pos = s.find(name_with_paren)?;
+    let open = pos + name_with_paren.len() - 1; // index of the '('
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    for i in open..bytes.len() {
+        match bytes[i] as char {
+            '(' => depth += 1,
+            ')' => { depth -= 1; if depth == 0 { return Some(s[open..=i].to_string()); } }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Build the parsed B-spline descriptor (degrees, control-net dims, control-point
+/// refs row-major, expanded u/v knot vectors) from the raw STEP field strings,
+/// shared by the simple-instance and complex-instance parse paths. The control
+/// grid is `((#a,#b),(#c,#d),...)`; mults/knots are parallel lists.
+#[allow(clippy::type_complexity)]
+fn parse_bspline_record(
+    u_deg_s: &str, v_deg_s: &str, cp_grid: &str,
+    u_mult_s: &str, v_mult_s: &str, u_knots_s: &str, v_knots_s: &str,
+) -> Option<(usize, usize, usize, usize, Vec<u32>, Vec<f64>, Vec<f64>)> {
+    let u_deg = u_deg_s.trim().parse::<usize>().ok()?;
+    let v_deg = v_deg_s.trim().parse::<usize>().ok()?;
+    let rows = split_top_level(cp_grid);
+    let n_u = rows.len();
+    if n_u == 0 { return None; }
+    let cp_refs: Vec<u32> = rows.iter().flat_map(|r| extract_refs(r)).collect();
+    let n_v = cp_refs.len() / n_u;
+    let expand = |mults: &[f64], knots: &[f64]| -> Vec<f64> {
+        let mut out = Vec::new();
+        for (k, m) in knots.iter().zip(mults.iter()) {
+            for _ in 0..(*m as usize) { out.push(*k); }
+        }
+        out
+    };
+    let u_knots = expand(&extract_floats(u_mult_s), &extract_floats(u_knots_s));
+    let v_knots = expand(&extract_floats(v_mult_s), &extract_floats(v_knots_s));
+    if n_u >= u_deg + 1 && n_v >= v_deg + 1 && cp_refs.len() == n_u * n_v {
+        Some((u_deg, v_deg, n_u, n_v, cp_refs, u_knots, v_knots))
+    } else {
+        None
+    }
+}
+
 pub fn write_step(path: &Path, arena: &ShapeArena, root: ShapeId) -> IoResult<()> {
     let mut buf = String::new();
     buf.push_str("ISO-10303-21;\n");
@@ -544,25 +595,31 @@ pub fn read_step_trimesh(path: &Path) -> IoResult<TriMesh> {
                 }
             }
             "B_SPLINE_SURFACE_WITH_KNOTS" => {
-                // fields: ['', u_deg, v_deg, cp_grid, form, b,b,b, u_mult, v_mult, u_knots, v_knots, spec]
-                let fields = split_top_level(args);
-                if fields.len() >= 12 {
-                    if let (Ok(u_deg), Ok(v_deg)) = (fields[1].trim().parse::<usize>(), fields[2].trim().parse::<usize>()) {
-                        let rows = split_top_level(&fields[3]); // each row "(#a,#b,...)"
-                        let n_u = rows.len();
-                        let cp_refs: Vec<u32> = rows.iter().flat_map(|r| extract_refs(r)).collect();
-                        let n_v = if n_u > 0 { cp_refs.len() / n_u } else { 0 };
-                        let expand = |mults: &[f64], knots: &[f64]| -> Vec<f64> {
-                            let mut out = Vec::new();
-                            for (k, m) in knots.iter().zip(mults.iter()) {
-                                for _ in 0..(*m as usize) { out.push(*k); }
-                            }
-                            out
-                        };
-                        let u_knots = expand(&extract_floats(&fields[8]), &extract_floats(&fields[10]));
-                        let v_knots = expand(&extract_floats(&fields[9]), &extract_floats(&fields[11]));
-                        if n_u >= u_deg + 1 && n_v >= v_deg + 1 && cp_refs.len() == n_u * n_v {
-                            surf_bspline.insert(id, (u_deg, v_deg, n_u, n_v, cp_refs, u_knots, v_knots));
+                // Simple instance: ['', u_deg, v_deg, cp_grid, form, b,b,b, u_mult, v_mult, u_knots, v_knots, spec]
+                let f = split_top_level(args);
+                if f.len() >= 12 {
+                    if let Some(rec) = parse_bspline_record(&f[1], &f[2], &f[3], &f[8], &f[9], &f[10], &f[11]) {
+                        surf_bspline.insert(id, rec);
+                    }
+                }
+            }
+            // AP214/AP242 complex (multi-supertype) instance — the form real CAD
+            // systems (NX/CATIA/SolidWorks/Creo) emit for free-form surfaces:
+            // #N=(BOUNDED_SURFACE()B_SPLINE_SURFACE(u,v,cp,form,..)
+            //     B_SPLINE_SURFACE_WITH_KNOTS(umult,vmult,uk,vk,spec)..).
+            // The leading '(' makes `typ` empty, so handle it here. Degrees + cp
+            // grid live in the B_SPLINE_SURFACE sub-record; mults/knots in
+            // B_SPLINE_SURFACE_WITH_KNOTS.
+            "" if rhs.starts_with('(') && rhs.contains("B_SPLINE_SURFACE_WITH_KNOTS") => {
+                if let (Some(bs), Some(wk)) = (
+                    find_entity_args(rhs, "B_SPLINE_SURFACE("),
+                    find_entity_args(rhs, "B_SPLINE_SURFACE_WITH_KNOTS("),
+                ) {
+                    let b = split_top_level(&bs); // [u_deg, v_deg, cp_grid, form, b,b,b]
+                    let w = split_top_level(&wk); // [u_mult, v_mult, u_knots, v_knots, spec]
+                    if b.len() >= 3 && w.len() >= 4 {
+                        if let Some(rec) = parse_bspline_record(&b[0], &b[1], &b[2], &w[0], &w[1], &w[2], &w[3]) {
+                            surf_bspline.insert(id, rec);
                         }
                     }
                 }
@@ -809,6 +866,29 @@ mod tests {
         for p in &mesh.positions {
             assert!(p[2].abs() < 1e-4, "flat patch vertex off z=0: {:?}", p);
             assert!(p[0] >= -1e-4 && p[0] <= 1.0 + 1e-4 && p[1] >= -1e-4 && p[1] <= 1.0 + 1e-4, "vertex {:?} outside patch", p);
+        }
+    }
+
+    #[test]
+    fn read_step_trimesh_reconstructs_complex_instance_bspline() {
+        // The AP214/AP242 complex (multi-supertype) instance form real CAD
+        // systems emit — degrees + control net in B_SPLINE_SURFACE, knots in
+        // B_SPLINE_SURFACE_WITH_KNOTS, on one #N=(...) record.
+        let entities = "\
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(1.,0.,0.));
+#3=CARTESIAN_POINT('',(0.,1.,0.));
+#4=CARTESIAN_POINT('',(1.,1.,0.));
+#5=(BOUNDED_SURFACE()B_SPLINE_SURFACE(1,1,((#1,#2),(#3,#4)),.UNSPECIFIED.,.F.,.F.,.F.)B_SPLINE_SURFACE_WITH_KNOTS((2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.)GEOMETRIC_REPRESENTATION_ITEM()REPRESENTATION_ITEM('')SURFACE());
+#6=ADVANCED_FACE('',(),#5,.T.);";
+        let path = std::env::temp_dir().join(format!("gfd_step_cplx_{}.stp",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::write(&path, step_doc(entities)).unwrap();
+        let mesh = read_step_trimesh(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(mesh.indices.len() >= 3, "complex-instance bspline must reconstruct (got {} indices)", mesh.indices.len());
+        for p in &mesh.positions {
+            assert!(p[2].abs() < 1e-4, "flat patch vertex off z=0: {:?}", p);
         }
     }
 
