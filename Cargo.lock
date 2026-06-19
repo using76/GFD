@@ -193,6 +193,7 @@ dependencies = [
  "gfd-discretize",
  "gfd-expression",
  "gfd-fluid",
+ "gfd-geo",
  "gfd-gmsh",
  "gfd-gpu",
  "gfd-io",

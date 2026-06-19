@@ -147,6 +147,16 @@ NODATA_value -9999
     }
 
     #[test]
+    fn to_bed_field_walls_off_nodata() {
+        let txt = "ncols 2\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 5\nNODATA_value -9999\n3 -9999";
+        let d = parse_asc(txt).unwrap();
+        let (nc, nr, cs, zb) = d.to_bed_field(None);
+        assert_eq!((nc, nr, cs), (2, 1, 5.0));
+        assert_eq!(zb[0], 3.0);
+        assert!(zb[1] > 1000.0, "NODATA cell should become a high wall, got {}", zb[1]);
+    }
+
+    #[test]
     fn nodata_excluded_from_range_and_downsample() {
         let txt = "ncols 2\nnrows 2\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n10 -9999\n20 30";
         let d = parse_asc(txt).unwrap();

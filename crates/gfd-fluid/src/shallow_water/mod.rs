@@ -12,6 +12,12 @@
 //! Euler equations (pressure ½g h², celerity √(gh)), so the existing HLLC +
 //! CFL machinery is the implementation template — not a blank slate.
 
+pub mod hllc;
+pub mod solver;
+
+pub use hllc::hllc_normal;
+pub use solver::{SwBc, SwBoundaries, SwSolver};
+
 /// A uniform Cartesian grid for the SWE solver (built from a DEM in Phase 4).
 #[derive(Debug, Clone)]
 pub struct SwGrid {

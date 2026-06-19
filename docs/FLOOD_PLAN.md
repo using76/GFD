@@ -183,10 +183,10 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 - [ ] **수동 배치 보정 API** (지오레퍼런싱 누락 파일 대비): 사용자 지정 origin/rotation 오버라이드
 - 보조 경로: 지오레퍼런싱·형상이 너무 복잡한 파일은 외부 IfcOpenShell `IfcConvert`로 STEP/OBJ 변환 후 기존 import 재사용 (fallback 문서화)
 
-### Phase 4 — DEM → Mesh ⬜
-- [ ] **2D(Track A)**: DEM 격자 → `gfd-mesh` Cartesian 2D 메시 + 셀별 `z_b` 스칼라 필드 생성
-- [ ] **3D(Track B)**: DEM 격자당 삼각형 2개 → 하이트필드 STL → `sdf_from_triangles` → `CutCellMesher`
-- [ ] NODATA·경계 처리, 도메인 클립
+### Phase 4 — DEM → Mesh ⚠️
+- [x] **2D(Track A)**: `Dem::to_bed_field()` → `SwGrid` + 셀별 `z_b` (NODATA→고지대 wall). end-to-end 테스트 `tests/flood_dem_to_swe.rs`(다운슬로프 흐름·질량보존·NODATA wall 검증)
+- [ ] **3D(Track B)**: DEM 격자당 삼각형 2개 → 하이트필드 STL → `sdf_from_triangles` → `CutCellMesher` (줌인 트랙, 후순위)
+- [x] NODATA·경계 처리 (NODATA→wall), 도메인 클립(`Dem::crop`)
 
 ### Phase 5 — 지형+건물 결합 ⬜
 - [ ] 건물 풋프린트 추출 (z투영 → 외곽 폴리곤)
@@ -194,14 +194,15 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 - [ ] **3D**: `sdf_union(지형, 건물들)` 합성 SDF → cut-cell (메시 CSG보다 SDF union이 boundary 견고)
 - [ ] 건물-지형 접지면(foundation) 처리, 셀 분류 검증
 
-### Phase 6 — 2D SWE 솔버 (`gfd-fluid/src/shallow_water/`) ⬜ **(핵심·최대 작업)**
-- [ ] 보존변수 `[h, hu, hv]` 상태 + 필드 자료구조
-- [ ] **HLLC Riemann flux** (compressible 모듈 변형, 파속 √(gh))
-- [ ] **Well-balanced**: Audusse hydrostatic reconstruction (C-property 테스트)
-- [ ] **Wetting/drying** + positivity 보존
-- [ ] **Manning 마찰** 소스항 (semi-implicit)
-- [ ] **CFL 적응 dt** (`compute_cfl_timestep` SWE판)
-- [ ] 1차 Godunov → 2차 MUSCL+minmod / SSP-RK2
+### Phase 6 — 2D SWE 솔버 (`gfd-fluid/src/shallow_water/`) ⚠️ **(핵심·거의완료)**
+- [x] 보존변수 `[h, hu, hv]` 상태 + bed `z_b` (`SwState`, `SwGrid`, `SwParams`)
+- [x] **HLLC Riemann flux** (`hllc.rs`, 파속 √(gh), Einfeldt+dry-bed, 횡방향 contact 업윈드)
+- [x] **Well-balanced**: Audusse hydrostatic reconstruction — lake-at-rest C-property 머신정밀도(1e-10) 검증
+- [x] **Wetting/drying** + positivity 보존 (h_dry, 마른 셀 속도 0, 음수 깊이 클램프)
+- [x] **Manning 마찰** 소스항 (semi-implicit, `friction`)
+- [x] **CFL 적응 dt** (`cfl_timestep`, smax=|u|+√(gh))
+- [x] 1차 Godunov + SSP-RK2 (시간 2차). Ritter 댐붕괴·질량보존 검증
+- [ ] **2차 MUSCL+minmod 공간 재구성** (잔여 — η 재구성 well-balanced 유지 필요)
 
 ### Phase 7 — 홍수 경계조건·소스 ⬜
 - [ ] **유입 hydrograph** Q(t) inlet (시간보간 테이블)
@@ -291,9 +292,9 @@ docs/
 | 1 DEM I/O | ⚠️ 부분 | `.asc` 리더 + `Dem`(bilinear 샘플러·crop·downsample) ✅ / GeoTIFF·LAS·proj는 후순위 ⬜ |
 | 2 CRS/Georef | ⬜ | EPSG 재투영 + 로컬원점 시프트 + 한국 좌표계 프리셋 + f32 정밀도 가드 |
 | 3 IFC Reader | ⬜ | 네이티브 IFC4 파서, 외피 추출, MapConversion 지오레퍼런싱, ExtrudedAreaSolid/Brep 형상 |
-| 4 DEM→Mesh | ⬜ | 2D Cartesian+z_b / 3D 하이트필드 STL→cut-cell |
+| 4 DEM→Mesh | ⚠️ 부분 | **2D Track A 완료**: `Dem::to_bed_field`→SwGrid+z_b (NODATA→wall), end-to-end 테스트 `tests/flood_dem_to_swe.rs` / 3D Track B(하이트필드 STL→cut-cell) ⬜ |
 | 5 결합 | ⬜ | 풋프린트 추출 + Block/Hole/Roughness burn-in + SDF union |
-| 6 SWE 솔버 | ⬜ | HLLC + well-balanced + wetting/drying + Manning + 적응 dt + MUSCL |
+| 6 SWE 솔버 | ⚠️ 거의완료 | **HLLC + Audusse well-balanced + wetting/drying + positivity + Manning(semi-impl) + 적응 CFL + SSP-RK2 완료·검증** (lake-at-rest C-property 1e-10, Ritter 댐붕괴, 질량보존) / MUSCL 2차 공간정확도만 ⬜ |
 | 7 홍수 BC | ⬜ | hydrograph / outflow / rainfall / wall |
 | 8 하이브리드 | ⬜ | SWE→3D VOF one-way coupling |
 | 9 후처리/GUI | ⬜ | 침수심/도달시간/hazard + VTK/GeoTIFF + GUI 컬러맵 + flood.* RPC |

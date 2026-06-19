@@ -8,7 +8,7 @@
 
 pub mod asc;
 
-pub use asc::read_asc;
+pub use asc::{parse_asc, read_asc};
 
 /// A regular grid of terrain elevations in a projected CRS (units = `z`'s units,
 /// usually metres). `origin` is the lower-left **corner** (xllcorner, yllcorner).
@@ -121,6 +121,19 @@ impl Dem {
             }
         }
         best.map(|(_, v)| v)
+    }
+
+    /// Phase 4 bridge — flatten this DEM into SWE-solver inputs: the grid dims,
+    /// cell size, and a row-major bed-elevation field `z_b` (same layout as `z`).
+    /// NODATA cells become an impermeable wall by setting their bed far above the
+    /// terrain (`nodata_height`, default = max elevation + 1000 m), so the
+    /// well-balanced reconstruction yields zero flux there. Returns
+    /// `(ncols, nrows, cellsize, z_b)`; the caller builds `SwGrid`/`SwState`
+    /// (keeps `gfd-fluid` decoupled from `gfd-geo`).
+    pub fn to_bed_field(&self, nodata_height: Option<f64>) -> (usize, usize, f64, Vec<f64>) {
+        let wall = nodata_height.unwrap_or_else(|| self.elevation_range().map_or(1.0e6, |(_, hi)| hi + 1000.0));
+        let z_b = self.z.iter().map(|&v| if self.is_nodata(v) { wall } else { v }).collect();
+        (self.ncols, self.nrows, self.cellsize, z_b)
     }
 
     /// Crop to a sub-window `[col0, row0]` of size `nc × nr` (clamped to range).
