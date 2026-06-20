@@ -7228,7 +7228,14 @@ fn handle_flood_export_raster(state: &ServerState, id: u64, params: &Value) -> R
     let Some(path) = params.get("path").and_then(|v| v.as_str()) else { return RpcResponse::err(id, "missing path"); };
     let field = params.get("field").and_then(|v| v.as_str()).unwrap_or("depth");
     let format = params.get("format").and_then(|v| v.as_str()).unwrap_or("asc");
-    let Some(vals) = flood_field_values(fs, field) else { return RpcResponse::err(id, format!("unknown field: {field}")); };
+    let Some(mut vals) = flood_field_values(fs, field) else { return RpcResponse::err(id, format!("unknown field: {field}")); };
+    // Arrival "never wet" = -1 internally; map to the declared NODATA sentinel so
+    // GIS (QGIS/ArcGIS) treats those cells as missing rather than time = -1 s.
+    if field == "arrival" {
+        for v in vals.iter_mut() {
+            if *v < 0.0 { *v = -9999.0; }
+        }
+    }
     let nc = fs.solver.grid.ncols;
     let nr = fs.solver.grid.nrows;
     let result = match format {
@@ -7410,7 +7417,9 @@ fn handle_flood_zoom_3d(state: &ServerState, id: u64, params: &Value) -> RpcResp
         let zc = zbed_min + (k as f64 + 0.5) * dz;
         for j in 0..ny {
             for i in 0..nx {
-                let i2 = (c0 + i) + (r0 + j) * nc;
+                // 3D voxel j increases northward; origin3d is the SW (south) corner
+                // at row r1, so j=0 → r1 (southernmost), j=ny-1 → r0.
+                let i2 = (c0 + i) + (r1 - j) * nc;
                 let (zb, h) = (fs.state.z_b[i2], fs.state.h[i2].max(0.0));
                 if h > h_dry && zc < zb + h {
                     alpha[i + j * nx + k * nx * ny] = 1.0;
@@ -7467,10 +7476,17 @@ fn handle_flood_build_3d_mesh(state: &ServerState, id: u64, params: &Value) -> R
     let nr = fs.solver.grid.nrows;
     let cs = fs.cellsize;
     let f = |k: &str, d: f64| params.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
-    let xmin = f("xmin", fs.origin[0]);
-    let xmax = f("xmax", fs.origin[0] + nc as f64 * cs);
-    let ymin = f("ymin", fs.origin[1]);
-    let ymax = f("ymax", fs.origin[1] + nr as f64 * cs);
+    // Clamp the meshing window to the DEM footprint: sample_grid clamps indices
+    // at the edges, so a window beyond the DEM would silently repeat edge values.
+    let (dx0, dx1) = (fs.origin[0], fs.origin[0] + nc as f64 * cs);
+    let (dy0, dy1) = (fs.origin[1], fs.origin[1] + nr as f64 * cs);
+    let xmin = f("xmin", dx0).clamp(dx0, dx1);
+    let xmax = f("xmax", dx1).clamp(dx0, dx1);
+    let ymin = f("ymin", dy0).clamp(dy0, dy1);
+    let ymax = f("ymax", dy1).clamp(dy0, dy1);
+    if xmax <= xmin || ymax <= ymin {
+        return RpcResponse::err(id, "empty meshing window (after clamping to the DEM)");
+    }
 
     // Building prisms (footprint + base_z + height).
     let prisms: Vec<(Vec<[f64; 2]>, f64, f64)> = params.get("buildings").and_then(|v| v.as_array())
@@ -7499,9 +7515,10 @@ fn handle_flood_build_3d_mesh(state: &ServerState, id: u64, params: &Value) -> R
     let zmin = f("zmin", zmin - cs);
     let zmax = f("zmax", zmax + cs);
 
+    // Resolution: explicit and default values both go through the same clamps.
     let nx = params.get("nx").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(((xmax - xmin) / cs).ceil() as usize).clamp(1, 256);
     let ny = params.get("ny").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(((ymax - ymin) / cs).ceil() as usize).clamp(1, 256);
-    let nz = params.get("nz").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or((((zmax - zmin) / cs).ceil() as usize).clamp(4, 64)).clamp(1, 128);
+    let nz = params.get("nz").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(((zmax - zmin) / cs).ceil() as usize).clamp(4, 128);
 
     let zb = fs.state.z_b.clone();
     let origin = fs.origin;
@@ -7911,6 +7928,26 @@ mod tests {
         let e = handle_flood_export_raster(&state, 5, &serde_json::json!({ "path": p, "field": "max", "format": "geotiff" }));
         assert_eq!(e.result.unwrap()["format"], "geotiff");
         assert!(std::fs::metadata(&path).map(|m| m.len() > 100).unwrap_or(false), "geotiff file written");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn flood_arrival_asc_uses_nodata_sentinel() {
+        // Never-wet cells must export as the declared NODATA (-9999), not -1.
+        let asc = "ncols 12\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n".to_string()
+            + &"0 ".repeat(12);
+        let mut state = ServerState::new();
+        handle_flood_load_dem(&mut state, 1, &serde_json::json!({ "asc": asc.trim(), "manning_n": 0.0 }));
+        // Small pond on the left, very short run → right cells stay dry forever.
+        handle_flood_seed(&mut state, 2, &serde_json::json!({ "kind": "dam_break", "axis": "x", "position": 2.0, "depth": 1.0 }));
+        handle_flood_run(&mut state, 3, &serde_json::json!({ "t_end": 0.1 }));
+        let mut path = std::env::temp_dir();
+        path.push("gfd_arrival_nodata.asc");
+        let p = path.to_string_lossy().to_string();
+        handle_flood_export_raster(&state, 4, &serde_json::json!({ "path": p, "field": "arrival", "format": "asc" }));
+        let txt = std::fs::read_to_string(&path).unwrap();
+        assert!(txt.contains("-9999"), "never-wet arrival cells must be NODATA -9999, not -1");
+        assert!(!txt.contains("-1.0000"), "the -1 internal sentinel must not leak into the raster");
         let _ = std::fs::remove_file(&path);
     }
 

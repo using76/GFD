@@ -88,9 +88,10 @@ pub fn parse_ifc(text: &str) -> GeoResult<IfcModel> {
     }
     elements.sort_by_key(|e| e.id);
 
-    // Storey summary, sorted by elevation, with element counts.
+    // Storey summary, sorted by elevation, with element counts. Match by storey
+    // *id* (not name) so two storeys sharing a name aren't double-counted.
     let mut storeys: Vec<StoreyInfo> = storey_info.iter().map(|(&id, (name, elev))| {
-        let element_count = elements.iter().filter(|e| e.storey_name.as_deref() == Some(name.as_str())).count();
+        let element_count = elements.iter().filter(|e| elem_storey.get(&e.id) == Some(&id)).count();
         StoreyInfo { id, name: name.clone(), elevation: *elev, element_count }
     }).collect();
     storeys.sort_by(|a, b| a.elevation.partial_cmp(&b.elevation).unwrap_or(std::cmp::Ordering::Equal));
@@ -628,6 +629,45 @@ END-ISO-10303-21;";
         assert!((e.storey_elevation - 3.0).abs() < 1e-9, "storey elev {}", e.storey_elevation);
         assert_eq!(m.storeys.len(), 1);
         assert_eq!(m.storeys[0].element_count, 1);
+    }
+
+    #[test]
+    fn same_named_storeys_not_double_counted() {
+        // Two storeys both named "Floor", one wall each → each storey counts 1
+        // (regression: counting by name would report 2 for each).
+        let ifc = "\
+ISO-10303-21;
+DATA;
+#1=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);
+#5=IFCCARTESIANPOINT((0.,0.,0.));
+#6=IFCAXIS2PLACEMENT3D(#5,$,$);
+#7=IFCLOCALPLACEMENT($,#6);
+#8=IFCBUILDINGSTOREY('a',$,'Floor',$,$,#7,$,$,.ELEMENT.,0.0);
+#15=IFCCARTESIANPOINT((0.,0.,3.));
+#16=IFCAXIS2PLACEMENT3D(#15,$,$);
+#17=IFCLOCALPLACEMENT($,#16);
+#18=IFCBUILDINGSTOREY('b',$,'Floor',$,$,#17,$,$,.ELEMENT.,3.0);
+#20=IFCCARTESIANPOINT((0.,0.,0.));
+#21=IFCAXIS2PLACEMENT3D(#20,$,$);
+#22=IFCLOCALPLACEMENT($,#21);
+#23=IFCCARTESIANPOINT((0.,0.));
+#24=IFCAXIS2PLACEMENT2D(#23,$);
+#25=IFCRECTANGLEPROFILEDEF(.AREA.,$,#24,2.,2.);
+#26=IFCDIRECTION((0.,0.,1.));
+#27=IFCEXTRUDEDAREASOLID(#25,#21,#26,2.);
+#28=IFCSHAPEREPRESENTATION(#99,'Body','SweptSolid',(#27));
+#29=IFCPRODUCTDEFINITIONSHAPE($,$,(#28));
+#30=IFCWALL('w1',$,'W1',$,$,#22,#29,$);
+#40=IFCWALL('w2',$,'W2',$,$,#22,#29,$);
+#50=IFCRELCONTAINEDINSPATIALSTRUCTURE('r1',$,$,$,(#30),#8);
+#51=IFCRELCONTAINEDINSPATIALSTRUCTURE('r2',$,$,$,(#40),#18);
+ENDSEC;
+END-ISO-10303-21;";
+        let m = parse_ifc(ifc).unwrap();
+        assert_eq!(m.storeys.len(), 2, "two distinct storeys");
+        for s in &m.storeys {
+            assert_eq!(s.element_count, 1, "each storey counts only its own element, got {}", s.element_count);
+        }
     }
 
     #[test]
