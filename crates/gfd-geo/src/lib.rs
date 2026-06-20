@@ -11,8 +11,10 @@
 //! being lowered into a `f32` `TriMesh`/STL, or sub-decimeter resolution is lost.
 
 pub mod dem;
+pub mod ifc;
 
 pub use dem::Dem;
+pub use ifc::{IfcElement, IfcModel};
 
 use thiserror::Error;
 

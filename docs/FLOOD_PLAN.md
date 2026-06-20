@@ -171,17 +171,17 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 - [ ] 한국 좌표계 프리셋 (EPSG:5186, 5179, 5174)
 - [ ] §3 정밀도 가드: TriMesh 변환 전 f64→원점차→f32 강제 경로
 
-### Phase 3 — Native IFC Reader (`gfd-geo::ifc`) ⬜
-> IFC는 STEP physical file(ISO 10303-21) 문법을 공유 → 기존 `gfd-cad-io/src/step.rs` 파서 토큰화 로직 부분 재사용.
-- [ ] STEP-physical 토크나이저 + 엔티티 그래프 (헤더/DATA 섹션, `#id=ENTITY(...)`)
-- [ ] `IfcProject`/`IfcSite`/`IfcBuilding`/`IfcBuildingStorey` 공간 위계 파싱
-- [ ] **지오레퍼런싱**: `IfcMapConversion` + `IfcProjectedCRS` (IFC4) / `IfcSite.RefLatitude·RefLongitude·RefElevation` (IFC2x3 fallback)
-- [ ] 단위: `IfcUnitAssignment` / `IfcSIUnit` / `IfcConversionBasedUnit`
-- [ ] **외피(envelope) 추출**: `IfcWall`, `IfcWallStandardCase`, `IfcSlab`, `IfcColumn`, `IfcBeam`, `IfcRoof`, `IfcBuildingElementProxy`만 유지. 가구/MEP/`IfcFurnishing`/`IfcFlowSegment` 제거.
-- [ ] **형상 표현 파싱**: `IfcExtrudedAreaSolid`(가장 흔함, 풋프린트+높이 압출), `IfcFacetedBrep`, `IfcPolygonalFaceSet`, `IfcTriangulatedFaceSet`(IFC4) → TriMesh
-- [ ] `IfcLocalPlacement` 체인 누적 변환 (건물 → 층 → 부재 좌표계)
-- [ ] **수동 배치 보정 API** (지오레퍼런싱 누락 파일 대비): 사용자 지정 origin/rotation 오버라이드
-- 보조 경로: 지오레퍼런싱·형상이 너무 복잡한 파일은 외부 IfcOpenShell `IfcConvert`로 STEP/OBJ 변환 후 기존 import 재사용 (fallback 문서화)
+### Phase 3 — Native IFC Reader (`gfd-geo::ifc`) ⚠️
+> IFC는 STEP physical file(ISO 10303-21) 문법 공유 → `ifc/parse.rs`에 자작 토크나이저.
+- [x] STEP-physical 토크나이저 + 엔티티 스토어 (DATA 섹션, `#id=ENTITY(...)`, refs/floats/string 접근, 따옴표·중첩 처리)
+- [x] 단위: `IfcSIUnit(.LENGTHUNIT.)` 접두사(.MILLI./.CENTI./.KILO.) → metre 스케일
+- [x] **외피 추출**: IfcWall/WallStandardCase/Slab/Column/Beam/Roof/BuildingElementProxy/Footing/Plate
+- [x] **형상**: `IfcExtrudedAreaSolid`(IfcRectangleProfileDef + IfcArbitraryClosedProfileDef/IfcPolyline) → footprint 폴리곤 + 높이
+- [x] `IfcLocalPlacement` 체인 누적 translation (부재 배치) + `IfcExtrudedAreaSolid.Position`
+- [x] `IfcModel::footprints()` / `bounds()` — flood 건물 burn-in(Phase 5) 입력
+- [ ] `IfcFacetedBrep`/`IfcPolygonalFaceSet`/`IfcTriangulatedFaceSet` → TriMesh, 공간 위계(Project/Site/Storey)
+- [ ] **지오레퍼런싱**: `IfcMapConversion`+`IfcProjectedCRS` / `IfcSite.RefLat·Long`, 프로파일·배치 회전, 수동 배치 보정 API
+- 보조 경로: 복잡한 파일은 외부 IfcOpenShell `IfcConvert`로 STEP/OBJ 변환 후 기존 import 재사용 (fallback)
 
 ### Phase 4 — DEM → Mesh ⚠️
 - [x] **2D(Track A)**: `Dem::to_bed_field()` → `SwGrid` + 셀별 `z_b` (NODATA→고지대 wall). end-to-end 테스트 `tests/flood_dem_to_swe.rs`(다운슬로프 흐름·질량보존·NODATA wall 검증)
@@ -295,7 +295,7 @@ docs/
 | 0 Scaffolding | ✅ 완료 | gfd-geo 크레이트(workspace 등록) + `shallow_water` 모듈 + `examples/flood_dambreak_1d.json` 스키마 초안 |
 | 1 DEM I/O | ⚠️ 부분 | `.asc` 리더 + `Dem`(bilinear 샘플러·crop·downsample) ✅ / GeoTIFF·LAS·proj는 후순위 ⬜ |
 | 2 CRS/Georef | ⬜ | EPSG 재투영 + 로컬원점 시프트 + 한국 좌표계 프리셋 + f32 정밀도 가드 |
-| 3 IFC Reader | ⬜ | 네이티브 IFC4 파서, 외피 추출, MapConversion 지오레퍼런싱, ExtrudedAreaSolid/Brep 형상 |
+| 3 IFC Reader | ⚠️ 부분 | **네이티브 IFC 토크나이저 + 단위(mm/cm/km→m) + 외피 요소(wall/slab/column/beam/roof/proxy) + IfcExtrudedAreaSolid(사각형·임의 폴리곤 프로파일) + IfcLocalPlacement → footprint+높이** (`gfd-geo::ifc`). FaceSet/Brep, MapConversion 지오레퍼런싱, 프로파일 회전 ⬜ |
 | 4 DEM→Mesh | ⚠️ 부분 | **2D Track A 완료**: `Dem::to_bed_field`→SwGrid+z_b (NODATA→wall), end-to-end 테스트 `tests/flood_dem_to_swe.rs` / 3D Track B(하이트필드 STL→cut-cell) ⬜ |
 | 5 결합 | ⬜ | 풋프린트 추출 + Block/Hole/Roughness burn-in + SDF union |
 | 6 SWE 솔버 | ✅ 완료 | HLLC + Audusse well-balanced + wetting/drying + positivity + Manning(semi-impl) + 적응 CFL + SSP-RK2 + **MUSCL 2차(minmod η-재구성 + 중앙 bed 소스)**. lake-at-rest C-property 1e-10(1·2차), Ritter 댐붕괴(MUSCL 오차 0.027 vs 1차 0.100), 질량보존 |
