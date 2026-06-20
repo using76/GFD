@@ -603,6 +603,56 @@ mod tests {
     }
 
     #[test]
+    fn stoker_wet_dam_break_star_depth() {
+        // Stoker (1957) wet-bed dam break: hL>hR>0, flat frictionless bed. The
+        // self-similar solution has a constant plateau h_m (star state) between a
+        // left rarefaction and a right shock. Solve h_m analytically (rarefaction
+        // invariant = shock Rankine-Hugoniot) and compare the simulated plateau.
+        let (nc, nr) = (600, 1);
+        let (dx, g, hl, hr) = (1.0_f64, 9.81_f64, 2.0_f64, 0.5_f64);
+        let dam = nc / 2;
+        let t = 6.0_f64;
+
+        // h_m root of f(h) = 2(√(g hL)−√(g h)) − (h−hR)√(g(h+hR)/(2 h hR)).
+        let fstar = |h: f64| 2.0 * ((g * hl).sqrt() - (g * h).sqrt())
+            - (h - hr) * (g * (h + hr) / (2.0 * h * hr)).sqrt();
+        let (mut lo, mut hi) = (hr, hl);
+        for _ in 0..100 {
+            let mid = 0.5 * (lo + hi);
+            if fstar(mid) > 0.0 { lo = mid; } else { hi = mid; }
+        }
+        let h_m = 0.5 * (lo + hi);
+        let u_m = 2.0 * ((g * hl).sqrt() - (g * h_m).sqrt());
+        let shock_speed = h_m * u_m / (h_m - hr); // RH speed into still water hR
+
+        let mut s = SwState::dry(flat(nc, nr));
+        for c in 0..nc { s.h[c] = if c < dam { hl } else { hr }; }
+        let solver = SwSolver::new(
+            SwGrid::new(nc, nr, dx, 1.0),
+            SwParams { gravity: g, manning_n: 0.0, order: 2, ..Default::default() },
+            SwBoundaries { xmin: SwBc::Transmissive, xmax: SwBc::Transmissive, ..Default::default() },
+        );
+        let v0 = solver.total_volume(&s);
+        solver.advance(&mut s, t, 200000);
+
+        assert!(s.h.iter().all(|&h| h >= 0.0 && h.is_finite()), "positivity");
+        // Shock front: rightmost cell clearly above the (h_m+hR)/2 midpoint.
+        let thresh = 0.5 * (h_m + hr);
+        let mut shock = dam;
+        for c in dam..nc { if s.h[c] > thresh { shock = c; } }
+        let shock_x = shock as f64 * dx;
+        let analytic_shock = dam as f64 * dx + shock_speed * t;
+        assert!((shock_x - analytic_shock).abs() < 8.0 * dx, "shock {shock_x} vs analytic {analytic_shock}");
+        // Plateau: a few cells upstream of the shock must sit at the star depth.
+        let probe = shock.saturating_sub(15);
+        assert!((s.h[probe] - h_m).abs() / h_m < 0.06, "plateau {} vs h_m {h_m}", s.h[probe]);
+        // Downstream of the shock stays near hR; mass conserved (no boundary reached).
+        assert!((s.h[shock + 20] - hr).abs() < 0.05, "downstream {} vs hR {hr}", s.h[shock + 20]);
+        let v1 = solver.total_volume(&s);
+        assert!((v1 - v0).abs() / v0 < 1e-3, "mass drift {}", (v1 - v0).abs() / v0);
+    }
+
+    #[test]
     fn drained_basin_stays_positive() {
         // A puddle in a bowl with transmissive walls should drain without going
         // negative or NaN (wetting/drying robustness).

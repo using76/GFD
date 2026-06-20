@@ -209,19 +209,20 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
   well-balanced 유지(C-property 1e-10), bed-기울기 중앙 소스(평지에서 0). Ritter
   dam 깊이 오차 1차 0.100 → 2차 0.027로 개선
 
-### Phase 7 — 홍수 경계조건·소스 ⬜
-- [ ] **유입 hydrograph** Q(t) inlet (시간보간 테이블)
-- [ ] **하류 outflow**: normal-depth / critical / 지정 수위(stage)
-- [ ] **면적 강우** 소스항 (rain-on-grid) + 침투(infiltration, 선택)
-- [ ] reflective wall(건물·제방) BC
-- [ ] `gfd-boundary` 위 홍수 BC 래퍼
+### Phase 7 — 홍수 경계조건·소스 ✅
+- [x] **유입 hydrograph** Q(t) inlet (`flood.add_inlet`, 시간보간 + 상수 q, 영역=원)
+- [x] **하류 outflow**: Transmissive(zero-gradient) BC + 지정 수위(FixedDepth) BC
+- [x] **면적 강우** rain-on-grid + 침투(infiltration) — `flood.set_rain {rate, infiltration}`, 셀당 적용(질량검증 1e-6)
+- [x] reflective wall(건물·제방) BC — Wall BC + 내부 solid mask(Hole, Phase 5)
+- [ ] `gfd-boundary` 통합 래퍼, critical/normal-depth outflow 변형
 
 ### Phase 8 — 하이브리드 커플링 (one-way) ⚠️
 - [x] **3D 줌인 one-way coupling** `flood.zoom_3d` — 서브영역 [xmin..ymax] 추출 →
   3D VOF α 초기화(자유수면 아래 물=1) + 깊이평균 유속(u,v,0) 시드. 체적보존 검증
   (3D 물 체적 ≈ 2D SWE 체적, `flood_zoom_3d_conserves_volume`). VofSolverImpl 구성 확인
 - [x] VOF 초기 자유수면(α) 초기화 from SWE h (column-fill)
-- [ ] 줌인 영역 자동 추출(hotspot 탐지), VOF 시간전진 실제 실행(transient), two-way 피드백
+- [x] **VOF 시간전진 실제 실행** `flood.zoom_3d_run` — 3D 구조격자 + (frozen) SWE 유속으로 `solve_transport` 반복, α∈[0,1] 유지·유한성 검증
+- [ ] 줌인 영역 자동 추출(hotspot 탐지), two-way 피드백, 경계 유입 프로파일 시간변화
 
 ### Phase 9 — 후처리 · GUI ⚠️
 - [x] **gfd-server JSON-RPC**: `flood.load_dem`(.asc text|path → grid+z_b), `flood.seed`(level/disk/dam_break), `flood.run`(t_end/steps + max-depth 갱신), `flood.result`(depth/max/velocity/bed raster), `flood.reset`
@@ -235,13 +236,12 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 - [x] **GeoTIFF export** (`flood.export_raster format=geotiff`) — 직접 바이트, 의존성 없음
 - [ ] v·√h hazard 래스터, 과거 프레임 scrub-back(히스토리 저장)
 
-### Phase 10 — 검증 (Validation) ⬜
-- [ ] **Ritter/Stoker 댐붕괴** 해석해 (1D, well-balanced·wetting/drying 1차 검증)
-- [ ] **Lake-at-rest** C-property (정지수면 보존, 머신 정밀도)
-- [ ] **Malpasset 댐 붕괴** (고전 2D SWE 벤치, 실측 도달시간·최고수위)
-- [ ] **Toce River** 물리모형(건물 배열 도시 침수)
-- [ ] **Carrier-Greenspan** 처오름(wetting/drying 동적)
-- [ ] DEM+IFC 정합 회귀 테스트(좌표 라운드트립 오차 < 1e-6 상대)
+### Phase 10 — 검증 (Validation) ⚠️
+- [x] **Ritter(건조)/Stoker(습윤) 댐붕괴** 해석해 — Ritter dam 깊이 4hL/9, Stoker 중간상태 h*(rarefaction invariant=shock RH)와 plateau 6% 이내·shock 정합
+- [x] **Lake-at-rest** C-property (1·2차 머신정밀도 1e-10, solid mask 포함)
+- [x] DEM 좌표 라운드트립(UTM ≥5e5, < 1e-6) + IFC MapConversion 정합
+- [x] 질량보존(댐붕괴·강우·inlet), positivity/wetting-drying 강건성
+- [ ] **Malpasset 댐 붕괴**(실측 도달시간·최고수위), **Toce River** 도시침수, **Carrier-Greenspan** 동적 처오름 (현장 벤치 데이터 필요)
 
 ---
 
@@ -308,11 +308,10 @@ docs/
 | 4 DEM→Mesh | ⚠️ 부분 | **2D Track A 완료**: `Dem::to_bed_field`→SwGrid+z_b (NODATA→wall), end-to-end 테스트 `tests/flood_dem_to_swe.rs` / 3D Track B(하이트필드 STL→cut-cell) ⬜ |
 | 5 결합 | ✅ | **풋프린트 추출 + Block/Hole/Roughness burn-in + IFC→SWE 결합(MapConversion 정합) + 3D SDF union cut-cell(flood.build_3d_mesh) 완료·검증** |
 | 6 SWE 솔버 | ✅ 완료 | HLLC + Audusse well-balanced + wetting/drying + positivity + Manning(semi-impl) + 적응 CFL + SSP-RK2 + **MUSCL 2차(minmod η-재구성 + 중앙 bed 소스)**. lake-at-rest C-property 1e-10(1·2차), Ritter 댐붕괴(MUSCL 오차 0.027 vs 1차 0.100), 질량보존 |
-| 7 홍수 BC | ⬜ | hydrograph / outflow / rainfall / wall |
-| 8 하이브리드 | ⬜ | SWE→3D VOF one-way coupling |
-| 8 하이브리드 | ⚠️ 부분 | **3D 줌인 one-way coupling(flood.zoom_3d): SWE→VOF α+유속 초기화, 체적보존 검증** / hotspot 자동탐지·VOF transient·two-way ⬜ |
+| 7 홍수 BC | ✅ | **rain-on-grid+침투(flood.set_rain) + hydrograph inlet(flood.add_inlet) + Transmissive/FixedDepth outflow + Wall/solid-mask 완료·검증** / gfd-boundary 통합·critical outflow ⬜ |
+| 8 하이브리드 | ⚠️ 부분 | **3D 줌인 one-way coupling: SWE→VOF α+유속 초기화(flood.zoom_3d, 체적보존) + VOF transient 실행(flood.zoom_3d_run)** / hotspot 자동탐지·two-way ⬜ |
 | 9 후처리/GUI | ✅ 거의완료 | **flood.* RPC(load_dem/seed/run/result/burn/load_ifc/zoom_3d/build_3d_mesh/export/reset) + command-core(AI/MCP/리본) + FloodLayer(수심 컬러맵) + FloodToolbar(시간 스텝·필드·export) + max-depth/arrival hazard + georeferenced .asc·GeoTIFF export 완료**, scrub-back/v·√h hazard ⬜ |
-| 10 검증 | ⬜ | Ritter/Stoker, lake-at-rest, Malpasset, Toce, Carrier-Greenspan |
+| 10 검증 | ⚠️ | **Ritter/Stoker 댐붕괴(해석해) + lake-at-rest C-property + UTM 라운드트립 + 질량보존/positivity 완료** / Malpasset·Toce·Carrier-Greenspan 현장 벤치 ⬜ |
 
 범례: ⬜ 미착수 · 🔨 진행 중 · ⚠️ 부분 · ✅ 완료
 

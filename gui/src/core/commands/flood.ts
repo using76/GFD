@@ -222,6 +222,60 @@ const floodBuild3dMesh: CommandDef<JsonObject, { cells: number; nodes: number }>
   },
 };
 
+const floodSetRain: CommandDef<JsonObject, { rain_rate: number; infil_rate: number }> = {
+  id: 'flood.set_rain',
+  category: 'flood',
+  group: 'Sources',
+  title: 'Set Rain',
+  titleKo: '강우 설정',
+  description: 'Set uniform rainfall + infiltration (rain-on-grid), rates in m/s applied each run (50 mm/h ≈ 1.39e-5 m/s). `rate` = rainfall, `infiltration` = loss.',
+  capability: 'mutate-scene',
+  paramsSchema: {
+    type: 'object',
+    properties: { rate: { type: 'number', minimum: 0 }, infiltration: { type: 'number', minimum: 0 } },
+  },
+  async run(params, ctx) {
+    const r = await ctx.rpc.request<{ rain_rate: number; infil_rate: number }>('flood.set_rain', params);
+    return { ok: true, result: r };
+  },
+};
+
+const floodAddInlet: CommandDef<JsonObject, { inlets: number; cells: number }> = {
+  id: 'flood.add_inlet',
+  category: 'flood',
+  group: 'Sources',
+  title: 'Add Inlet',
+  titleKo: '유입원 추가',
+  description: 'Add a hydrograph inlet: cells within `radius` of (x,y) are fed by discharge `hydrograph` [[t,Q],...] (m³/s) or a constant `q`.',
+  capability: 'mutate-scene',
+  paramsSchema: {
+    type: 'object',
+    properties: {
+      x: { type: 'number' }, y: { type: 'number' }, radius: { type: 'number', minimum: 0 },
+      q: { type: 'number' }, hydrograph: { type: 'array' },
+    },
+  },
+  async run(params, ctx) {
+    const r = await ctx.rpc.request<{ inlets: number; cells: number }>('flood.add_inlet', params);
+    return { ok: true, result: r };
+  },
+};
+
+const floodClearSources: CommandDef<JsonObject, { cleared: boolean }> = {
+  id: 'flood.clear_sources',
+  category: 'flood',
+  group: 'Sources',
+  title: 'Clear Sources',
+  titleKo: '소스 초기화',
+  description: 'Remove all rainfall, infiltration, and inlet sources.',
+  capability: 'mutate-scene',
+  paramsSchema: { type: 'object', properties: {} },
+  async run(_params, ctx) {
+    const r = await ctx.rpc.request<{ cleared: boolean }>('flood.clear_sources', {});
+    return { ok: true, result: r };
+  },
+};
+
 export function registerFloodCommands(registry: CommandRegistry): void {
   registry.register(floodLoadDem);
   registry.register(floodSeed);
@@ -231,5 +285,8 @@ export function registerFloodCommands(registry: CommandRegistry): void {
   registry.register(floodExportRaster);
   registry.register(floodZoom3d);
   registry.register(floodBuild3dMesh);
+  registry.register(floodSetRain);
+  registry.register(floodAddInlet);
+  registry.register(floodClearSources);
   registry.register(floodReset);
 }

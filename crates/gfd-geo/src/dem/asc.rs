@@ -147,6 +147,20 @@ NODATA_value -9999
     }
 
     #[test]
+    fn utm_coordinate_roundtrip_sub_micron() {
+        // FLOOD_PLAN §3 precision: a UTM-scale origin (>=5e5 m) must round-trip
+        // through parse with < 1e-6 coordinate error (f64, not f32).
+        let txt = "ncols 3\nnrows 2\nxllcorner 500123.456\nyllcorner 4000987.654\ncellsize 0.25\nNODATA_value -9999\n1 2 3\n4 5 6";
+        let d = parse_asc(txt).unwrap();
+        assert!((d.origin[0] - 500123.456).abs() < 1e-6, "x origin precision");
+        assert!((d.origin[1] - 4000987.654).abs() < 1e-6, "y origin precision");
+        assert!((d.cellsize - 0.25).abs() < 1e-12);
+        // Cell-center sampling lands on the stored value (NW cell = z[0] = 1).
+        let (cx, cy) = (d.origin[0] + 0.5 * d.cellsize, d.origin[1] + (d.nrows as f64 - 0.5) * d.cellsize);
+        assert!((d.sample(cx, cy).unwrap() - 1.0).abs() < 1e-9, "NW cell sample");
+    }
+
+    #[test]
     fn to_bed_field_walls_off_nodata() {
         let txt = "ncols 2\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 5\nNODATA_value -9999\n3 -9999";
         let d = parse_asc(txt).unwrap();

@@ -138,6 +138,40 @@ struct FloodState {
     max_depth: Vec<f64>,
     /// Per-cell time of first wetting (s); -1 = never wet.
     arrival_time: Vec<f64>,
+    /// Phase 7 sources: uniform rainfall + infiltration rates (m/s).
+    rain_rate: f64,
+    infil_rate: f64,
+    /// Hydrograph inlets (point/area inflow over time).
+    inlets: Vec<FloodInlet>,
+}
+
+/// A flood inflow source: a set of grid cells fed by a discharge hydrograph.
+struct FloodInlet {
+    cells: Vec<usize>,
+    /// (time_s, discharge_m3s) points, time-ascending; constant if single point.
+    hydro: Vec<(f64, f64)>,
+}
+
+impl FloodInlet {
+    /// Linearly interpolate discharge Q at time `t` (clamped at the ends).
+    fn discharge(&self, t: f64) -> f64 {
+        match self.hydro.as_slice() {
+            [] => 0.0,
+            [(_, q)] => *q,
+            pts => {
+                if t <= pts[0].0 { return pts[0].1; }
+                if t >= pts[pts.len() - 1].0 { return pts[pts.len() - 1].1; }
+                for w in pts.windows(2) {
+                    let ((t0, q0), (t1, q1)) = (w[0], w[1]);
+                    if t >= t0 && t <= t1 {
+                        let f = if t1 > t0 { (t - t0) / (t1 - t0) } else { 0.0 };
+                        return q0 + f * (q1 - q0);
+                    }
+                }
+                pts[pts.len() - 1].1
+            }
+        }
+    }
 }
 
 struct PrimitiveBody {
@@ -691,7 +725,11 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "flood.load_ifc" => handle_flood_load_ifc(state, req.id, &req.params),
         "flood.export_raster" => handle_flood_export_raster(state, req.id, &req.params),
         "flood.zoom_3d"  => handle_flood_zoom_3d(state, req.id, &req.params),
+        "flood.zoom_3d_run" => handle_flood_zoom_3d_run(state, req.id, &req.params),
         "flood.build_3d_mesh" => handle_flood_build_3d_mesh(state, req.id, &req.params),
+        "flood.set_rain" => handle_flood_set_rain(state, req.id, &req.params),
+        "flood.add_inlet" => handle_flood_add_inlet(state, req.id, &req.params),
+        "flood.clear_sources" => handle_flood_clear_sources(state, req.id),
         "flood.reset"    => handle_flood_reset(state, req.id),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
@@ -7096,7 +7134,10 @@ fn handle_flood_load_dem(state: &mut ServerState, id: u64, params: &Value) -> Rp
     let arrival_time = vec![-1.0; nc * nr];
     let bbox = dem.bounds();
     let range = dem.elevation_range();
-    state.flood = Some(FloodState { solver, state: st, origin: dem.origin, cellsize: cs, time: 0.0, max_depth, arrival_time });
+    state.flood = Some(FloodState {
+        solver, state: st, origin: dem.origin, cellsize: cs, time: 0.0, max_depth, arrival_time,
+        rain_rate: 0.0, infil_rate: 0.0, inlets: Vec::new(),
+    });
     RpcResponse::ok(id, serde_json::json!({
         "ncols": nc, "nrows": nr, "cellsize": cs, "origin": dem.origin,
         "bbox": bbox, "elevation_range": range,
@@ -7158,6 +7199,30 @@ fn handle_flood_run(state: &mut ServerState, id: u64, params: &Value) -> RpcResp
     let max_steps = params.get("steps").and_then(|v| v.as_u64()).unwrap_or(100_000) as usize;
     let t_end = params.get("t_end").and_then(|v| v.as_f64()).unwrap_or(1.0);
     let steps = fs.solver.advance(&mut fs.state, t_end, max_steps);
+    // Phase 7 sources (operator-split over t_end): rain, infiltration, inlets.
+    // For constant rates the lumped update is exact for the linear source ODE.
+    if fs.rain_rate != 0.0 || fs.infil_rate != 0.0 {
+        let net = (fs.rain_rate - fs.infil_rate) * t_end;
+        for i in 0..fs.state.h.len() {
+            let solid = fs.solver.solid_mask.as_ref().is_some_and(|m| m.get(i).copied().unwrap_or(false));
+            if !solid {
+                fs.state.h[i] = (fs.state.h[i] + net).max(0.0);
+            }
+        }
+    }
+    let cell_area = fs.cellsize * fs.cellsize;
+    for inlet in &fs.inlets {
+        if inlet.cells.is_empty() {
+            continue;
+        }
+        let q = inlet.discharge(fs.time); // discharge at the start of the step window
+        let dh = q * t_end / (inlet.cells.len() as f64 * cell_area);
+        for &i in &inlet.cells {
+            if i < fs.state.h.len() {
+                fs.state.h[i] = (fs.state.h[i] + dh).max(0.0);
+            }
+        }
+    }
     fs.time += t_end;
     let mut peak = 0.0_f64;
     let mut wet = 0usize;
@@ -7217,6 +7282,56 @@ fn handle_flood_result(state: &ServerState, id: u64, params: &Value) -> RpcRespo
 fn handle_flood_reset(state: &mut ServerState, id: u64) -> RpcResponse {
     state.flood = None;
     RpcResponse::ok(id, serde_json::json!({ "reset": true }))
+}
+
+/// Phase 7 — set uniform rainfall + infiltration (rain-on-grid). Rates in m/s
+/// (e.g. 50 mm/h = 50/3600/1000 ≈ 1.39e-5 m/s). Applied each `flood.run`.
+fn handle_flood_set_rain(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(fs) = state.flood.as_mut() else { return RpcResponse::err(id, "no flood scenario"); };
+    if let Some(r) = params.get("rate").and_then(|v| v.as_f64()) { fs.rain_rate = r.max(0.0); }
+    if let Some(i) = params.get("infiltration").and_then(|v| v.as_f64()) { fs.infil_rate = i.max(0.0); }
+    RpcResponse::ok(id, serde_json::json!({ "rain_rate": fs.rain_rate, "infil_rate": fs.infil_rate }))
+}
+
+/// Phase 7 — add a hydrograph inlet: cells within `radius` of (x,y) are fed by a
+/// discharge `hydrograph` `[[t,Q], ...]` (m³/s), or a constant `q`.
+fn handle_flood_add_inlet(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(fs) = state.flood.as_mut() else { return RpcResponse::err(id, "no flood scenario"); };
+    let nc = fs.solver.grid.ncols;
+    let nr = fs.solver.grid.nrows;
+    let cs = fs.cellsize;
+    let f = |k: &str, d: f64| params.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+    let (cx, cy, rad) = (f("x", fs.origin[0]), f("y", fs.origin[1]), f("radius", cs));
+    let cells: Vec<usize> = (0..nr).flat_map(|r| (0..nc).map(move |c| (c, r)))
+        .filter(|&(c, r)| {
+            let x = fs.origin[0] + (c as f64 + 0.5) * cs;
+            let y = fs.origin[1] + (nr as f64 - 1.0 - r as f64 + 0.5) * cs;
+            (x - cx).hypot(y - cy) <= rad
+        })
+        .map(|(c, r)| c + r * nc)
+        .collect();
+    if cells.is_empty() {
+        return RpcResponse::err(id, "inlet region contains no cells");
+    }
+    let hydro: Vec<(f64, f64)> = params.get("hydrograph").and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|p| {
+            let xy = p.as_array()?;
+            Some((xy.first()?.as_f64()?, xy.get(1)?.as_f64()?))
+        }).collect())
+        .filter(|v: &Vec<(f64, f64)>| !v.is_empty())
+        .unwrap_or_else(|| vec![(0.0, f("q", 0.0))]);
+    let n_cells = cells.len();
+    fs.inlets.push(FloodInlet { cells, hydro });
+    RpcResponse::ok(id, serde_json::json!({ "inlets": fs.inlets.len(), "cells": n_cells }))
+}
+
+/// Phase 7 — clear all rainfall/infiltration/inlet sources.
+fn handle_flood_clear_sources(state: &mut ServerState, id: u64) -> RpcResponse {
+    let Some(fs) = state.flood.as_mut() else { return RpcResponse::err(id, "no flood scenario"); };
+    fs.rain_rate = 0.0;
+    fs.infil_rate = 0.0;
+    fs.inlets.clear();
+    RpcResponse::ok(id, serde_json::json!({ "cleared": true }))
 }
 
 /// Export a flood field raster, georeferenced (origin restored). `format` =
@@ -7357,12 +7472,26 @@ fn handle_flood_load_ifc(state: &mut ServerState, id: u64, params: &Value) -> Rp
     }))
 }
 
-/// Phase 7 — 3D zoom-in one-way coupling: extract a sub-region of the current
-/// 2D SWE solution and initialize a 3D VOF field from it (alpha = water below the
-/// free surface, velocity = depth-averaged (u,v,0)). Returns coupling
-/// diagnostics; the 3D water volume should match the SWE sub-region volume.
-fn handle_flood_zoom_3d(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
-    let Some(fs) = state.flood.as_ref() else { return RpcResponse::err(id, "no flood scenario"); };
+/// A 3D zoom field built one-way from the 2D SWE state: VOF alpha column-fill +
+/// depth-averaged velocity over a sub-region (cell order i + j·nx + k·nx·ny,
+/// matching `StructuredMesh`).
+struct ZoomField {
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    dz: f64,
+    cs: f64,
+    z_bed_min: f64,
+    z_top: f64,
+    origin3d: [f64; 3],
+    alpha: Vec<f64>,
+    vel: Vec<[f64; 3]>,
+    max_speed: f64,
+    wet: usize,
+    swe_volume: f64,
+}
+
+fn flood_zoom_field(fs: &FloodState, params: &Value) -> Result<ZoomField, String> {
     let nc = fs.solver.grid.ncols;
     let nr = fs.solver.grid.nrows;
     let cs = fs.cellsize;
@@ -7372,7 +7501,6 @@ fn handle_flood_zoom_3d(state: &ServerState, id: u64, params: &Value) -> RpcResp
     let ymin = f("ymin", fs.origin[1]);
     let ymax = f("ymax", fs.origin[1] + nr as f64 * cs);
 
-    // Sub-region cell index bounds whose centers fall in the world box.
     let (mut c0, mut c1, mut r0, mut r1, mut any) = (nc, 0usize, nr, 0usize, false);
     for r in 0..nr {
         for c in 0..nc {
@@ -7385,12 +7513,11 @@ fn handle_flood_zoom_3d(state: &ServerState, id: u64, params: &Value) -> RpcResp
         }
     }
     if !any {
-        return RpcResponse::err(id, "zoom region contains no cells");
+        return Err("zoom region contains no cells".into());
     }
     let nx = c1 - c0 + 1;
     let ny = r1 - r0 + 1;
 
-    // Vertical extent over the sub-region.
     let (mut zbed_min, mut zsurf_max, mut hmax) = (f64::INFINITY, f64::NEG_INFINITY, 0.0_f64);
     for r in r0..=r1 {
         for c in c0..=c1 {
@@ -7405,48 +7532,96 @@ fn handle_flood_zoom_3d(state: &ServerState, id: u64, params: &Value) -> RpcResp
     let z_top = (zsurf_max + freeboard).max(zbed_min + cs);
     let lz = z_top - zbed_min;
     let nz = params.get("nz").and_then(|v| v.as_u64()).map(|v| v as usize)
-        .unwrap_or_else(|| ((lz / cs).ceil() as usize).clamp(5, 100)).max(1);
+        .unwrap_or_else(|| ((lz / cs).ceil() as usize).clamp(5, 100)).clamp(1, 100);
     let dz = lz / nz as f64;
     let h_dry = fs.solver.params.h_dry;
 
-    // Column-fill: alpha = 1 where the cell center is below the free surface.
     let mut alpha = vec![0.0_f64; nx * ny * nz];
-    let mut max_speed = 0.0_f64;
-    let mut wet = 0usize;
+    let mut vel = vec![[0.0_f64; 3]; nx * ny * nz];
+    let (mut max_speed, mut wet) = (0.0_f64, 0usize);
     for k in 0..nz {
         let zc = zbed_min + (k as f64 + 0.5) * dz;
         for j in 0..ny {
             for i in 0..nx {
-                // 3D voxel j increases northward; origin3d is the SW (south) corner
-                // at row r1, so j=0 → r1 (southernmost), j=ny-1 → r0.
+                // origin3d is the SW (south) corner at row r1; voxel j increases
+                // north, so j=0 → r1, j=ny-1 → r0.
                 let i2 = (c0 + i) + (r1 - j) * nc;
                 let (zb, h) = (fs.state.z_b[i2], fs.state.h[i2].max(0.0));
                 if h > h_dry && zc < zb + h {
-                    alpha[i + j * nx + k * nx * ny] = 1.0;
+                    let idx = i + j * nx + k * nx * ny;
+                    alpha[idx] = 1.0;
                     let (u, v) = gfd_fluid::shallow_water::velocity(&fs.state, i2, &fs.solver.params);
+                    vel[idx] = [u, v, 0.0];
                     max_speed = max_speed.max((u * u + v * v).sqrt());
                     wet += 1;
                 }
             }
         }
     }
-    let alpha_sum: f64 = alpha.iter().sum();
-    let water_volume_3d = alpha_sum * cs * cs * dz;
     let mut swe_volume = 0.0;
     for r in r0..=r1 {
         for c in c0..=c1 {
             swe_volume += fs.state.h[c + r * nc].max(0.0) * cs * cs;
         }
     }
+    let origin3d = [fs.origin[0] + c0 as f64 * cs, fs.origin[1] + (nr - 1 - r1) as f64 * cs, zbed_min];
+    Ok(ZoomField { nx, ny, nz, dz, cs, z_bed_min: zbed_min, z_top, origin3d, alpha, vel, max_speed, wet, swe_volume })
+}
+
+/// Phase 8 — 3D zoom-in one-way coupling: extract a sub-region of the current 2D
+/// SWE solution and initialize a 3D VOF field from it (alpha = water below the
+/// free surface, velocity = depth-averaged (u,v,0)). Returns coupling
+/// diagnostics; the 3D water volume should match the SWE sub-region volume.
+fn handle_flood_zoom_3d(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(fs) = state.flood.as_ref() else { return RpcResponse::err(id, "no flood scenario"); };
+    let zf = match flood_zoom_field(fs, params) { Ok(z) => z, Err(e) => return RpcResponse::err(id, e) };
+    let alpha_sum: f64 = zf.alpha.iter().sum();
+    let water_volume_3d = alpha_sum * zf.cs * zf.cs * zf.dz;
     // Confirm the coupled field constructs a valid 3D VOF solver.
     let _vof = gfd_fluid::multiphase::vof::VofSolverImpl::with_surface_tension(
-        ScalarField::new("alpha", alpha), 1.0, 0.0,
+        ScalarField::new("alpha", zf.alpha.clone()), 1.0, 0.0,
     );
-    let origin3d = [fs.origin[0] + c0 as f64 * cs, fs.origin[1] + (nr - 1 - r1) as f64 * cs, zbed_min];
     RpcResponse::ok(id, serde_json::json!({
-        "nx": nx, "ny": ny, "nz": nz, "dz": dz, "cellsize": cs, "origin": origin3d,
-        "z_bed_min": zbed_min, "z_top": z_top, "wet_cells": wet, "alpha_sum": alpha_sum,
-        "water_volume_3d": water_volume_3d, "swe_volume": swe_volume, "max_speed": max_speed,
+        "nx": zf.nx, "ny": zf.ny, "nz": zf.nz, "dz": zf.dz, "cellsize": zf.cs, "origin": zf.origin3d,
+        "z_bed_min": zf.z_bed_min, "z_top": zf.z_top, "wet_cells": zf.wet, "alpha_sum": alpha_sum,
+        "water_volume_3d": water_volume_3d, "swe_volume": zf.swe_volume, "max_speed": zf.max_speed,
+    }))
+}
+
+/// Phase 8 — advance the 3D VOF free surface for `steps` (default 10) on the
+/// SWE-coupled field, returning the evolved water volume + alpha bounds. The 3D
+/// velocity is the (frozen) depth-averaged SWE flow (one-way coupling).
+fn handle_flood_zoom_3d_run(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    use gfd_fluid::multiphase::vof::VofSolverImpl;
+    let Some(fs) = state.flood.as_ref() else { return RpcResponse::err(id, "no flood scenario"); };
+    let zf = match flood_zoom_field(fs, params) { Ok(z) => z, Err(e) => return RpcResponse::err(id, e) };
+    let (nx, ny, nz, cs, dz) = (zf.nx, zf.ny, zf.nz, zf.cs, zf.dz);
+    let steps = params.get("steps").and_then(|v| v.as_u64()).unwrap_or(10).clamp(1, 1000) as usize;
+    let dt = params.get("dt").and_then(|v| v.as_f64())
+        .unwrap_or_else(|| 0.3 * cs.min(dz) / zf.max_speed.max(0.05));
+    let cell_vol = cs * cs * dz;
+    let vol0 = zf.alpha.iter().sum::<f64>() * cell_vol;
+
+    let mesh = StructuredMesh::uniform(nx, ny, nz, nx as f64 * cs, ny as f64 * cs, nz as f64 * dz).to_unstructured();
+    let velf = VectorField::new("U", zf.vel);
+    let mut vof = VofSolverImpl::with_surface_tension(ScalarField::new("alpha", zf.alpha), 1.0, 0.0);
+    let mut ran = 0usize;
+    for _ in 0..steps {
+        if vof.solve_transport(&velf, &mesh, dt).is_err() {
+            break;
+        }
+        vof.bound_alpha();
+        ran += 1;
+    }
+    let a = vof.alpha.values();
+    let asum: f64 = a.iter().sum();
+    let amin = a.iter().cloned().fold(f64::INFINITY, f64::min);
+    let amax = a.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let finite = a.iter().all(|x| x.is_finite());
+    RpcResponse::ok(id, serde_json::json!({
+        "steps": ran, "dt": dt, "nx": nx, "ny": ny, "nz": nz,
+        "volume_initial": vol0, "volume_final": asum * cell_vol,
+        "alpha_min": amin, "alpha_max": amax, "finite": finite,
     }))
 }
 
@@ -7929,6 +8104,54 @@ mod tests {
         assert_eq!(e.result.unwrap()["format"], "geotiff");
         assert!(std::fs::metadata(&path).map(|m| m.len() > 100).unwrap_or(false), "geotiff file written");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn flood_zoom_3d_run_advances_vof() {
+        // The 3D VOF transient on the coupled field must run, stay bounded [0,1],
+        // and remain finite.
+        let asc = "ncols 12\nnrows 8\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n".to_string()
+            + &"0 0 0 0 0 0 0 0 0 0 0 0\n".repeat(8);
+        let mut state = ServerState::new();
+        handle_flood_load_dem(&mut state, 1, &serde_json::json!({ "asc": asc, "manning_n": 0.0 }));
+        handle_flood_seed(&mut state, 2, &serde_json::json!({ "kind": "dam_break", "axis": "x", "position": 4.0, "depth": 2.0 }));
+        handle_flood_run(&mut state, 3, &serde_json::json!({ "t_end": 0.5 }));
+        let r = handle_flood_zoom_3d_run(&state, 4, &serde_json::json!({ "nz": 12, "steps": 5 }));
+        let b = r.result.expect("vof transient ran");
+        assert!(b["finite"].as_bool().unwrap(), "alpha must stay finite");
+        assert!(b["alpha_max"].as_f64().unwrap() <= 1.0 + 1e-9, "alpha bounded above");
+        assert!(b["alpha_min"].as_f64().unwrap() >= -1e-9, "alpha bounded below");
+        assert!(b["steps"].as_u64().unwrap() >= 1, "at least one VOF step ran");
+    }
+
+    #[test]
+    fn flood_rain_adds_expected_volume() {
+        // Rain-on-grid over a closed flat basin: volume gain = rate·area·time.
+        let asc = "ncols 10\nnrows 10\nxllcorner 0\nyllcorner 0\ncellsize 2\nNODATA_value -9999\n".to_string()
+            + &"0 0 0 0 0 0 0 0 0 0\n".repeat(10);
+        let mut state = ServerState::new();
+        handle_flood_load_dem(&mut state, 1, &serde_json::json!({ "asc": asc, "manning_n": 0.0, "xmin": "wall", "xmax": "wall", "ymin": "wall", "ymax": "wall" }));
+        handle_flood_set_rain(&mut state, 2, &serde_json::json!({ "rate": 1.0e-3 })); // 1 mm/s
+        // 10×10 cells, cellsize 2 → area 400 m². rate 1e-3 m/s × 10 s = 1e-2 m → vol 4 m³.
+        let r = handle_flood_run(&mut state, 3, &serde_json::json!({ "t_end": 10.0 }));
+        let vol = r.result.unwrap()["volume"].as_f64().unwrap();
+        let expect = 1.0e-3 * 10.0 * 400.0;
+        assert!((vol - expect).abs() / expect < 1e-6, "rain volume {vol} vs {expect}");
+    }
+
+    #[test]
+    fn flood_inlet_injects_water() {
+        let asc = "ncols 12\nnrows 12\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n".to_string()
+            + &"0 0 0 0 0 0 0 0 0 0 0 0\n".repeat(12);
+        let mut state = ServerState::new();
+        handle_flood_load_dem(&mut state, 1, &serde_json::json!({ "asc": asc, "manning_n": 0.03 }));
+        let a = handle_flood_add_inlet(&mut state, 2, &serde_json::json!({ "x": 6.0, "y": 6.0, "radius": 1.5, "q": 2.0 }));
+        assert!(a.result.unwrap()["cells"].as_u64().unwrap() >= 1);
+        let v0 = { let fs = state.flood.as_ref().unwrap(); fs.solver.total_volume(&fs.state) };
+        handle_flood_run(&mut state, 3, &serde_json::json!({ "t_end": 3.0 }));
+        let v1 = { let fs = state.flood.as_ref().unwrap(); fs.solver.total_volume(&fs.state) };
+        // q=2 m³/s × 3 s = 6 m³ added (minus negligible outflow; walls default).
+        assert!(v1 - v0 > 5.0, "inlet should add ~6 m³, got {}", v1 - v0);
     }
 
     #[test]
