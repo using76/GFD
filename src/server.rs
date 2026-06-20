@@ -685,6 +685,8 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "flood.seed"     => handle_flood_seed(state, req.id, &req.params),
         "flood.run"      => handle_flood_run(state, req.id, &req.params),
         "flood.result"   => handle_flood_result(state, req.id, &req.params),
+        "flood.burn_buildings" => handle_flood_burn_buildings(state, req.id, &req.params),
+        "flood.load_ifc" => handle_flood_load_ifc(state, req.id, &req.params),
         "flood.reset"    => handle_flood_reset(state, req.id),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
@@ -7193,6 +7195,101 @@ fn handle_flood_reset(state: &mut ServerState, id: u64) -> RpcResponse {
     RpcResponse::ok(id, serde_json::json!({ "reset": true }))
 }
 
+/// Even-odd point-in-polygon test (world XY).
+fn point_in_poly(x: f64, y: f64, poly: &[[f64; 2]]) -> bool {
+    if poly.len() < 3 {
+        return false;
+    }
+    let mut hit = false;
+    let mut k = poly.len() - 1;
+    for i in 0..poly.len() {
+        let (xi, yi) = (poly[i][0], poly[i][1]);
+        let (xk, yk) = (poly[k][0], poly[k][1]);
+        if ((yi > y) != (yk > y)) && (x < (xk - xi) * (y - yi) / (yk - yi) + xi) {
+            hit = !hit;
+        }
+        k = i;
+    }
+    hit
+}
+
+/// Burn building footprints into the bed as impermeable high ground (Block
+/// method): raise z_b of every cell whose center lies in a footprint by
+/// `wall_height`, and clear any water there. Returns the burned-cell count.
+fn burn_footprints(fs: &mut FloodState, footprints: &[Vec<[f64; 2]>], wall_height: f64) -> usize {
+    let nc = fs.solver.grid.ncols;
+    let nr = fs.solver.grid.nrows;
+    let cs = fs.cellsize;
+    let mut burned = 0usize;
+    for r in 0..nr {
+        for c in 0..nc {
+            let x = fs.origin[0] + (c as f64 + 0.5) * cs;
+            let y = fs.origin[1] + (nr as f64 - 1.0 - r as f64 + 0.5) * cs;
+            if footprints.iter().any(|fp| point_in_poly(x, y, fp)) {
+                let i = c + r * nc;
+                fs.state.z_b[i] += wall_height;
+                fs.state.h[i] = 0.0;
+                fs.state.hu[i] = 0.0;
+                fs.state.hv[i] = 0.0;
+                fs.max_depth[i] = 0.0;
+                burned += 1;
+            }
+        }
+    }
+    burned
+}
+
+/// Burn explicit building footprints into the current flood bed (Block method).
+fn handle_flood_burn_buildings(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let wall = params.get("wall_height").and_then(|v| v.as_f64()).unwrap_or(1.0e4);
+    let footprints = parse_footprints(params.get("footprints"));
+    let Some(fs) = state.flood.as_mut() else { return RpcResponse::err(id, "no flood scenario"); };
+    if footprints.is_empty() {
+        return RpcResponse::err(id, "no footprints provided");
+    }
+    let burned = burn_footprints(fs, &footprints, wall);
+    RpcResponse::ok(id, serde_json::json!({ "buildings": footprints.len(), "burned_cells": burned }))
+}
+
+/// Load building footprints from an IFC file/text and burn them into the flood
+/// bed — the IFC ⇄ SWE coupling. Each element is raised by its own height (or
+/// `wall_height` if given). Requires a DEM-loaded flood scenario.
+fn handle_flood_load_ifc(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let model = if let Some(txt) = params.get("ifc").and_then(|v| v.as_str()) {
+        gfd_geo::ifc::parse_ifc(txt)
+    } else if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+        gfd_geo::ifc::read_ifc(std::path::Path::new(path))
+    } else {
+        return RpcResponse::err(id, "flood.load_ifc needs `ifc` (text) or `path`");
+    };
+    let model = match model { Ok(m) => m, Err(e) => return RpcResponse::err(id, format!("IFC load failed: {e}")) };
+    let forced = params.get("wall_height").and_then(|v| v.as_f64());
+    let bounds = model.bounds();
+    let Some(fs) = state.flood.as_mut() else { return RpcResponse::err(id, "no flood scenario — call flood.load_dem first"); };
+    let mut burned = 0usize;
+    let n_el = model.elements.len();
+    for el in &model.elements {
+        let wall = forced.unwrap_or(if el.height > 0.1 { el.height } else { 10.0 });
+        burned += burn_footprints(fs, &el.footprints, wall);
+    }
+    RpcResponse::ok(id, serde_json::json!({
+        "elements": n_el, "burned_cells": burned, "footprint_bounds": bounds,
+    }))
+}
+
+/// Parse a JSON `footprints: [[[x,y],...],...]` value into polygons.
+fn parse_footprints(v: Option<&Value>) -> Vec<Vec<[f64; 2]>> {
+    let Some(arr) = v.and_then(|v| v.as_array()) else { return Vec::new() };
+    arr.iter().filter_map(|poly| {
+        let pts = poly.as_array()?;
+        let loop_: Vec<[f64; 2]> = pts.iter().filter_map(|p| {
+            let xy = p.as_array()?;
+            Some([xy.first()?.as_f64()?, xy.get(1)?.as_f64()?])
+        }).collect();
+        if loop_.len() >= 3 { Some(loop_) } else { None }
+    }).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7463,6 +7560,28 @@ mod tests {
         assert!(vals.iter().all(|v| v.as_f64().unwrap() >= 0.0), "depths must be ≥ 0");
         // Water spread rightward past the dam line (cell 5 region now wet).
         assert!(vals[5].as_f64().unwrap() > 1e-3 || vals[6].as_f64().unwrap() > 1e-3, "front should advance past the dam");
+    }
+
+    #[test]
+    fn flood_burn_buildings_blocks_cells() {
+        // Load a flat DEM, burn a building footprint, confirm those cells become
+        // high ground (raised z_b) and stay dry even after running with water.
+        let asc = "ncols 10\nnrows 5\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n".to_string()
+            + &"0 0 0 0 0 0 0 0 0 0\n".repeat(5);
+        let mut state = ServerState::new();
+        handle_flood_load_dem(&mut state, 1, &serde_json::json!({ "asc": asc, "manning_n": 0.0 }));
+        // Burn a 2×2 m building around (4.5, 2.5).
+        let fp = serde_json::json!({ "footprints": [[[4.0, 2.0], [6.0, 2.0], [6.0, 4.0], [4.0, 4.0]]], "wall_height": 100.0 });
+        let b = handle_flood_burn_buildings(&mut state, 2, &fp);
+        let burned = b.result.unwrap()["burned_cells"].as_u64().unwrap();
+        assert!(burned >= 1, "building should burn ≥ 1 cell, got {burned}");
+        // Seed water everywhere to 1 m, run, then the burned cells must stay dry.
+        handle_flood_seed(&mut state, 3, &serde_json::json!({ "kind": "level", "level": 1.0 }));
+        handle_flood_run(&mut state, 4, &serde_json::json!({ "t_end": 1.0 }));
+        let res = handle_flood_result(&state, 5, &serde_json::json!({ "field": "depth" }));
+        let vals = res.result.unwrap()["values"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect::<Vec<_>>();
+        // Cell at (4.5, 2.5): col 4, and (nrows-1-r+0.5)=2.5 → r=2. index = 4 + 2*10 = 24.
+        assert!(vals[24] < 1e-6, "burned building cell should be dry, got {}", vals[24]);
     }
 
     #[test]

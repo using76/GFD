@@ -115,9 +115,51 @@ const floodReset: CommandDef<JsonObject, { reset: boolean }> = {
   },
 };
 
+const floodLoadIfc: CommandDef<JsonObject, { elements: number; burned_cells: number }> = {
+  id: 'flood.load_ifc',
+  category: 'flood',
+  group: 'Buildings',
+  title: 'Load IFC Buildings',
+  titleKo: 'IFC 건물 적용',
+  description: 'Load building footprints from an IFC file (`path`) or inline `ifc` text and burn them into the flood bed as impermeable high ground (Block method). Each element is raised by its own height unless `wall_height` is given. Requires a DEM-loaded scenario; IfcMapConversion georeferencing aligns the footprints to the DEM.',
+  capability: 'mutate-scene',
+  paramsSchema: {
+    type: 'object',
+    properties: { path: { type: 'string' }, ifc: { type: 'string' }, wall_height: { type: 'number', minimum: 0 } },
+  },
+  async run(params, ctx) {
+    const r = await ctx.rpc.request<{ elements: number; burned_cells: number }>('flood.load_ifc', params);
+    return { ok: true, result: r, statePatch: await refreshFlood(ctx, 'bed') };
+  },
+};
+
+const floodBurnBuildings: CommandDef<JsonObject, { buildings: number; burned_cells: number }> = {
+  id: 'flood.burn_buildings',
+  category: 'flood',
+  group: 'Buildings',
+  title: 'Burn Footprints',
+  titleKo: '건물 풋프린트 적용',
+  description: 'Burn explicit building footprints into the flood bed (Block method): `footprints` is an array of polygons [[[x,y],...],...] in world coords; cells inside are raised by `wall_height` (default 10000 m) and kept dry.',
+  capability: 'mutate-scene',
+  paramsSchema: {
+    type: 'object',
+    properties: {
+      footprints: { type: 'array' },
+      wall_height: { type: 'number', minimum: 0 },
+    },
+    required: ['footprints'],
+  },
+  async run(params, ctx) {
+    const r = await ctx.rpc.request<{ buildings: number; burned_cells: number }>('flood.burn_buildings', params);
+    return { ok: true, result: r, statePatch: await refreshFlood(ctx, 'bed') };
+  },
+};
+
 export function registerFloodCommands(registry: CommandRegistry): void {
   registry.register(floodLoadDem);
   registry.register(floodSeed);
   registry.register(floodRun);
+  registry.register(floodLoadIfc);
+  registry.register(floodBurnBuildings);
   registry.register(floodReset);
 }

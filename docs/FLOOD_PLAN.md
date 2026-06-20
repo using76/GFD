@@ -179,8 +179,9 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 - [x] **형상**: `IfcExtrudedAreaSolid`(IfcRectangleProfileDef + IfcArbitraryClosedProfileDef/IfcPolyline) → footprint 폴리곤 + 높이
 - [x] `IfcLocalPlacement` 체인 누적 translation (부재 배치) + `IfcExtrudedAreaSolid.Position`
 - [x] `IfcModel::footprints()` / `bounds()` — flood 건물 burn-in(Phase 5) 입력
-- [ ] `IfcFacetedBrep`/`IfcPolygonalFaceSet`/`IfcTriangulatedFaceSet` → TriMesh, 공간 위계(Project/Site/Storey)
-- [ ] **지오레퍼런싱**: `IfcMapConversion`+`IfcProjectedCRS` / `IfcSite.RefLat·Long`, 프로파일·배치 회전, 수동 배치 보정 API
+- [x] `IfcTriangulatedFaceSet`/`IfcPolygonalFaceSet` → XY convex-hull footprint + z-extent 높이
+- [x] **지오레퍼런싱**: `IfcMapConversion`(E/N + X축 회전 + scale) → footprint를 map CRS(DEM 좌표계)로 투영
+- [ ] `IfcFacetedBrep` full TriMesh, 공간 위계(Project/Site/Storey), `IfcSite.RefLat·Long`, 프로파일·배치 회전, 수동 배치 보정 API
 - 보조 경로: 복잡한 파일은 외부 IfcOpenShell `IfcConvert`로 STEP/OBJ 변환 후 기존 import 재사용 (fallback)
 
 ### Phase 4 — DEM → Mesh ⚠️
@@ -188,11 +189,11 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 - [ ] **3D(Track B)**: DEM 격자당 삼각형 2개 → 하이트필드 STL → `sdf_from_triangles` → `CutCellMesher` (줌인 트랙, 후순위)
 - [x] NODATA·경계 처리 (NODATA→wall), 도메인 클립(`Dem::crop`)
 
-### Phase 5 — 지형+건물 결합 ⬜
-- [ ] 건물 풋프린트 추출 (z투영 → 외곽 폴리곤)
-- [ ] **2D burn-in**: Block 방식(`z_b` 상향) MVP → Hole(reflective wall) → Roughness(Manning n 맵)
-- [ ] **3D**: `sdf_union(지형, 건물들)` 합성 SDF → cut-cell (메시 CSG보다 SDF union이 boundary 견고)
-- [ ] 건물-지형 접지면(foundation) 처리, 셀 분류 검증
+### Phase 5 — 지형+건물 결합 ⚠️
+- [x] 건물 풋프린트 추출 (IFC extrude 프로파일 / FaceSet convex hull → `gfd-geo::ifc`)
+- [x] **2D burn-in Block 방식**(`z_b` 상향 + 셀 건조화): 서버 `flood.burn_buildings`(명시 footprint) + `flood.load_ifc`(IFC→footprint→burn, IfcMapConversion 정합). point-in-polygon. command-core 명령 노출
+- [x] **IFC ⇄ SWE 결합** 검증 (`flood_burn_buildings_blocks_cells`: 건물 셀이 실행 후에도 건조 유지)
+- [ ] Hole(reflective wall) / Roughness(per-cell Manning) 방식, 3D `sdf_union` cut-cell, foundation 접지면 처리
 
 ### Phase 6 — 2D SWE 솔버 (`gfd-fluid/src/shallow_water/`) ⚠️ **(핵심·거의완료)**
 - [x] 보존변수 `[h, hu, hv]` 상태 + bed `z_b` (`SwState`, `SwGrid`, `SwParams`)
@@ -295,9 +296,9 @@ docs/
 | 0 Scaffolding | ✅ 완료 | gfd-geo 크레이트(workspace 등록) + `shallow_water` 모듈 + `examples/flood_dambreak_1d.json` 스키마 초안 |
 | 1 DEM I/O | ⚠️ 부분 | `.asc` 리더 + `Dem`(bilinear 샘플러·crop·downsample) ✅ / GeoTIFF·LAS·proj는 후순위 ⬜ |
 | 2 CRS/Georef | ⬜ | EPSG 재투영 + 로컬원점 시프트 + 한국 좌표계 프리셋 + f32 정밀도 가드 |
-| 3 IFC Reader | ⚠️ 부분 | **네이티브 IFC 토크나이저 + 단위(mm/cm/km→m) + 외피 요소(wall/slab/column/beam/roof/proxy) + IfcExtrudedAreaSolid(사각형·임의 폴리곤 프로파일) + IfcLocalPlacement → footprint+높이** (`gfd-geo::ifc`). FaceSet/Brep, MapConversion 지오레퍼런싱, 프로파일 회전 ⬜ |
+| 3 IFC Reader | ⚠️ 부분 | **토크나이저 + 단위 + 외피 요소 + IfcExtrudedAreaSolid(사각형·폴리곤) + Triangulated/Polygonal FaceSet(convex hull) + IfcLocalPlacement + IfcMapConversion 지오레퍼런싱 → footprint+높이** (`gfd-geo::ifc`). FacetedBrep full mesh, 공간 위계, 배치 회전 ⬜ |
 | 4 DEM→Mesh | ⚠️ 부분 | **2D Track A 완료**: `Dem::to_bed_field`→SwGrid+z_b (NODATA→wall), end-to-end 테스트 `tests/flood_dem_to_swe.rs` / 3D Track B(하이트필드 STL→cut-cell) ⬜ |
-| 5 결합 | ⬜ | 풋프린트 추출 + Block/Hole/Roughness burn-in + SDF union |
+| 5 결합 | ⚠️ 부분 | **풋프린트 추출 + Block burn-in(z_b 상향) + IFC→SWE 결합(flood.load_ifc/burn_buildings, MapConversion 정합) 완료·검증**, Hole/Roughness/3D SDF union ⬜ |
 | 6 SWE 솔버 | ✅ 완료 | HLLC + Audusse well-balanced + wetting/drying + positivity + Manning(semi-impl) + 적응 CFL + SSP-RK2 + **MUSCL 2차(minmod η-재구성 + 중앙 bed 소스)**. lake-at-rest C-property 1e-10(1·2차), Ritter 댐붕괴(MUSCL 오차 0.027 vs 1차 0.100), 질량보존 |
 | 7 홍수 BC | ⬜ | hydrograph / outflow / rainfall / wall |
 | 8 하이브리드 | ⬜ | SWE→3D VOF one-way coupling |

@@ -54,12 +54,13 @@ pub fn parse_ifc(text: &str) -> GeoResult<IfcModel> {
     let store = Store::parse(text)?;
     let length_scale = detect_length_scale(&store);
 
+    let map = detect_map_conversion(&store);
     let mut elements = Vec::new();
     for (&id, rec) in store.iter() {
         if !ENVELOPE.contains(&rec.ty.as_str()) {
             continue;
         }
-        if let Some(el) = extract_element(&store, id, rec, length_scale) {
+        if let Some(el) = extract_element(&store, id, rec, length_scale, map.as_ref()) {
             if !el.footprints.is_empty() {
                 elements.push(el);
             }
@@ -67,6 +68,44 @@ pub fn parse_ifc(text: &str) -> GeoResult<IfcModel> {
     }
     elements.sort_by_key(|e| e.id);
     Ok(IfcModel { length_scale, elements })
+}
+
+/// IFC4 `IfcMapConversion` — maps engineering (local) coords to the projected map
+/// CRS: (E,N) origin + a rotation from the X-axis direction + uniform scale.
+#[derive(Clone, Copy)]
+struct MapConversion {
+    e: f64,
+    n: f64,
+    cos: f64,
+    sin: f64,
+    scale: f64,
+}
+
+impl MapConversion {
+    fn apply(&self, x: f64, y: f64) -> [f64; 2] {
+        [
+            self.e + self.scale * (x * self.cos - y * self.sin),
+            self.n + self.scale * (x * self.sin + y * self.cos),
+        ]
+    }
+}
+
+fn detect_map_conversion(store: &Store) -> Option<MapConversion> {
+    for rec in store.values() {
+        if rec.ty == "IFCMAPCONVERSION" {
+            // floats (refs/strings skipped): Eastings, Northings, OrthogonalHeight,
+            // XAxisAbscissa, XAxisOrdinate, [Scale].
+            let f = rec.floats();
+            if f.len() >= 5 {
+                let (ax, ay) = (f[3], f[4]);
+                let mag = (ax * ax + ay * ay).sqrt();
+                let (cos, sin) = if mag > 1e-9 { (ax / mag, ay / mag) } else { (1.0, 0.0) };
+                let scale = f.get(5).copied().filter(|&s| s != 0.0).unwrap_or(1.0);
+                return Some(MapConversion { e: f[0], n: f[1], cos, sin, scale });
+            }
+        }
+    }
+    None
 }
 
 /// Length unit → metres. Scans IFCSIUNIT(.LENGTHUNIT.) for a MILLI/CENTI prefix.
@@ -85,7 +124,7 @@ fn detect_length_scale(store: &Store) -> f64 {
 
 /// Build an element from its product record: find its placement (translation)
 /// and representation's extruded solids → footprints + height.
-fn extract_element(store: &Store, id: u32, rec: &Record, scale: f64) -> Option<IfcElement> {
+fn extract_element(store: &Store, id: u32, rec: &Record, scale: f64, map: Option<&MapConversion>) -> Option<IfcElement> {
     let refs = rec.refs();
     let name = rec.string_arg(2).unwrap_or_default();
 
@@ -111,17 +150,37 @@ fn extract_element(store: &Store, id: u32, rec: &Record, scale: f64) -> Option<I
             continue;
         }
         for item in store.get(srep).map(|r| r.refs()).unwrap_or_default() {
-            if store.ty_of(item) == Some("IFCEXTRUDEDAREASOLID") {
-                if let Some((loop2d, h, z0)) = extruded_footprint(store, item, scale) {
-                    footprints.push(loop2d.iter().map(|p| [p[0] + ox * scale, p[1] + oy * scale]).collect());
-                    height = height.max(h);
-                    base_z = base_z.min(oz * scale + z0);
+            match store.ty_of(item) {
+                Some("IFCEXTRUDEDAREASOLID") => {
+                    if let Some((loop2d, h, z0)) = extruded_footprint(store, item, scale) {
+                        let world: Vec<[f64; 2]> = loop2d.iter().map(|p| [p[0] + ox * scale, p[1] + oy * scale]).collect();
+                        footprints.push(world);
+                        height = height.max(h);
+                        base_z = base_z.min(oz * scale + z0);
+                    }
                 }
+                // IFC4 tessellated geometry → convex-hull plan outline.
+                Some("IFCTRIANGULATEDFACESET") | Some("IFCPOLYGONALFACESET") => {
+                    if let Some((hull, zlo, zhi)) = faceset_footprint(store, item, scale) {
+                        footprints.push(hull.iter().map(|p| [p[0] + ox * scale, p[1] + oy * scale]).collect());
+                        height = height.max(zhi - zlo);
+                        base_z = base_z.min(oz * scale + zlo);
+                    }
+                }
+                _ => {}
             }
         }
     }
     if footprints.is_empty() {
         return None;
+    }
+    // Apply IfcMapConversion → project footprints into the map (DEM) CRS.
+    if let Some(m) = map {
+        for fp in &mut footprints {
+            for p in fp.iter_mut() {
+                *p = m.apply(p[0], p[1]);
+            }
+        }
     }
     Some(IfcElement { id, ifc_type: rec.ty.clone(), name, footprints, base_z, height })
 }
@@ -219,6 +278,61 @@ fn polyline_loop(store: &Store, curve: u32, scale: f64) -> Option<Vec<[f64; 2]>>
     if pts.len() < 3 { None } else { Some(pts) }
 }
 
+/// Footprint of a tessellated face set: the XY convex hull of its coordinate
+/// list, plus the z-extent (for height). Coordinates come from the referenced
+/// IfcCartesianPointList3D (a flat `((x,y,z),...)` list).
+fn faceset_footprint(store: &Store, faceset: u32, scale: f64) -> Option<(Vec<[f64; 2]>, f64, f64)> {
+    let rec = store.get(faceset)?;
+    // Coordinates ref (IfcCartesianPointList3D) — the first entity reference.
+    let coords = *rec.refs().first()?;
+    let cl = store.get(coords)?;
+    let f = cl.floats();
+    if f.len() < 9 {
+        return None;
+    }
+    let mut pts2d = Vec::with_capacity(f.len() / 3);
+    let mut zlo = f64::INFINITY;
+    let mut zhi = f64::NEG_INFINITY;
+    for t in f.chunks_exact(3) {
+        pts2d.push([t[0] * scale, t[1] * scale]);
+        zlo = zlo.min(t[2] * scale);
+        zhi = zhi.max(t[2] * scale);
+    }
+    let hull = convex_hull(&pts2d);
+    if hull.len() < 3 {
+        None
+    } else {
+        Some((hull, zlo, zhi))
+    }
+}
+
+/// 2D convex hull (Andrew's monotone chain), CCW, no repeated endpoint.
+fn convex_hull(pts: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    let mut p: Vec<[f64; 2]> = pts.to_vec();
+    p.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap().then(a[1].partial_cmp(&b[1]).unwrap()));
+    p.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9);
+    if p.len() < 3 {
+        return p;
+    }
+    let cross = |o: [f64; 2], a: [f64; 2], b: [f64; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let mut hull: Vec<[f64; 2]> = Vec::new();
+    for &pt in &p {
+        while hull.len() >= 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], pt) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(pt);
+    }
+    let lower = hull.len() + 1;
+    for &pt in p.iter().rev() {
+        while hull.len() >= lower && cross(hull[hull.len() - 2], hull[hull.len() - 1], pt) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(pt);
+    }
+    hull.pop();
+    hull
+}
+
 impl IfcModel {
     /// Convenience: every footprint loop across all elements (world XY, metres).
     pub fn footprints(&self) -> Vec<Vec<[f64; 2]>> {
@@ -290,6 +404,59 @@ END-ISO-10303-21;";
         // Centered at (1.0, 2.0): xmin≈-1.5, xmax≈3.5.
         assert!((xmin - (-1.5)).abs() < 1e-9 && (xmax - 3.5).abs() < 1e-9, "x centered at 1.0");
         assert!((ymin - 1.85).abs() < 1e-9 && (ymax - 2.15).abs() < 1e-9, "y centered at 2.0");
+    }
+
+    #[test]
+    fn map_conversion_projects_footprint_to_crs() {
+        // IfcMapConversion shifts the local footprint into the projected CRS.
+        let ifc = "\
+ISO-10303-21;
+DATA;
+#1=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);
+#5=IFCMAPCONVERSION(#90,#91,500000.,4000000.,0.,1.,0.,1.);
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCLOCALPLACEMENT($,#11);
+#20=IFCAXIS2PLACEMENT2D(#10,$);
+#22=IFCRECTANGLEPROFILEDEF(.AREA.,$,#20,2.,2.);
+#23=IFCDIRECTION((0.,0.,1.));
+#24=IFCEXTRUDEDAREASOLID(#22,#11,#23,3.);
+#30=IFCSHAPEREPRESENTATION(#99,'Body','SweptSolid',(#24));
+#31=IFCPRODUCTDEFINITIONSHAPE($,$,(#30));
+#40=IFCWALL('guid',$,'W',$,$,#12,#31,$);
+ENDSEC;
+END-ISO-10303-21;";
+        let m = parse_ifc(ifc).unwrap();
+        let b = m.bounds().unwrap();
+        // 2×2 m centered at origin, shifted by (5e5, 4e6).
+        assert!((b[0] - 499999.0).abs() < 1e-6 && (b[2] - 500001.0).abs() < 1e-6, "x bounds {b:?}");
+        assert!((b[1] - 3999999.0).abs() < 1e-6 && (b[3] - 4000001.0).abs() < 1e-6, "y bounds {b:?}");
+    }
+
+    #[test]
+    fn triangulated_faceset_footprint() {
+        // A box as a triangulated face set → convex-hull footprint (the XY square).
+        let ifc = "\
+ISO-10303-21;
+DATA;
+#1=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCLOCALPLACEMENT($,#11);
+#50=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(6.,0.,0.),(6.,4.,0.),(0.,4.,0.),(0.,0.,3.),(6.,0.,3.),(6.,4.,3.),(0.,4.,3.)));
+#51=IFCTRIANGULATEDFACESET(#50,$,$,((1,2,3),(1,3,4),(5,6,7)),$);
+#30=IFCSHAPEREPRESENTATION(#99,'Body','Tessellation',(#51));
+#31=IFCPRODUCTDEFINITIONSHAPE($,$,(#30));
+#40=IFCBUILDINGELEMENTPROXY('guid',$,'Bldg',$,$,#12,#31,$);
+ENDSEC;
+END-ISO-10303-21;";
+        let m = parse_ifc(ifc).unwrap();
+        assert_eq!(m.elements.len(), 1);
+        let e = &m.elements[0];
+        assert!((e.height - 3.0).abs() < 1e-9, "z-extent → height 3, got {}", e.height);
+        let b = m.bounds().unwrap();
+        assert!((b[0]).abs() < 1e-9 && (b[2] - 6.0).abs() < 1e-9 && (b[3] - 4.0).abs() < 1e-9, "hull bounds {b:?}");
+        assert_eq!(e.footprints[0].len(), 4, "box hull = 4 corners");
     }
 
     #[test]
