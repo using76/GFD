@@ -687,6 +687,7 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "flood.result"   => handle_flood_result(state, req.id, &req.params),
         "flood.burn_buildings" => handle_flood_burn_buildings(state, req.id, &req.params),
         "flood.load_ifc" => handle_flood_load_ifc(state, req.id, &req.params),
+        "flood.export_raster" => handle_flood_export_raster(state, req.id, &req.params),
         "flood.reset"    => handle_flood_reset(state, req.id),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
@@ -7195,6 +7196,40 @@ fn handle_flood_reset(state: &mut ServerState, id: u64) -> RpcResponse {
     RpcResponse::ok(id, serde_json::json!({ "reset": true }))
 }
 
+/// Export a flood field raster as a georeferenced ESRI ASCII grid (.asc) — the
+/// origin (lower-left) is restored, so it round-trips with the DEM reader and
+/// loads in QGIS/ArcGIS. `field` = depth | max | velocity | bed.
+fn handle_flood_export_raster(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(fs) = state.flood.as_ref() else { return RpcResponse::err(id, "no flood scenario"); };
+    let Some(path) = params.get("path").and_then(|v| v.as_str()) else { return RpcResponse::err(id, "missing path"); };
+    let field = params.get("field").and_then(|v| v.as_str()).unwrap_or("depth");
+    let nc = fs.solver.grid.ncols;
+    let nr = fs.solver.grid.nrows;
+    let vals: Vec<f64> = match field {
+        "depth" => fs.state.h.iter().map(|&h| h.max(0.0)).collect(),
+        "max" => fs.max_depth.clone(),
+        "bed" => fs.state.z_b.clone(),
+        "velocity" => (0..fs.state.h.len()).map(|i| {
+            let (u, v) = gfd_fluid::shallow_water::velocity(&fs.state, i, &fs.solver.params);
+            (u * u + v * v).sqrt()
+        }).collect(),
+        other => return RpcResponse::err(id, format!("unknown field: {other}")),
+    };
+    let mut s = String::with_capacity(nc * nr * 8 + 128);
+    s.push_str(&format!("ncols {nc}\nnrows {nr}\n"));
+    s.push_str(&format!("xllcorner {}\nyllcorner {}\n", fs.origin[0], fs.origin[1]));
+    s.push_str(&format!("cellsize {}\nNODATA_value -9999\n", fs.cellsize));
+    for r in 0..nr {
+        let row: Vec<String> = (0..nc).map(|c| format!("{:.4}", vals[c + r * nc])).collect();
+        s.push_str(&row.join(" "));
+        s.push('\n');
+    }
+    match std::fs::write(path, s) {
+        Ok(_) => RpcResponse::ok(id, serde_json::json!({ "path": path, "field": field, "ncols": nc, "nrows": nr })),
+        Err(e) => RpcResponse::err(id, format!("write failed: {e}")),
+    }
+}
+
 /// Even-odd point-in-polygon test (world XY).
 fn point_in_poly(x: f64, y: f64, poly: &[[f64; 2]]) -> bool {
     if poly.len() < 3 {
@@ -7582,6 +7617,26 @@ mod tests {
         let vals = res.result.unwrap()["values"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect::<Vec<_>>();
         // Cell at (4.5, 2.5): col 4, and (nrows-1-r+0.5)=2.5 → r=2. index = 4 + 2*10 = 24.
         assert!(vals[24] < 1e-6, "burned building cell should be dry, got {}", vals[24]);
+    }
+
+    #[test]
+    fn flood_export_raster_roundtrips() {
+        // Export a depth raster to .asc and re-read it with the DEM reader.
+        let asc = "ncols 4\nnrows 2\nxllcorner 100\nyllcorner 200\ncellsize 10\nNODATA_value -9999\n0 0 0 0\n0 0 0 0";
+        let mut state = ServerState::new();
+        handle_flood_load_dem(&mut state, 1, &serde_json::json!({ "asc": asc, "manning_n": 0.0 }));
+        handle_flood_seed(&mut state, 2, &serde_json::json!({ "kind": "level", "level": 1.5 }));
+        let mut path = std::env::temp_dir();
+        path.push("gfd_flood_export_test.asc");
+        let p = path.to_string_lossy().to_string();
+        let r = handle_flood_export_raster(&state, 3, &serde_json::json!({ "path": p, "field": "depth" }));
+        assert!(r.result.is_some(), "export should succeed");
+        // Re-read: a georeferenced grid with the same dims + origin, depth 1.5.
+        let dem = gfd_geo::dem::read_asc(&path).unwrap();
+        assert_eq!((dem.ncols, dem.nrows), (4, 2));
+        assert_eq!(dem.origin, [100.0, 200.0]);
+        assert!((dem.z[0] - 1.5).abs() < 1e-3, "exported depth should be 1.5, got {}", dem.z[0]);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -16,6 +16,7 @@ import { FeatureTreePanel } from './FeatureTreePanel';
 import { ResultsPanel } from './ResultsPanel';
 import { ViewportV2 } from './engine/ViewportV2';
 import { DisplayToolbar } from './DisplayToolbar';
+import { FloodToolbar } from './FloodToolbar';
 import { McpControlResponder } from './McpControlResponder';
 
 function StatusBar() {
@@ -63,6 +64,7 @@ function Shell() {
         </div>
         <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
           <DisplayToolbar />
+          <FloodToolbar />
           <ViewportV2 />
         </div>
       </div>

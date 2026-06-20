@@ -224,8 +224,10 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 - [x] **command-core flood 명령** (`flood.ts`: load_dem/seed/run/reset) → AppState.flood 패치. **AI·MCP·리본 자동 노출**
 - [x] **GUI 렌더러** `FloodLayer` (ViewportV2): z_b 하이트필드 + 수심 컬러맵(건조=지형색, 수심=파랑 램프, 로컬원점 시프트)
 - [x] **최대침수심(hazard)** max-depth 누적 (`flood.result field=max`)
-- [ ] 도달시간(arrival time) / v·√h hazard 래스터, **GeoTIFF/VTK export**(원점 unshift), 시간 슬라이더·런 패널 UI
-- [ ] `flood.load_ifc` / `flood.build_mesh`(건물 burn-in 연동, Phase 3·5 후)
+- [x] **래스터 export** `flood.export_raster` — georeferenced ESRI ASCII(.asc, 원점 복원, QGIS/ArcGIS 호환, DEM 리더와 round-trip)
+- [x] **시간 스텝 UI** `FloodToolbar` — 필드 선택(depth/max/velocity) + Δt 슬라이더 + Run/Run×5 + 시간·peak 표시 + export/reset
+- [x] **`flood.load_ifc`** 건물 burn-in 연동 (Phase 5)
+- [ ] 도달시간(arrival time) / v·√h hazard 래스터, **GeoTIFF**(tiff 크레이트), 과거 프레임 scrub-back(히스토리 저장)
 
 ### Phase 10 — 검증 (Validation) ⬜
 - [ ] **Ritter/Stoker 댐붕괴** 해석해 (1D, well-balanced·wetting/drying 1차 검증)
@@ -302,7 +304,7 @@ docs/
 | 6 SWE 솔버 | ✅ 완료 | HLLC + Audusse well-balanced + wetting/drying + positivity + Manning(semi-impl) + 적응 CFL + SSP-RK2 + **MUSCL 2차(minmod η-재구성 + 중앙 bed 소스)**. lake-at-rest C-property 1e-10(1·2차), Ritter 댐붕괴(MUSCL 오차 0.027 vs 1차 0.100), 질량보존 |
 | 7 홍수 BC | ⬜ | hydrograph / outflow / rainfall / wall |
 | 8 하이브리드 | ⬜ | SWE→3D VOF one-way coupling |
-| 9 후처리/GUI | ⚠️ 부분 | **flood.* RPC(load_dem/seed/run/result/reset) + command-core flood 명령(AI/MCP/리본) + AppState.flood + FloodLayer(지형 위 수심 컬러맵) 완료**, max-depth hazard / GeoTIFF·VTK export·시간 슬라이더 UI ⬜ |
+| 9 후처리/GUI | ⚠️ 거의완료 | **flood.* RPC(load_dem/seed/run/result/burn/load_ifc/export/reset) + command-core 명령(AI/MCP/리본) + AppState.flood + FloodLayer(수심 컬러맵) + FloodToolbar(시간 스텝·필드·export UI) + max-depth hazard + georeferenced .asc export 완료**, 도달시간/GeoTIFF/scrub-back ⬜ |
 | 10 검증 | ⬜ | Ritter/Stoker, lake-at-rest, Malpasset, Toce, Carrier-Greenspan |
 
 범례: ⬜ 미착수 · 🔨 진행 중 · ⚠️ 부분 · ✅ 완료

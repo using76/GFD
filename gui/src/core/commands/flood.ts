@@ -155,11 +155,31 @@ const floodBurnBuildings: CommandDef<JsonObject, { buildings: number; burned_cel
   },
 };
 
+const floodExportRaster: CommandDef<JsonObject, { path: string; ncols: number; nrows: number }> = {
+  id: 'flood.export_raster',
+  category: 'flood',
+  group: 'Run',
+  title: 'Export Raster',
+  titleKo: '래스터 내보내기',
+  description: 'Write a flood field to a georeferenced ESRI ASCII grid (.asc) at `path` (loads in QGIS/ArcGIS, round-trips with the DEM reader). `field` = depth | max | velocity | bed.',
+  capability: 'read',
+  paramsSchema: {
+    type: 'object',
+    properties: { path: { type: 'string' }, field: { type: 'string' } },
+    required: ['path'],
+  },
+  async run(params, ctx) {
+    const r = await ctx.rpc.request<{ path: string; ncols: number; nrows: number }>('flood.export_raster', params);
+    return { ok: true, result: r };
+  },
+};
+
 export function registerFloodCommands(registry: CommandRegistry): void {
   registry.register(floodLoadDem);
   registry.register(floodSeed);
   registry.register(floodRun);
   registry.register(floodLoadIfc);
   registry.register(floodBurnBuildings);
+  registry.register(floodExportRaster);
   registry.register(floodReset);
 }
