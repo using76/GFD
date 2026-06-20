@@ -44,4 +44,5 @@ export type CommandCategory =
   | 'view'
   | 'selection'
   | 'physics'
+  | 'flood'
   | 'system';

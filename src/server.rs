@@ -20,6 +20,7 @@ use gfd_core::field::{ScalarField, VectorField};
 use gfd_core::mesh::structured::StructuredMesh;
 use gfd_core::mesh::unstructured::UnstructuredMesh;
 use gfd_fluid::incompressible::simple::SimpleSolver;
+use gfd_fluid::shallow_water::{SwBoundaries, SwGrid, SwParams, SwSolver, SwState};
 use gfd_fluid::FluidState;
 use gfd_mesh::quality::metrics::compute_mesh_quality;
 use gfd_thermal::conduction::ConductionSolver;
@@ -120,6 +121,21 @@ struct ServerState {
     /// Map from GUI shape string id ("shape_N") to a Gmsh OCC solid tag.
     #[cfg(feature = "gmsh")]
     gmsh_shapes: HashMap<String, i32>,
+    /// Active 2D flood (shallow-water) scenario, if loaded (Phase 9).
+    flood: Option<FloodState>,
+}
+
+/// A loaded flood scenario: the SWE solver + state + geo-referencing, so the GUI
+/// can load a DEM, seed water, run, and fetch depth rasters for rendering.
+struct FloodState {
+    solver: SwSolver,
+    state: SwState,
+    /// Lower-left corner (world coords) + cell size, for georeferenced output.
+    origin: [f64; 2],
+    cellsize: f64,
+    time: f64,
+    /// Per-cell maximum water depth seen so far (hazard map).
+    max_depth: Vec<f64>,
 }
 
 struct PrimitiveBody {
@@ -170,6 +186,7 @@ impl ServerState {
             gmsh: None,
             #[cfg(feature = "gmsh")]
             gmsh_shapes: HashMap::new(),
+            flood: None,
         }
     }
 }
@@ -664,6 +681,11 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "field.objective" => handle_field_objective(state, req.id, &req.params),
         "field.export_vtk" => handle_field_export_vtk(state, req.id, &req.params),
         "field.streamlines" => handle_field_streamlines(state, req.id, &req.params),
+        "flood.load_dem" => handle_flood_load_dem(state, req.id, &req.params),
+        "flood.seed"     => handle_flood_seed(state, req.id, &req.params),
+        "flood.run"      => handle_flood_run(state, req.id, &req.params),
+        "flood.result"   => handle_flood_result(state, req.id, &req.params),
+        "flood.reset"    => handle_flood_reset(state, req.id),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
     }
@@ -7036,6 +7058,141 @@ fn main() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Flood (2D shallow-water) RPC — Phase 9 GUI integration
+// ---------------------------------------------------------------------------
+
+/// Load a DEM (.asc text or file path) into a flood scenario: builds the SWE
+/// grid + bed field (NODATA → wall) and an all-dry initial state.
+fn handle_flood_load_dem(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let dem = if let Some(txt) = params.get("asc").and_then(|v| v.as_str()) {
+        gfd_geo::dem::parse_asc(txt)
+    } else if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+        gfd_geo::dem::read_asc(std::path::Path::new(path))
+    } else {
+        return RpcResponse::err(id, "flood.load_dem needs `asc` (text) or `path`");
+    };
+    let dem = match dem { Ok(d) => d, Err(e) => return RpcResponse::err(id, format!("DEM load failed: {e}")) };
+    let (nc, nr, cs, z_b) = dem.to_bed_field(None);
+    let f = |k: &str, d: f64| params.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+    let order = params.get("order").and_then(|v| v.as_u64()).unwrap_or(2) as u8;
+    let p = SwParams { gravity: 9.81, manning_n: f("manning_n", 0.03), h_dry: 1e-4, cfl: f("cfl", 0.45), order };
+    // Boundary: default transmissive (open domain) so flood can leave the edges.
+    let open = |k: &str| match params.get(k).and_then(|v| v.as_str()) {
+        Some("wall") => gfd_fluid::shallow_water::SwBc::Wall,
+        _ => gfd_fluid::shallow_water::SwBc::Transmissive,
+    };
+    let bc = SwBoundaries { xmin: open("xmin"), xmax: open("xmax"), ymin: open("ymin"), ymax: open("ymax") };
+    let solver = SwSolver::new(SwGrid::new(nc, nr, cs, cs), p, bc);
+    let st = SwState::dry(z_b);
+    let max_depth = vec![0.0; nc * nr];
+    let bbox = dem.bounds();
+    let range = dem.elevation_range();
+    state.flood = Some(FloodState { solver, state: st, origin: dem.origin, cellsize: cs, time: 0.0, max_depth });
+    RpcResponse::ok(id, serde_json::json!({
+        "ncols": nc, "nrows": nr, "cellsize": cs, "origin": dem.origin,
+        "bbox": bbox, "elevation_range": range,
+    }))
+}
+
+/// Seed initial water: kind = "level" (fill below a free surface),
+/// "disk" (a circular pool), or "dam_break" (fill one side of an axis line).
+fn handle_flood_seed(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(fs) = state.flood.as_mut() else { return RpcResponse::err(id, "no flood scenario — call flood.load_dem first"); };
+    let nc = fs.solver.grid.ncols;
+    let nr = fs.solver.grid.nrows;
+    let cs = fs.cellsize;
+    let f = |k: &str, d: f64| params.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("level");
+    let cell_xy = |c: usize, r: usize| -> (f64, f64) {
+        (fs.origin[0] + (c as f64 + 0.5) * cs, fs.origin[1] + (nr as f64 - 1.0 - r as f64 + 0.5) * cs)
+    };
+    match kind {
+        "level" => {
+            let level = f("level", 0.0);
+            for i in 0..nc * nr { fs.state.h[i] = (level - fs.state.z_b[i]).max(0.0); }
+        }
+        "disk" => {
+            let (cx, cy, rad, depth) = (f("x", 0.0), f("y", 0.0), f("radius", cs * 3.0), f("depth", 1.0));
+            for r in 0..nr { for c in 0..nc {
+                let (x, y) = cell_xy(c, r);
+                if (x - cx).hypot(y - cy) <= rad { fs.state.h[c + r * nc] = depth.max(0.0); }
+            }}
+        }
+        "dam_break" => {
+            let axis = params.get("axis").and_then(|v| v.as_str()).unwrap_or("x");
+            let pos = f("position", fs.origin[0] + nc as f64 * cs * 0.5);
+            let depth = f("depth", 1.0);
+            for r in 0..nr { for c in 0..nc {
+                let (x, y) = cell_xy(c, r);
+                let upstream = if axis == "y" { y < pos } else { x < pos };
+                if upstream { fs.state.h[c + r * nc] = (depth - fs.state.z_b[c + r * nc]).max(0.0); }
+            }}
+        }
+        other => return RpcResponse::err(id, format!("unknown seed kind: {other}")),
+    }
+    // Reset momentum + time + hazard for a fresh scenario.
+    fs.state.hu.iter_mut().for_each(|x| *x = 0.0);
+    fs.state.hv.iter_mut().for_each(|x| *x = 0.0);
+    fs.time = 0.0;
+    for i in 0..fs.max_depth.len() { fs.max_depth[i] = fs.state.h[i]; }
+    let vol = fs.solver.total_volume(&fs.state);
+    RpcResponse::ok(id, serde_json::json!({ "seeded": kind, "volume": vol }))
+}
+
+/// Advance the flood by `t_end` seconds (or `steps` steps) and update the hazard
+/// (max-depth) map. Returns the new time, wet-cell count, and peak depth.
+fn handle_flood_run(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(fs) = state.flood.as_mut() else { return RpcResponse::err(id, "no flood scenario"); };
+    let max_steps = params.get("steps").and_then(|v| v.as_u64()).unwrap_or(100_000) as usize;
+    let t_end = params.get("t_end").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let steps = fs.solver.advance(&mut fs.state, t_end, max_steps);
+    fs.time += t_end;
+    let mut peak = 0.0_f64;
+    let mut wet = 0usize;
+    for i in 0..fs.state.h.len() {
+        let h = fs.state.h[i].max(0.0);
+        if h > fs.max_depth[i] { fs.max_depth[i] = h; }
+        if h > 1e-3 { wet += 1; }
+        peak = peak.max(h);
+    }
+    let vol = fs.solver.total_volume(&fs.state);
+    RpcResponse::ok(id, serde_json::json!({
+        "time": fs.time, "steps": steps, "wet_cells": wet, "peak_depth": peak, "volume": vol,
+    }))
+}
+
+/// Return a raster of the requested field for rendering: "depth" (current),
+/// "max" (hazard), "velocity" (speed magnitude), or "bed" (z_b).
+fn handle_flood_result(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(fs) = state.flood.as_ref() else { return RpcResponse::err(id, "no flood scenario"); };
+    let field = params.get("field").and_then(|v| v.as_str()).unwrap_or("depth");
+    let nc = fs.solver.grid.ncols;
+    let nr = fs.solver.grid.nrows;
+    let vals: Vec<f64> = match field {
+        "depth" => fs.state.h.iter().map(|&h| h.max(0.0)).collect(),
+        "max" => fs.max_depth.clone(),
+        "bed" => fs.state.z_b.clone(),
+        "velocity" => (0..fs.state.h.len()).map(|i| {
+            let (u, v) = gfd_fluid::shallow_water::velocity(&fs.state, i, &fs.solver.params);
+            (u * u + v * v).sqrt()
+        }).collect(),
+        other => return RpcResponse::err(id, format!("unknown field: {other}")),
+    };
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for &v in &vals { if v.is_finite() { lo = lo.min(v); hi = hi.max(v); } }
+    RpcResponse::ok(id, serde_json::json!({
+        "field": field, "ncols": nc, "nrows": nr, "cellsize": fs.cellsize, "origin": fs.origin,
+        "z_b": fs.state.z_b, "values": vals, "range": [lo, hi], "time": fs.time,
+    }))
+}
+
+fn handle_flood_reset(state: &mut ServerState, id: u64) -> RpcResponse {
+    state.flood = None;
+    RpcResponse::ok(id, serde_json::json!({ "reset": true }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7279,6 +7436,33 @@ mod tests {
         let ctr = r["centroid"].as_array().unwrap();
         assert!((ctr[2].as_f64().unwrap() - 1.0).abs() < 1e-6, "top face centroid z should be 1");
         assert!((r["distance"].as_f64().unwrap() - 4.0).abs() < 1e-6, "distance from z=5 to z=1 is 4");
+    }
+
+    #[test]
+    fn flood_load_seed_run_result_pipeline() {
+        // End-to-end flood RPC: load a tiny .asc DEM, seed a pool, run, fetch depth.
+        let asc = "ncols 10\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n0 0 0 0 0 0 0 0 0 0";
+        let mut state = ServerState::new();
+        let r = handle_flood_load_dem(&mut state, 1, &serde_json::json!({ "asc": asc, "manning_n": 0.0 }));
+        assert_eq!(r.result.unwrap()["ncols"].as_u64(), Some(10));
+
+        // Seed a 2 m pool on the left half (dam break), run 1 s, get depth raster.
+        let s = handle_flood_seed(&mut state, 2, &serde_json::json!({ "kind": "dam_break", "axis": "x", "position": 5.0, "depth": 2.0 }));
+        let v0 = s.result.unwrap()["volume"].as_f64().unwrap();
+        assert!(v0 > 0.0, "seed should add water");
+
+        let run = handle_flood_run(&mut state, 3, &serde_json::json!({ "t_end": 0.5 }));
+        let rr = run.result.unwrap();
+        assert!(rr["time"].as_f64().unwrap() > 0.0);
+        assert!(rr["wet_cells"].as_u64().unwrap() >= 1);
+
+        let res = handle_flood_result(&state, 4, &serde_json::json!({ "field": "depth" }));
+        let body = res.result.unwrap();
+        let vals = body["values"].as_array().unwrap();
+        assert_eq!(vals.len(), 10);
+        assert!(vals.iter().all(|v| v.as_f64().unwrap() >= 0.0), "depths must be ≥ 0");
+        // Water spread rightward past the dam line (cell 5 region now wet).
+        assert!(vals[5].as_f64().unwrap() > 1e-3 || vals[6].as_f64().unwrap() > 1e-3, "front should advance past the dam");
     }
 
     #[test]

@@ -26,6 +26,7 @@ import { registerResultsCommands } from './results';
 import { registerPhysicsCommands } from './physics';
 import { registerIoCommands } from './io';
 import { registerGmshCommands } from './gmsh';
+import { registerFloodCommands } from './flood';
 
 export * from './system';
 export * from './geometry';
@@ -61,4 +62,5 @@ export function registerCoreCommands(registry: CommandRegistry): void {
   registerPhysicsCommands(registry);
   registerIoCommands(registry);
   registerGmshCommands(registry);
+  registerFloodCommands(registry);
 }

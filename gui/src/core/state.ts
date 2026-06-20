@@ -161,6 +161,25 @@ export interface GmshScene {
   meshStats: { nodes: number; tets: number } | null;
 }
 
+/** A 2D flood (shallow-water) result raster + georeferencing, for FloodLayer. */
+export interface FloodScene {
+  loaded: boolean;
+  ncols: number;
+  nrows: number;
+  cellsize: number;
+  origin: [number, number];
+  /** Bed elevations, row-major (north row first), len = ncols*nrows. */
+  zb: number[];
+  /** Currently-displayed field raster (depth / max / velocity). */
+  values: number[];
+  /** Which field `values` holds. */
+  field: 'depth' | 'max' | 'velocity';
+  /** [min, max] of `values` for the colormap. */
+  range: [number, number];
+  /** Simulated time [s]. */
+  time: number;
+}
+
 /** A CFD-prep named face/shape group, used to map geometry to boundary patches. */
 export interface NamedSelection {
   name: string;
@@ -198,6 +217,8 @@ export interface AppState {
   viewDefaults: ViewDefaults;
   /** Gmsh (OCC) backend scene — pro CAD/enclosure/mesh, driven by `gmsh.*`. */
   gmsh: GmshScene;
+  /** Active 2D flood (shallow-water) result raster, driven by `flood.*`. */
+  flood: FloodScene;
   solver: SolverStatus;
   results: ResultsSummary | null;
   /**
@@ -253,6 +274,7 @@ export function createInitialState(): AppState {
     viz,
     viewDefaults: JSON.parse(JSON.stringify({ camera, display, viz })) as ViewDefaults,
     gmsh: { mesh: null, shapeIds: [], meshStats: null },
+    flood: { loaded: false, ncols: 0, nrows: 0, cellsize: 1, origin: [0, 0], zb: [], values: [], field: 'depth', range: [0, 0], time: 0 },
     solver: { jobId: null, status: 'idle', iteration: 0, residual: null, maxIterations: 200 },
     results: null,
     diagnosis: null,

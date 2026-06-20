@@ -218,11 +218,13 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 - [ ] VOF 초기 자유수면(α) 초기화 from SWE h
 - [ ] 줌인 영역 자동 추출(고유속/고수심 hotspot 탐지)
 
-### Phase 9 — 후처리 · GUI ⬜
-- [ ] 최대침수심 / 도달시간(arrival time) / 유속·hazard(v·h, v·√h) 래스터 산출
-- [ ] VTK + **GeoTIFF export**(원점 unshift 복원)
-- [ ] GUI: 지형 위 수심 컬러맵 + 시간 슬라이더 (`CadKernelLayer`/`MeshRenderer` 확장, `cadStore`에 flood 결과 슬라이스)
-- [ ] gfd-server JSON-RPC: `flood.load_dem` / `flood.load_ifc` / `flood.build_mesh` / `flood.run` / `flood.result`
+### Phase 9 — 후처리 · GUI ⚠️
+- [x] **gfd-server JSON-RPC**: `flood.load_dem`(.asc text|path → grid+z_b), `flood.seed`(level/disk/dam_break), `flood.run`(t_end/steps + max-depth 갱신), `flood.result`(depth/max/velocity/bed raster), `flood.reset`
+- [x] **command-core flood 명령** (`flood.ts`: load_dem/seed/run/reset) → AppState.flood 패치. **AI·MCP·리본 자동 노출**
+- [x] **GUI 렌더러** `FloodLayer` (ViewportV2): z_b 하이트필드 + 수심 컬러맵(건조=지형색, 수심=파랑 램프, 로컬원점 시프트)
+- [x] **최대침수심(hazard)** max-depth 누적 (`flood.result field=max`)
+- [ ] 도달시간(arrival time) / v·√h hazard 래스터, **GeoTIFF/VTK export**(원점 unshift), 시간 슬라이더·런 패널 UI
+- [ ] `flood.load_ifc` / `flood.build_mesh`(건물 burn-in 연동, Phase 3·5 후)
 
 ### Phase 10 — 검증 (Validation) ⬜
 - [ ] **Ritter/Stoker 댐붕괴** 해석해 (1D, well-balanced·wetting/drying 1차 검증)
@@ -299,7 +301,7 @@ docs/
 | 6 SWE 솔버 | ✅ 완료 | HLLC + Audusse well-balanced + wetting/drying + positivity + Manning(semi-impl) + 적응 CFL + SSP-RK2 + **MUSCL 2차(minmod η-재구성 + 중앙 bed 소스)**. lake-at-rest C-property 1e-10(1·2차), Ritter 댐붕괴(MUSCL 오차 0.027 vs 1차 0.100), 질량보존 |
 | 7 홍수 BC | ⬜ | hydrograph / outflow / rainfall / wall |
 | 8 하이브리드 | ⬜ | SWE→3D VOF one-way coupling |
-| 9 후처리/GUI | ⬜ | 침수심/도달시간/hazard + VTK/GeoTIFF + GUI 컬러맵 + flood.* RPC |
+| 9 후처리/GUI | ⚠️ 부분 | **flood.* RPC(load_dem/seed/run/result/reset) + command-core flood 명령(AI/MCP/리본) + AppState.flood + FloodLayer(지형 위 수심 컬러맵) 완료**, max-depth hazard / GeoTIFF·VTK export·시간 슬라이더 UI ⬜ |
 | 10 검증 | ⬜ | Ritter/Stoker, lake-at-rest, Malpasset, Toce, Carrier-Greenspan |
 
 범례: ⬜ 미착수 · 🔨 진행 중 · ⚠️ 부분 · ✅ 완료

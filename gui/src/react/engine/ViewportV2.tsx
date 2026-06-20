@@ -407,6 +407,68 @@ function ScreenshotRegistrar() {
   return null;
 }
 
+/** 2D flood result — a terrain heightfield (z = bed + water) colored by the
+ *  active field (depth/max/velocity): dry → terrain tan, wet → blue ramp. */
+function FloodLayer() {
+  const flood = useAppState().flood;
+  const [geo, setGeo] = useState<THREE.BufferGeometry | null>(null);
+  const sig = `${flood.loaded}:${flood.ncols}x${flood.nrows}:${flood.field}:${flood.time}:${flood.values.length}`;
+  useEffect(() => {
+    if (!flood.loaded || flood.ncols < 2 || flood.nrows < 1 || flood.values.length === 0) {
+      setGeo(null);
+      return;
+    }
+    const { ncols: nc, nrows: nr, cellsize: cs, zb, values } = flood;
+    // A 1-row DEM can't form a 2D surface; pad to 2 rows for a visible ribbon.
+    const rows = Math.max(nr, 2);
+    const g = new THREE.BufferGeometry();
+    const pos: number[] = [];
+    const col: number[] = [];
+    const [lo, hi] = flood.range;
+    const span = hi - lo > 1e-9 ? hi - lo : 1;
+    const colorAt = (v: number, dry: boolean): [number, number, number] => {
+      if (dry) return [0.55, 0.5, 0.38]; // terrain tan
+      const t = Math.min(1, Math.max(0, (v - lo) / span));
+      return [0.1 * (1 - t), 0.45 + 0.2 * (1 - t), 0.6 + 0.4 * t]; // shallow→deep blue
+    };
+    for (let r = 0; r < rows; r++) {
+      const rr = Math.min(r, nr - 1);
+      for (let c = 0; c < nc; c++) {
+        const i = rr * nc + c;
+        const bed = zb[i] ?? 0;
+        const v = values[i] ?? 0;
+        const dry = flood.field === 'velocity' ? v < 1e-4 : v < 1e-3;
+        // Local coords (origin-shifted) so big UTM numbers don't hit f32 limits.
+        const x = (c + 0.5) * cs;
+        const y = (rows - 1 - r + 0.5) * cs;
+        const z = bed + (flood.field === 'depth' || flood.field === 'max' ? v : 0);
+        pos.push(x, y, z);
+        const [cr, cg, cb] = colorAt(v, dry);
+        col.push(cr, cg, cb);
+      }
+    }
+    const idx: number[] = [];
+    for (let r = 0; r < rows - 1; r++) {
+      for (let c = 0; c < nc - 1; c++) {
+        const a = r * nc + c, b = a + 1, d = a + nc, e = d + 1;
+        idx.push(a, b, e, a, e, d);
+      }
+    }
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    setGeo(g);
+  }, [sig, flood]);
+  useEffect(() => () => geo?.dispose(), [geo]);
+  if (!geo) return null;
+  return (
+    <mesh geometry={geo}>
+      <meshStandardMaterial vertexColors metalness={0.05} roughness={0.85} side={THREE.DoubleSide} />
+    </mesh>
+  );
+}
+
 /** All solver-result overlays, gated by the master results-layer toggle. */
 function ResultsLayers() {
   if (!useAppState().display.layers.results) return null;
@@ -441,6 +503,7 @@ export function ViewportV2() {
       <ScreenshotRegistrar />
       <GeometryLayer />
       <GmshSceneLayer />
+      <FloodLayer />
       <ResultsLayers />
       <GizmoHelper alignment="bottom-right" margin={[70, 70]}>
         <GizmoViewcube />
