@@ -49,8 +49,13 @@ export function FloodToolbar() {
       setBusy(false);
     }
   };
-  const setField = (fld: 'depth' | 'max' | 'velocity') => void dispatch('flood.run', { t_end: 0, field: fld });
-  const exportRaster = () => void dispatch('flood.export_raster', { path: `flood_${field}.asc`, field });
+  const setField = (fld: 'depth' | 'max' | 'arrival' | 'velocity') => void dispatch('flood.run', { t_end: 0, field: fld });
+  const exportRaster = (format: 'asc' | 'geotiff') =>
+    void dispatch('flood.export_raster', { path: `flood_${field}.${format === 'geotiff' ? 'tif' : 'asc'}`, field, format });
+
+  const FIELDS = [
+    ['depth', 'Depth'], ['max', 'Max'], ['arrival', 'Arr'], ['velocity', 'Vel'],
+  ] as const;
 
   return (
     <div style={wrap}>
@@ -58,9 +63,9 @@ export function FloodToolbar() {
 
       <div style={row}>
         <span style={label}>Field</span>
-        {(['depth', 'max', 'velocity'] as const).map((fld) => (
+        {FIELDS.map(([fld, lbl]) => (
           <div key={fld} style={seg(field === fld)} onClick={() => setField(fld)}>
-            {fld === 'depth' ? 'Depth' : fld === 'max' ? 'Max' : 'Vel'}
+            {lbl}
           </div>
         ))}
       </div>
@@ -85,7 +90,8 @@ export function FloodToolbar() {
       </div>
 
       <div style={row}>
-        <div style={{ ...seg(false), background: '#262b32' }} onClick={exportRaster}>Export .asc</div>
+        <div style={{ ...seg(false), background: '#262b32' }} onClick={() => exportRaster('asc')}>.asc</div>
+        <div style={{ ...seg(false), background: '#262b32' }} onClick={() => exportRaster('geotiff')}>.tif</div>
         <div style={{ ...seg(false), background: '#3a2630' }} onClick={() => void dispatch('flood.reset', {})}>Reset</div>
       </div>
     </div>

@@ -136,6 +136,8 @@ struct FloodState {
     time: f64,
     /// Per-cell maximum water depth seen so far (hazard map).
     max_depth: Vec<f64>,
+    /// Per-cell time of first wetting (s); -1 = never wet.
+    arrival_time: Vec<f64>,
 }
 
 struct PrimitiveBody {
@@ -688,6 +690,8 @@ fn handle_request(state: &mut ServerState, req: &RpcRequest) -> RpcResponse {
         "flood.burn_buildings" => handle_flood_burn_buildings(state, req.id, &req.params),
         "flood.load_ifc" => handle_flood_load_ifc(state, req.id, &req.params),
         "flood.export_raster" => handle_flood_export_raster(state, req.id, &req.params),
+        "flood.zoom_3d"  => handle_flood_zoom_3d(state, req.id, &req.params),
+        "flood.build_3d_mesh" => handle_flood_build_3d_mesh(state, req.id, &req.params),
         "flood.reset"    => handle_flood_reset(state, req.id),
 
         _ => RpcResponse::err(req.id, format!("Unknown method: {}", req.method)),
@@ -7089,9 +7093,10 @@ fn handle_flood_load_dem(state: &mut ServerState, id: u64, params: &Value) -> Rp
     let solver = SwSolver::new(SwGrid::new(nc, nr, cs, cs), p, bc);
     let st = SwState::dry(z_b);
     let max_depth = vec![0.0; nc * nr];
+    let arrival_time = vec![-1.0; nc * nr];
     let bbox = dem.bounds();
     let range = dem.elevation_range();
-    state.flood = Some(FloodState { solver, state: st, origin: dem.origin, cellsize: cs, time: 0.0, max_depth });
+    state.flood = Some(FloodState { solver, state: st, origin: dem.origin, cellsize: cs, time: 0.0, max_depth, arrival_time });
     RpcResponse::ok(id, serde_json::json!({
         "ncols": nc, "nrows": nr, "cellsize": cs, "origin": dem.origin,
         "bbox": bbox, "elevation_range": range,
@@ -7134,11 +7139,14 @@ fn handle_flood_seed(state: &mut ServerState, id: u64, params: &Value) -> RpcRes
         }
         other => return RpcResponse::err(id, format!("unknown seed kind: {other}")),
     }
-    // Reset momentum + time + hazard for a fresh scenario.
+    // Reset momentum + time + hazard + arrival for a fresh scenario.
     fs.state.hu.iter_mut().for_each(|x| *x = 0.0);
     fs.state.hv.iter_mut().for_each(|x| *x = 0.0);
     fs.time = 0.0;
-    for i in 0..fs.max_depth.len() { fs.max_depth[i] = fs.state.h[i]; }
+    for i in 0..fs.max_depth.len() {
+        fs.max_depth[i] = fs.state.h[i];
+        fs.arrival_time[i] = if fs.state.h[i] > 1e-3 { 0.0 } else { -1.0 };
+    }
     let vol = fs.solver.total_volume(&fs.state);
     RpcResponse::ok(id, serde_json::json!({ "seeded": kind, "volume": vol }))
 }
@@ -7156,7 +7164,10 @@ fn handle_flood_run(state: &mut ServerState, id: u64, params: &Value) -> RpcResp
     for i in 0..fs.state.h.len() {
         let h = fs.state.h[i].max(0.0);
         if h > fs.max_depth[i] { fs.max_depth[i] = h; }
-        if h > 1e-3 { wet += 1; }
+        if h > 1e-3 {
+            wet += 1;
+            if fs.arrival_time[i] < 0.0 { fs.arrival_time[i] = fs.time; }
+        }
         peak = peak.max(h);
     }
     let vol = fs.solver.total_volume(&fs.state);
@@ -7165,26 +7176,38 @@ fn handle_flood_run(state: &mut ServerState, id: u64, params: &Value) -> RpcResp
     }))
 }
 
-/// Return a raster of the requested field for rendering: "depth" (current),
-/// "max" (hazard), "velocity" (speed magnitude), or "bed" (z_b).
-fn handle_flood_result(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
-    let Some(fs) = state.flood.as_ref() else { return RpcResponse::err(id, "no flood scenario"); };
-    let field = params.get("field").and_then(|v| v.as_str()).unwrap_or("depth");
-    let nc = fs.solver.grid.ncols;
-    let nr = fs.solver.grid.nrows;
-    let vals: Vec<f64> = match field {
+/// Extract a flood field raster: depth | max | arrival | velocity | bed.
+fn flood_field_values(fs: &FloodState, field: &str) -> Option<Vec<f64>> {
+    Some(match field {
         "depth" => fs.state.h.iter().map(|&h| h.max(0.0)).collect(),
         "max" => fs.max_depth.clone(),
+        "arrival" => fs.arrival_time.clone(),
         "bed" => fs.state.z_b.clone(),
         "velocity" => (0..fs.state.h.len()).map(|i| {
             let (u, v) = gfd_fluid::shallow_water::velocity(&fs.state, i, &fs.solver.params);
             (u * u + v * v).sqrt()
         }).collect(),
-        other => return RpcResponse::err(id, format!("unknown field: {other}")),
-    };
+        _ => return None,
+    })
+}
+
+/// Return a raster of the requested field for rendering: "depth" (current),
+/// "max" (hazard), "arrival" (first-wet time, -1 = never), "velocity", or "bed".
+fn handle_flood_result(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(fs) = state.flood.as_ref() else { return RpcResponse::err(id, "no flood scenario"); };
+    let field = params.get("field").and_then(|v| v.as_str()).unwrap_or("depth");
+    let Some(vals) = flood_field_values(fs, field) else { return RpcResponse::err(id, format!("unknown field: {field}")); };
+    let nc = fs.solver.grid.ncols;
+    let nr = fs.solver.grid.nrows;
     let mut lo = f64::INFINITY;
     let mut hi = f64::NEG_INFINITY;
-    for &v in &vals { if v.is_finite() { lo = lo.min(v); hi = hi.max(v); } }
+    // For arrival, ignore the -1 "never wet" sentinel in the range.
+    for &v in &vals {
+        if v.is_finite() && !(field == "arrival" && v < 0.0) {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
     RpcResponse::ok(id, serde_json::json!({
         "field": field, "ncols": nc, "nrows": nr, "cellsize": fs.cellsize, "origin": fs.origin,
         "z_b": fs.state.z_b, "values": vals, "range": [lo, hi], "time": fs.time,
@@ -7196,37 +7219,40 @@ fn handle_flood_reset(state: &mut ServerState, id: u64) -> RpcResponse {
     RpcResponse::ok(id, serde_json::json!({ "reset": true }))
 }
 
-/// Export a flood field raster as a georeferenced ESRI ASCII grid (.asc) — the
-/// origin (lower-left) is restored, so it round-trips with the DEM reader and
-/// loads in QGIS/ArcGIS. `field` = depth | max | velocity | bed.
+/// Export a flood field raster, georeferenced (origin restored). `format` =
+/// "asc" (ESRI ASCII, default) or "geotiff" (Float32 GeoTIFF). Both load in
+/// QGIS/ArcGIS; .asc round-trips with the DEM reader. `field` = depth | max |
+/// arrival | velocity | bed.
 fn handle_flood_export_raster(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
     let Some(fs) = state.flood.as_ref() else { return RpcResponse::err(id, "no flood scenario"); };
     let Some(path) = params.get("path").and_then(|v| v.as_str()) else { return RpcResponse::err(id, "missing path"); };
     let field = params.get("field").and_then(|v| v.as_str()).unwrap_or("depth");
+    let format = params.get("format").and_then(|v| v.as_str()).unwrap_or("asc");
+    let Some(vals) = flood_field_values(fs, field) else { return RpcResponse::err(id, format!("unknown field: {field}")); };
     let nc = fs.solver.grid.ncols;
     let nr = fs.solver.grid.nrows;
-    let vals: Vec<f64> = match field {
-        "depth" => fs.state.h.iter().map(|&h| h.max(0.0)).collect(),
-        "max" => fs.max_depth.clone(),
-        "bed" => fs.state.z_b.clone(),
-        "velocity" => (0..fs.state.h.len()).map(|i| {
-            let (u, v) = gfd_fluid::shallow_water::velocity(&fs.state, i, &fs.solver.params);
-            (u * u + v * v).sqrt()
-        }).collect(),
-        other => return RpcResponse::err(id, format!("unknown field: {other}")),
+    let result = match format {
+        "geotiff" | "tif" | "tiff" => {
+            gfd_geo::geotiff::write_geotiff_float32(std::path::Path::new(path), nc, nr, fs.cellsize, fs.origin, &vals)
+                .map_err(|e| format!("geotiff write failed: {e}"))
+        }
+        "asc" => {
+            let mut s = String::with_capacity(nc * nr * 8 + 128);
+            s.push_str(&format!("ncols {nc}\nnrows {nr}\n"));
+            s.push_str(&format!("xllcorner {}\nyllcorner {}\n", fs.origin[0], fs.origin[1]));
+            s.push_str(&format!("cellsize {}\nNODATA_value -9999\n", fs.cellsize));
+            for r in 0..nr {
+                let row: Vec<String> = (0..nc).map(|c| format!("{:.4}", vals[c + r * nc])).collect();
+                s.push_str(&row.join(" "));
+                s.push('\n');
+            }
+            std::fs::write(path, s).map_err(|e| format!("write failed: {e}"))
+        }
+        other => return RpcResponse::err(id, format!("unknown format: {other}")),
     };
-    let mut s = String::with_capacity(nc * nr * 8 + 128);
-    s.push_str(&format!("ncols {nc}\nnrows {nr}\n"));
-    s.push_str(&format!("xllcorner {}\nyllcorner {}\n", fs.origin[0], fs.origin[1]));
-    s.push_str(&format!("cellsize {}\nNODATA_value -9999\n", fs.cellsize));
-    for r in 0..nr {
-        let row: Vec<String> = (0..nc).map(|c| format!("{:.4}", vals[c + r * nc])).collect();
-        s.push_str(&row.join(" "));
-        s.push('\n');
-    }
-    match std::fs::write(path, s) {
-        Ok(_) => RpcResponse::ok(id, serde_json::json!({ "path": path, "field": field, "ncols": nc, "nrows": nr })),
-        Err(e) => RpcResponse::err(id, format!("write failed: {e}")),
+    match result {
+        Ok(_) => RpcResponse::ok(id, serde_json::json!({ "path": path, "field": field, "format": format, "ncols": nc, "nrows": nr })),
+        Err(e) => RpcResponse::err(id, e),
     }
 }
 
@@ -7248,10 +7274,12 @@ fn point_in_poly(x: f64, y: f64, poly: &[[f64; 2]]) -> bool {
     hit
 }
 
-/// Burn building footprints into the bed as impermeable high ground (Block
-/// method): raise z_b of every cell whose center lies in a footprint by
-/// `wall_height`, and clear any water there. Returns the burned-cell count.
-fn burn_footprints(fs: &mut FloodState, footprints: &[Vec<[f64; 2]>], wall_height: f64) -> usize {
+/// Burn building footprints into the flood model. `method`:
+///   - "block": raise z_b by `wall_height` (impermeable high ground).
+///   - "hole":  mark cells as reflective internal walls (z_b unchanged).
+///   - "roughness": set a high per-cell Manning n (`rough` value).
+/// Footprint cells are cleared of water. Returns the burned-cell count.
+fn burn_footprints(fs: &mut FloodState, footprints: &[Vec<[f64; 2]>], method: &str, wall_height: f64, rough: f64) -> usize {
     let nc = fs.solver.grid.ncols;
     let nr = fs.solver.grid.nrows;
     let cs = fs.cellsize;
@@ -7262,7 +7290,11 @@ fn burn_footprints(fs: &mut FloodState, footprints: &[Vec<[f64; 2]>], wall_heigh
             let y = fs.origin[1] + (nr as f64 - 1.0 - r as f64 + 0.5) * cs;
             if footprints.iter().any(|fp| point_in_poly(x, y, fp)) {
                 let i = c + r * nc;
-                fs.state.z_b[i] += wall_height;
+                match method {
+                    "hole" => fs.solver.set_solid(i),
+                    "roughness" => fs.solver.set_manning(i, rough),
+                    _ => fs.state.z_b[i] += wall_height, // "block"
+                }
                 fs.state.h[i] = 0.0;
                 fs.state.hu[i] = 0.0;
                 fs.state.hv[i] = 0.0;
@@ -7274,16 +7306,19 @@ fn burn_footprints(fs: &mut FloodState, footprints: &[Vec<[f64; 2]>], wall_heigh
     burned
 }
 
-/// Burn explicit building footprints into the current flood bed (Block method).
+/// Burn explicit building footprints into the current flood bed.
+/// `method` = block (default) | hole | roughness.
 fn handle_flood_burn_buildings(state: &mut ServerState, id: u64, params: &Value) -> RpcResponse {
     let wall = params.get("wall_height").and_then(|v| v.as_f64()).unwrap_or(1.0e4);
+    let method = params.get("method").and_then(|v| v.as_str()).unwrap_or("block").to_string();
+    let rough = params.get("roughness_n").and_then(|v| v.as_f64()).unwrap_or(0.5);
     let footprints = parse_footprints(params.get("footprints"));
     let Some(fs) = state.flood.as_mut() else { return RpcResponse::err(id, "no flood scenario"); };
     if footprints.is_empty() {
         return RpcResponse::err(id, "no footprints provided");
     }
-    let burned = burn_footprints(fs, &footprints, wall);
-    RpcResponse::ok(id, serde_json::json!({ "buildings": footprints.len(), "burned_cells": burned }))
+    let burned = burn_footprints(fs, &footprints, &method, wall, rough);
+    RpcResponse::ok(id, serde_json::json!({ "buildings": footprints.len(), "burned_cells": burned, "method": method }))
 }
 
 /// Load building footprints from an IFC file/text and burn them into the flood
@@ -7299,17 +7334,189 @@ fn handle_flood_load_ifc(state: &mut ServerState, id: u64, params: &Value) -> Rp
     };
     let model = match model { Ok(m) => m, Err(e) => return RpcResponse::err(id, format!("IFC load failed: {e}")) };
     let forced = params.get("wall_height").and_then(|v| v.as_f64());
+    let method = params.get("method").and_then(|v| v.as_str()).unwrap_or("block").to_string();
+    let rough = params.get("roughness_n").and_then(|v| v.as_f64()).unwrap_or(0.5);
     let bounds = model.bounds();
+    let storeys = model.storeys.len();
     let Some(fs) = state.flood.as_mut() else { return RpcResponse::err(id, "no flood scenario — call flood.load_dem first"); };
     let mut burned = 0usize;
     let n_el = model.elements.len();
     for el in &model.elements {
         let wall = forced.unwrap_or(if el.height > 0.1 { el.height } else { 10.0 });
-        burned += burn_footprints(fs, &el.footprints, wall);
+        burned += burn_footprints(fs, &el.footprints, &method, wall, rough);
     }
     RpcResponse::ok(id, serde_json::json!({
-        "elements": n_el, "burned_cells": burned, "footprint_bounds": bounds,
+        "elements": n_el, "burned_cells": burned, "footprint_bounds": bounds, "method": method, "storeys": storeys,
     }))
+}
+
+/// Phase 7 — 3D zoom-in one-way coupling: extract a sub-region of the current
+/// 2D SWE solution and initialize a 3D VOF field from it (alpha = water below the
+/// free surface, velocity = depth-averaged (u,v,0)). Returns coupling
+/// diagnostics; the 3D water volume should match the SWE sub-region volume.
+fn handle_flood_zoom_3d(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(fs) = state.flood.as_ref() else { return RpcResponse::err(id, "no flood scenario"); };
+    let nc = fs.solver.grid.ncols;
+    let nr = fs.solver.grid.nrows;
+    let cs = fs.cellsize;
+    let f = |k: &str, d: f64| params.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+    let xmin = f("xmin", fs.origin[0]);
+    let xmax = f("xmax", fs.origin[0] + nc as f64 * cs);
+    let ymin = f("ymin", fs.origin[1]);
+    let ymax = f("ymax", fs.origin[1] + nr as f64 * cs);
+
+    // Sub-region cell index bounds whose centers fall in the world box.
+    let (mut c0, mut c1, mut r0, mut r1, mut any) = (nc, 0usize, nr, 0usize, false);
+    for r in 0..nr {
+        for c in 0..nc {
+            let x = fs.origin[0] + (c as f64 + 0.5) * cs;
+            let y = fs.origin[1] + (nr as f64 - 1.0 - r as f64 + 0.5) * cs;
+            if x >= xmin && x <= xmax && y >= ymin && y <= ymax {
+                any = true;
+                c0 = c0.min(c); c1 = c1.max(c); r0 = r0.min(r); r1 = r1.max(r);
+            }
+        }
+    }
+    if !any {
+        return RpcResponse::err(id, "zoom region contains no cells");
+    }
+    let nx = c1 - c0 + 1;
+    let ny = r1 - r0 + 1;
+
+    // Vertical extent over the sub-region.
+    let (mut zbed_min, mut zsurf_max, mut hmax) = (f64::INFINITY, f64::NEG_INFINITY, 0.0_f64);
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            let i = c + r * nc;
+            let (zb, h) = (fs.state.z_b[i], fs.state.h[i].max(0.0));
+            zbed_min = zbed_min.min(zb);
+            zsurf_max = zsurf_max.max(zb + h);
+            hmax = hmax.max(h);
+        }
+    }
+    let freeboard = f("freeboard_frac", 0.2) * hmax.max(cs * 0.1);
+    let z_top = (zsurf_max + freeboard).max(zbed_min + cs);
+    let lz = z_top - zbed_min;
+    let nz = params.get("nz").and_then(|v| v.as_u64()).map(|v| v as usize)
+        .unwrap_or_else(|| ((lz / cs).ceil() as usize).clamp(5, 100)).max(1);
+    let dz = lz / nz as f64;
+    let h_dry = fs.solver.params.h_dry;
+
+    // Column-fill: alpha = 1 where the cell center is below the free surface.
+    let mut alpha = vec![0.0_f64; nx * ny * nz];
+    let mut max_speed = 0.0_f64;
+    let mut wet = 0usize;
+    for k in 0..nz {
+        let zc = zbed_min + (k as f64 + 0.5) * dz;
+        for j in 0..ny {
+            for i in 0..nx {
+                let i2 = (c0 + i) + (r0 + j) * nc;
+                let (zb, h) = (fs.state.z_b[i2], fs.state.h[i2].max(0.0));
+                if h > h_dry && zc < zb + h {
+                    alpha[i + j * nx + k * nx * ny] = 1.0;
+                    let (u, v) = gfd_fluid::shallow_water::velocity(&fs.state, i2, &fs.solver.params);
+                    max_speed = max_speed.max((u * u + v * v).sqrt());
+                    wet += 1;
+                }
+            }
+        }
+    }
+    let alpha_sum: f64 = alpha.iter().sum();
+    let water_volume_3d = alpha_sum * cs * cs * dz;
+    let mut swe_volume = 0.0;
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            swe_volume += fs.state.h[c + r * nc].max(0.0) * cs * cs;
+        }
+    }
+    // Confirm the coupled field constructs a valid 3D VOF solver.
+    let _vof = gfd_fluid::multiphase::vof::VofSolverImpl::with_surface_tension(
+        ScalarField::new("alpha", alpha), 1.0, 0.0,
+    );
+    let origin3d = [fs.origin[0] + c0 as f64 * cs, fs.origin[1] + (nr - 1 - r1) as f64 * cs, zbed_min];
+    RpcResponse::ok(id, serde_json::json!({
+        "nx": nx, "ny": ny, "nz": nz, "dz": dz, "cellsize": cs, "origin": origin3d,
+        "z_bed_min": zbed_min, "z_top": z_top, "wet_cells": wet, "alpha_sum": alpha_sum,
+        "water_volume_3d": water_volume_3d, "swe_volume": swe_volume, "max_speed": max_speed,
+    }))
+}
+
+/// Bilinear sample of a row-major (north-first) elevation grid at world (x,y).
+fn sample_grid(zb: &[f64], nc: usize, nr: usize, origin: [f64; 2], cs: f64, x: f64, y: f64) -> f64 {
+    let fx = (x - origin[0]) / cs - 0.5;
+    let fy = (nr as f64 - 1.0) - ((y - origin[1]) / cs - 0.5);
+    let c0 = (fx.floor() as isize).clamp(0, nc as isize - 1) as usize;
+    let r0 = (fy.floor() as isize).clamp(0, nr as isize - 1) as usize;
+    let c1 = (c0 + 1).min(nc - 1);
+    let r1 = (r0 + 1).min(nr - 1);
+    let tx = (fx - c0 as f64).clamp(0.0, 1.0);
+    let ty = (fy - r0 as f64).clamp(0.0, 1.0);
+    let v = |c: usize, r: usize| zb[c + r * nc];
+    let top = v(c0, r0) * (1.0 - tx) + v(c1, r0) * tx;
+    let bot = v(c0, r1) * (1.0 - tx) + v(c1, r1) * tx;
+    top * (1.0 - ty) + bot * ty
+}
+
+/// Phase 5 (3D track) — build a body-fitted cut-cell mesh from the terrain bed
+/// (DEM/z_b) unioned with building prisms (SDF union), using the existing
+/// cut-cell mesher. Returns mesh statistics. Optional `buildings`:
+/// `[{footprint:[[x,y]..], base_z, height}, ...]`.
+fn handle_flood_build_3d_mesh(state: &ServerState, id: u64, params: &Value) -> RpcResponse {
+    let Some(fs) = state.flood.as_ref() else { return RpcResponse::err(id, "no flood scenario"); };
+    let nc = fs.solver.grid.ncols;
+    let nr = fs.solver.grid.nrows;
+    let cs = fs.cellsize;
+    let f = |k: &str, d: f64| params.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+    let xmin = f("xmin", fs.origin[0]);
+    let xmax = f("xmax", fs.origin[0] + nc as f64 * cs);
+    let ymin = f("ymin", fs.origin[1]);
+    let ymax = f("ymax", fs.origin[1] + nr as f64 * cs);
+
+    // Building prisms (footprint + base_z + height).
+    let prisms: Vec<(Vec<[f64; 2]>, f64, f64)> = params.get("buildings").and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|b| {
+            let fp: Vec<[f64; 2]> = b.get("footprint").and_then(|v| v.as_array())?.iter().filter_map(|p| {
+                let xy = p.as_array()?;
+                Some([xy.first()?.as_f64()?, xy.get(1)?.as_f64()?])
+            }).collect();
+            if fp.len() < 3 { return None; }
+            Some((fp, b.get("base_z").and_then(|v| v.as_f64()).unwrap_or(0.0), b.get("height").and_then(|v| v.as_f64()).unwrap_or(10.0)))
+        }).collect())
+        .unwrap_or_default();
+
+    // Vertical domain from bed range + buildings.
+    let (mut zmin, mut zmax) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &z in &fs.state.z_b {
+        if z.is_finite() && z < 1.0e5 {
+            zmin = zmin.min(z);
+            zmax = zmax.max(z);
+        }
+    }
+    for (_, base, h) in &prisms {
+        zmax = zmax.max(base + h);
+    }
+    if !zmin.is_finite() { zmin = 0.0; zmax = 1.0; }
+    let zmin = f("zmin", zmin - cs);
+    let zmax = f("zmax", zmax + cs);
+
+    let nx = params.get("nx").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(((xmax - xmin) / cs).ceil() as usize).clamp(1, 256);
+    let ny = params.get("ny").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(((ymax - ymin) / cs).ceil() as usize).clamp(1, 256);
+    let nz = params.get("nz").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or((((zmax - zmin) / cs).ceil() as usize).clamp(4, 64)).clamp(1, 128);
+
+    let zb = fs.state.z_b.clone();
+    let origin = fs.origin;
+    let sdf = move |p: [f64; 3]| {
+        let terrain = p[2] - sample_grid(&zb, nc, nr, origin, cs, p[0], p[1]);
+        terrain.min(gfd_geo::sdf::sdf_buildings(p[0], p[1], p[2], &prisms))
+    };
+    let mesher = gfd_mesh::hybrid::cutcell::CutCellMesher::new(nx, ny, nz, [xmin, xmax, ymin, ymax, zmin, zmax], sdf);
+    match mesher.build() {
+        Ok(mesh) => RpcResponse::ok(id, serde_json::json!({
+            "cells": mesh.num_cells(), "nodes": mesh.num_nodes(),
+            "nx": nx, "ny": ny, "nz": nz, "domain": [xmin, xmax, ymin, ymax, zmin, zmax],
+        })),
+        Err(e) => RpcResponse::err(id, format!("cut-cell meshing failed: {e}")),
+    }
 }
 
 /// Parse a JSON `footprints: [[[x,y],...],...]` value into polygons.
@@ -7636,6 +7843,74 @@ mod tests {
         assert_eq!((dem.ncols, dem.nrows), (4, 2));
         assert_eq!(dem.origin, [100.0, 200.0]);
         assert!((dem.z[0] - 1.5).abs() < 1e-3, "exported depth should be 1.5, got {}", dem.z[0]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn flood_zoom_3d_conserves_volume() {
+        // The 3D VOF water volume from the coupling must match the 2D SWE volume.
+        let asc = "ncols 10\nnrows 6\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n".to_string()
+            + &"0 0 0 0 0 0 0 0 0 0\n".repeat(6);
+        let mut state = ServerState::new();
+        handle_flood_load_dem(&mut state, 1, &serde_json::json!({ "asc": asc, "manning_n": 0.0 }));
+        handle_flood_seed(&mut state, 2, &serde_json::json!({ "kind": "level", "level": 1.5 }));
+        let z = handle_flood_zoom_3d(&state, 3, &serde_json::json!({ "nz": 40 }));
+        let b = z.result.unwrap();
+        let (v3d, vswe) = (b["water_volume_3d"].as_f64().unwrap(), b["swe_volume"].as_f64().unwrap());
+        assert!(vswe > 0.0);
+        assert!((v3d - vswe).abs() / vswe < 0.05, "3D vol {v3d} vs SWE {vswe}");
+        assert!(b["nx"].as_u64().unwrap() == 10 && b["ny"].as_u64().unwrap() == 6);
+    }
+
+    #[test]
+    fn flood_build_3d_mesh_with_building() {
+        let asc = "ncols 8\nnrows 8\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n".to_string()
+            + &"0 0 0 0 0 0 0 0\n".repeat(8);
+        let mut state = ServerState::new();
+        handle_flood_load_dem(&mut state, 1, &serde_json::json!({ "asc": asc }));
+        let p = serde_json::json!({
+            "nz": 8, "buildings": [{ "footprint": [[3.0, 3.0], [5.0, 3.0], [5.0, 5.0], [3.0, 5.0]], "base_z": 0.0, "height": 4.0 }],
+        });
+        let r = handle_flood_build_3d_mesh(&state, 2, &p);
+        let body = r.result.expect("3D mesh built");
+        assert!(body["cells"].as_u64().unwrap() > 0, "cut-cell mesh has fluid cells");
+    }
+
+    #[test]
+    fn flood_hole_method_keeps_cell_dry() {
+        let asc = "ncols 10\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n0 0 0 0 0 0 0 0 0 0";
+        let mut state = ServerState::new();
+        handle_flood_load_dem(&mut state, 1, &serde_json::json!({ "asc": asc, "manning_n": 0.0 }));
+        let fp = serde_json::json!({ "footprints": [[[4.0, 0.0], [6.0, 0.0], [6.0, 1.0], [4.0, 1.0]]], "method": "hole" });
+        let b = handle_flood_burn_buildings(&mut state, 2, &fp);
+        assert_eq!(b.result.unwrap()["method"], "hole");
+        handle_flood_seed(&mut state, 3, &serde_json::json!({ "kind": "dam_break", "axis": "x", "position": 3.0, "depth": 2.0 }));
+        handle_flood_run(&mut state, 4, &serde_json::json!({ "t_end": 3.0 }));
+        let res = handle_flood_result(&state, 5, &serde_json::json!({ "field": "depth" }));
+        let vals: Vec<f64> = res.result.unwrap()["values"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        assert!(vals[5] < 1e-6, "hole cell (col 5) must stay dry, got {}", vals[5]);
+    }
+
+    #[test]
+    fn flood_arrival_and_geotiff_export() {
+        let asc = "ncols 20\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n".to_string()
+            + &"0 ".repeat(20);
+        let mut state = ServerState::new();
+        handle_flood_load_dem(&mut state, 1, &serde_json::json!({ "asc": asc.trim(), "manning_n": 0.0 }));
+        handle_flood_seed(&mut state, 2, &serde_json::json!({ "kind": "dam_break", "axis": "x", "position": 3.0, "depth": 5.0 }));
+        handle_flood_run(&mut state, 3, &serde_json::json!({ "t_end": 2.0 }));
+        // Arrival: upstream cells wet from t=0 (arrival 0), a downstream cell wet later (>0).
+        let res = handle_flood_result(&state, 4, &serde_json::json!({ "field": "arrival" }));
+        let arr: Vec<f64> = res.result.unwrap()["values"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        assert_eq!(arr[0], 0.0, "upstream wet from the start");
+        assert!(arr.iter().any(|&a| a > 0.0), "some cell wetted during the run");
+        // GeoTIFF export.
+        let mut path = std::env::temp_dir();
+        path.push("gfd_flood_arrival.tif");
+        let p = path.to_string_lossy().to_string();
+        let e = handle_flood_export_raster(&state, 5, &serde_json::json!({ "path": p, "field": "max", "format": "geotiff" }));
+        assert_eq!(e.result.unwrap()["format"], "geotiff");
+        assert!(std::fs::metadata(&path).map(|m| m.len() > 100).unwrap_or(false), "geotiff file written");
         let _ = std::fs::remove_file(&path);
     }
 

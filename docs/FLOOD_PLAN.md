@@ -179,9 +179,10 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 - [x] **형상**: `IfcExtrudedAreaSolid`(IfcRectangleProfileDef + IfcArbitraryClosedProfileDef/IfcPolyline) → footprint 폴리곤 + 높이
 - [x] `IfcLocalPlacement` 체인 누적 translation (부재 배치) + `IfcExtrudedAreaSolid.Position`
 - [x] `IfcModel::footprints()` / `bounds()` — flood 건물 burn-in(Phase 5) 입력
-- [x] `IfcTriangulatedFaceSet`/`IfcPolygonalFaceSet` → XY convex-hull footprint + z-extent 높이
+- [x] `IfcTriangulatedFaceSet`/`IfcPolygonalFaceSet`/**`IfcFacetedBrep`**(ClosedShell→Face→PolyLoop) → XY convex-hull footprint + z-extent 높이
 - [x] **지오레퍼런싱**: `IfcMapConversion`(E/N + X축 회전 + scale) → footprint를 map CRS(DEM 좌표계)로 투영
-- [ ] `IfcFacetedBrep` full TriMesh, 공간 위계(Project/Site/Storey), `IfcSite.RefLat·Long`, 프로파일·배치 회전, 수동 배치 보정 API
+- [x] **공간 위계**: IfcBuildingStorey(name+elevation) + IfcRelContainedInSpatialStructure → element별 storey 부착 + `IfcModel.storeys` 요약
+- [ ] `IfcSite.RefLat·Long` fallback, 프로파일·배치 회전, inner-bound 구멍, 수동 배치 보정 API
 - 보조 경로: 복잡한 파일은 외부 IfcOpenShell `IfcConvert`로 STEP/OBJ 변환 후 기존 import 재사용 (fallback)
 
 ### Phase 4 — DEM → Mesh ⚠️
@@ -189,11 +190,12 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 - [ ] **3D(Track B)**: DEM 격자당 삼각형 2개 → 하이트필드 STL → `sdf_from_triangles` → `CutCellMesher` (줌인 트랙, 후순위)
 - [x] NODATA·경계 처리 (NODATA→wall), 도메인 클립(`Dem::crop`)
 
-### Phase 5 — 지형+건물 결합 ⚠️
-- [x] 건물 풋프린트 추출 (IFC extrude 프로파일 / FaceSet convex hull → `gfd-geo::ifc`)
-- [x] **2D burn-in Block 방식**(`z_b` 상향 + 셀 건조화): 서버 `flood.burn_buildings`(명시 footprint) + `flood.load_ifc`(IFC→footprint→burn, IfcMapConversion 정합). point-in-polygon. command-core 명령 노출
-- [x] **IFC ⇄ SWE 결합** 검증 (`flood_burn_buildings_blocks_cells`: 건물 셀이 실행 후에도 건조 유지)
-- [ ] Hole(reflective wall) / Roughness(per-cell Manning) 방식, 3D `sdf_union` cut-cell, foundation 접지면 처리
+### Phase 5 — 지형+건물 결합 ✅
+- [x] 건물 풋프린트 추출 (IFC extrude 프로파일 / FaceSet / FacetedBrep convex hull → `gfd-geo::ifc`)
+- [x] **2D burn-in 3종**: Block(`z_b` 상향) / **Hole**(reflective 내부 벽, `solver.set_solid`) / **Roughness**(per-cell Manning, `solver.set_manning`). 서버 `flood.burn_buildings`/`flood.load_ifc`에 `method` 파라미터. point-in-polygon
+- [x] **IFC ⇄ SWE 결합** 검증 (`flood_burn_buildings_blocks_cells`, `flood_hole_method_keeps_cell_dry`, SWE `hole_mask_blocks_flow`/`roughness_damps_flow`)
+- [x] **3D `sdf_union` cut-cell**: `gfd-geo::sdf`(polygon/prism) + terrain(z_b 양선형) union → 기존 `CutCellMesher`로 body-fitted 메시. 서버 `flood.build_3d_mesh` (`flood_build_3d_mesh_with_building`)
+- [ ] foundation 접지면 처리, 강건한 spatial-index(다수 건물)
 
 ### Phase 6 — 2D SWE 솔버 (`gfd-fluid/src/shallow_water/`) ⚠️ **(핵심·거의완료)**
 - [x] 보존변수 `[h, hu, hv]` 상태 + bed `z_b` (`SwState`, `SwGrid`, `SwParams`)
@@ -214,10 +216,12 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 - [ ] reflective wall(건물·제방) BC
 - [ ] `gfd-boundary` 위 홍수 BC 래퍼
 
-### Phase 8 — 하이브리드 커플링 (one-way) ⬜
-- [ ] SWE 결과(수심·평면유속)를 3D 줌인 도메인 경계의 유입 프로파일로 매핑
-- [ ] VOF 초기 자유수면(α) 초기화 from SWE h
-- [ ] 줌인 영역 자동 추출(고유속/고수심 hotspot 탐지)
+### Phase 8 — 하이브리드 커플링 (one-way) ⚠️
+- [x] **3D 줌인 one-way coupling** `flood.zoom_3d` — 서브영역 [xmin..ymax] 추출 →
+  3D VOF α 초기화(자유수면 아래 물=1) + 깊이평균 유속(u,v,0) 시드. 체적보존 검증
+  (3D 물 체적 ≈ 2D SWE 체적, `flood_zoom_3d_conserves_volume`). VofSolverImpl 구성 확인
+- [x] VOF 초기 자유수면(α) 초기화 from SWE h (column-fill)
+- [ ] 줌인 영역 자동 추출(hotspot 탐지), VOF 시간전진 실제 실행(transient), two-way 피드백
 
 ### Phase 9 — 후처리 · GUI ⚠️
 - [x] **gfd-server JSON-RPC**: `flood.load_dem`(.asc text|path → grid+z_b), `flood.seed`(level/disk/dam_break), `flood.run`(t_end/steps + max-depth 갱신), `flood.result`(depth/max/velocity/bed raster), `flood.reset`
@@ -225,9 +229,11 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 - [x] **GUI 렌더러** `FloodLayer` (ViewportV2): z_b 하이트필드 + 수심 컬러맵(건조=지형색, 수심=파랑 램프, 로컬원점 시프트)
 - [x] **최대침수심(hazard)** max-depth 누적 (`flood.result field=max`)
 - [x] **래스터 export** `flood.export_raster` — georeferenced ESRI ASCII(.asc, 원점 복원, QGIS/ArcGIS 호환, DEM 리더와 round-trip)
-- [x] **시간 스텝 UI** `FloodToolbar` — 필드 선택(depth/max/velocity) + Δt 슬라이더 + Run/Run×5 + 시간·peak 표시 + export/reset
-- [x] **`flood.load_ifc`** 건물 burn-in 연동 (Phase 5)
-- [ ] 도달시간(arrival time) / v·√h hazard 래스터, **GeoTIFF**(tiff 크레이트), 과거 프레임 scrub-back(히스토리 저장)
+- [x] **시간 스텝 UI** `FloodToolbar` — 필드 선택(depth/max/arrival/velocity) + Δt 슬라이더 + Run/Run×5 + 시간·peak 표시 + .asc/.tif export/reset
+- [x] **`flood.load_ifc`** 건물 burn-in 연동 (Phase 5, method=block/hole/roughness)
+- [x] **도달시간(arrival time)** 래스터 (`flood.result`/`export field=arrival`, -1=미침수)
+- [x] **GeoTIFF export** (`flood.export_raster format=geotiff`) — 직접 바이트, 의존성 없음
+- [ ] v·√h hazard 래스터, 과거 프레임 scrub-back(히스토리 저장)
 
 ### Phase 10 — 검증 (Validation) ⬜
 - [ ] **Ritter/Stoker 댐붕괴** 해석해 (1D, well-balanced·wetting/drying 1차 검증)
@@ -298,13 +304,14 @@ docs/
 | 0 Scaffolding | ✅ 완료 | gfd-geo 크레이트(workspace 등록) + `shallow_water` 모듈 + `examples/flood_dambreak_1d.json` 스키마 초안 |
 | 1 DEM I/O | ⚠️ 부분 | `.asc` 리더 + `Dem`(bilinear 샘플러·crop·downsample) ✅ / GeoTIFF·LAS·proj는 후순위 ⬜ |
 | 2 CRS/Georef | ⬜ | EPSG 재투영 + 로컬원점 시프트 + 한국 좌표계 프리셋 + f32 정밀도 가드 |
-| 3 IFC Reader | ⚠️ 부분 | **토크나이저 + 단위 + 외피 요소 + IfcExtrudedAreaSolid(사각형·폴리곤) + Triangulated/Polygonal FaceSet(convex hull) + IfcLocalPlacement + IfcMapConversion 지오레퍼런싱 → footprint+높이** (`gfd-geo::ifc`). FacetedBrep full mesh, 공간 위계, 배치 회전 ⬜ |
+| 3 IFC Reader | ✅ 거의완료 | **토크나이저 + 단위 + 외피 요소 + ExtrudedAreaSolid + Triangulated/Polygonal FaceSet + FacetedBrep(IfcClosedShell→PolyLoop) + IfcLocalPlacement + IfcMapConversion 지오레퍼런싱 + 공간위계(IfcBuildingStorey/RelContained→storey name·elevation) → footprint+높이** (`gfd-geo::ifc`). 배치 회전·inner-bound 구멍·edge-loop ⬜ |
 | 4 DEM→Mesh | ⚠️ 부분 | **2D Track A 완료**: `Dem::to_bed_field`→SwGrid+z_b (NODATA→wall), end-to-end 테스트 `tests/flood_dem_to_swe.rs` / 3D Track B(하이트필드 STL→cut-cell) ⬜ |
-| 5 결합 | ⚠️ 부분 | **풋프린트 추출 + Block burn-in(z_b 상향) + IFC→SWE 결합(flood.load_ifc/burn_buildings, MapConversion 정합) 완료·검증**, Hole/Roughness/3D SDF union ⬜ |
+| 5 결합 | ✅ | **풋프린트 추출 + Block/Hole/Roughness burn-in + IFC→SWE 결합(MapConversion 정합) + 3D SDF union cut-cell(flood.build_3d_mesh) 완료·검증** |
 | 6 SWE 솔버 | ✅ 완료 | HLLC + Audusse well-balanced + wetting/drying + positivity + Manning(semi-impl) + 적응 CFL + SSP-RK2 + **MUSCL 2차(minmod η-재구성 + 중앙 bed 소스)**. lake-at-rest C-property 1e-10(1·2차), Ritter 댐붕괴(MUSCL 오차 0.027 vs 1차 0.100), 질량보존 |
 | 7 홍수 BC | ⬜ | hydrograph / outflow / rainfall / wall |
 | 8 하이브리드 | ⬜ | SWE→3D VOF one-way coupling |
-| 9 후처리/GUI | ⚠️ 거의완료 | **flood.* RPC(load_dem/seed/run/result/burn/load_ifc/export/reset) + command-core 명령(AI/MCP/리본) + AppState.flood + FloodLayer(수심 컬러맵) + FloodToolbar(시간 스텝·필드·export UI) + max-depth hazard + georeferenced .asc export 완료**, 도달시간/GeoTIFF/scrub-back ⬜ |
+| 8 하이브리드 | ⚠️ 부분 | **3D 줌인 one-way coupling(flood.zoom_3d): SWE→VOF α+유속 초기화, 체적보존 검증** / hotspot 자동탐지·VOF transient·two-way ⬜ |
+| 9 후처리/GUI | ✅ 거의완료 | **flood.* RPC(load_dem/seed/run/result/burn/load_ifc/zoom_3d/build_3d_mesh/export/reset) + command-core(AI/MCP/리본) + FloodLayer(수심 컬러맵) + FloodToolbar(시간 스텝·필드·export) + max-depth/arrival hazard + georeferenced .asc·GeoTIFF export 완료**, scrub-back/v·√h hazard ⬜ |
 | 10 검증 | ⬜ | Ritter/Stoker, lake-at-rest, Malpasset, Toce, Carrier-Greenspan |
 
 범례: ⬜ 미착수 · 🔨 진행 중 · ⚠️ 부분 · ✅ 완료

@@ -173,7 +173,7 @@ export interface FloodScene {
   /** Currently-displayed field raster (depth / max / velocity). */
   values: number[];
   /** Which field `values` holds. */
-  field: 'depth' | 'max' | 'velocity';
+  field: 'depth' | 'max' | 'arrival' | 'velocity';
   /** [min, max] of `values` for the colormap. */
   range: [number, number];
   /** Simulated time [s]. */
