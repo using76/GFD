@@ -12,6 +12,7 @@
 
 pub mod dem;
 pub mod ifc;
+pub mod sdf;
 
 pub use dem::Dem;
 pub use ifc::{IfcElement, IfcModel};

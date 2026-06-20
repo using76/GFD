@@ -123,6 +123,17 @@ impl Dem {
         best.map(|(_, v)| v)
     }
 
+    /// Signed distance from a point to the terrain surface for the 3D SDF track:
+    /// `z - surface(x, y)`, so it is **negative below ground** (inside the terrain
+    /// solid) and positive in the air. Outside the grid the point is treated as
+    /// fluid (returns `+∞`).
+    pub fn distance_to_surface(&self, x: f64, y: f64, z: f64) -> f64 {
+        match self.sample(x, y) {
+            Some(surf) => z - surf,
+            None => f64::INFINITY,
+        }
+    }
+
     /// Phase 4 bridge — flatten this DEM into SWE-solver inputs: the grid dims,
     /// cell size, and a row-major bed-elevation field `z_b` (same layout as `z`).
     /// NODATA cells become an impermeable wall by setting their bed far above the

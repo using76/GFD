@@ -9,12 +9,13 @@
 //! `IfcLocalPlacement` chain (translation). Triangulated/Brep/faceted reps,
 //! profile rotation, and `IfcMapConversion` georeferencing are follow-ups.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::{GeoError, GeoResult};
 
 mod parse;
-use parse::{Record, Store};
+use parse::{refs_in, Record, Store};
 
 /// One extracted envelope element: its IFC type, name, and footprint polygon(s)
 /// in world XY (metres), with the extrusion base elevation and height.
@@ -29,6 +30,19 @@ pub struct IfcElement {
     pub base_z: f64,
     /// Extrusion height (metres).
     pub height: f64,
+    /// Containing building storey name (IfcRelContainedInSpatialStructure), if any.
+    pub storey_name: Option<String>,
+    /// Containing storey elevation (metres); 0 if unknown.
+    pub storey_elevation: f64,
+}
+
+/// A building storey in the spatial hierarchy.
+#[derive(Debug, Clone)]
+pub struct StoreyInfo {
+    pub id: u32,
+    pub name: String,
+    pub elevation: f64,
+    pub element_count: usize,
 }
 
 /// Parsed IFC building model: envelope elements + the length→metre scale used.
@@ -36,6 +50,8 @@ pub struct IfcElement {
 pub struct IfcModel {
     pub length_scale: f64,
     pub elements: Vec<IfcElement>,
+    /// Spatial hierarchy: building storeys sorted by elevation (ascending).
+    pub storeys: Vec<StoreyInfo>,
 }
 
 const ENVELOPE: &[&str] = &[
@@ -55,19 +71,73 @@ pub fn parse_ifc(text: &str) -> GeoResult<IfcModel> {
     let length_scale = detect_length_scale(&store);
 
     let map = detect_map_conversion(&store);
+    // Spatial hierarchy: storey id → (name, elevation) and element id → storey id.
+    let storey_info = build_storey_map(&store, length_scale);
+    let elem_storey = build_element_to_storey_map(&store);
+
     let mut elements = Vec::new();
     for (&id, rec) in store.iter() {
         if !ENVELOPE.contains(&rec.ty.as_str()) {
             continue;
         }
-        if let Some(el) = extract_element(&store, id, rec, length_scale, map.as_ref()) {
+        if let Some(el) = extract_element(&store, id, rec, length_scale, map.as_ref(), &storey_info, &elem_storey) {
             if !el.footprints.is_empty() {
                 elements.push(el);
             }
         }
     }
     elements.sort_by_key(|e| e.id);
-    Ok(IfcModel { length_scale, elements })
+
+    // Storey summary, sorted by elevation, with element counts.
+    let mut storeys: Vec<StoreyInfo> = storey_info.iter().map(|(&id, (name, elev))| {
+        let element_count = elements.iter().filter(|e| e.storey_name.as_deref() == Some(name.as_str())).count();
+        StoreyInfo { id, name: name.clone(), elevation: *elev, element_count }
+    }).collect();
+    storeys.sort_by(|a, b| a.elevation.partial_cmp(&b.elevation).unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok(IfcModel { length_scale, elements, storeys })
+}
+
+/// Map IfcBuildingStorey id → (name, absolute elevation in metres).
+fn build_storey_map(store: &Store, scale: f64) -> HashMap<u32, (String, f64)> {
+    let mut map = HashMap::new();
+    for (&id, rec) in store.iter() {
+        if rec.ty == "IFCBUILDINGSTOREY" {
+            let name = rec.string_arg(2).unwrap_or_else(|| format!("Storey-{id}"));
+            // Elevation: prefer the placement Z; fall back to the Elevation attr (last float).
+            let placement = rec.refs().iter().find(|&&r| store.ty_of(r) == Some("IFCLOCALPLACEMENT")).copied();
+            let elev = placement
+                .map(|p| placement_world(store, p, 0).2 * scale)
+                .filter(|z| z.abs() > 1e-12)
+                .or_else(|| rec.floats().last().map(|e| e * scale))
+                .unwrap_or(0.0);
+            map.insert(id, (name, elev));
+        }
+    }
+    map
+}
+
+/// Map element id → containing storey id via IfcRelContainedInSpatialStructure.
+/// Arg layout: (GlobalId, OwnerHistory, Name, Desc, RelatedElements, RelatingStructure).
+fn build_element_to_storey_map(store: &Store) -> HashMap<u32, u32> {
+    let mut map = HashMap::new();
+    for rec in store.values() {
+        if rec.ty != "IFCRELCONTAINEDINSPATIALSTRUCTURE" {
+            continue;
+        }
+        let fields = parse::split_top_level(&rec.args);
+        if fields.len() < 6 {
+            continue;
+        }
+        let related = refs_in(&fields[4]); // RelatedElements = (#e1, #e2, ...)
+        let structure = refs_in(&fields[5]); // RelatingStructure = #storey
+        if let Some(&storey) = structure.first() {
+            for e in related {
+                map.insert(e, storey);
+            }
+        }
+    }
+    map
 }
 
 /// IFC4 `IfcMapConversion` — maps engineering (local) coords to the projected map
@@ -124,7 +194,15 @@ fn detect_length_scale(store: &Store) -> f64 {
 
 /// Build an element from its product record: find its placement (translation)
 /// and representation's extruded solids → footprints + height.
-fn extract_element(store: &Store, id: u32, rec: &Record, scale: f64, map: Option<&MapConversion>) -> Option<IfcElement> {
+fn extract_element(
+    store: &Store,
+    id: u32,
+    rec: &Record,
+    scale: f64,
+    map: Option<&MapConversion>,
+    storey_info: &HashMap<u32, (String, f64)>,
+    elem_storey: &HashMap<u32, u32>,
+) -> Option<IfcElement> {
     let refs = rec.refs();
     let name = rec.string_arg(2).unwrap_or_default();
 
@@ -167,6 +245,14 @@ fn extract_element(store: &Store, id: u32, rec: &Record, scale: f64, map: Option
                         base_z = base_z.min(oz * scale + zlo);
                     }
                 }
+                // Faceted B-rep (IfcClosedShell of IfcFace/IfcPolyLoop) → hull outline.
+                Some("IFCFACETEDBREP") => {
+                    if let Some((hull, zlo, zhi)) = faceted_brep_footprint(store, item, scale) {
+                        footprints.push(hull.iter().map(|p| [p[0] + ox * scale, p[1] + oy * scale]).collect());
+                        height = height.max(zhi - zlo);
+                        base_z = base_z.min(oz * scale + zlo);
+                    }
+                }
                 _ => {}
             }
         }
@@ -182,7 +268,71 @@ fn extract_element(store: &Store, id: u32, rec: &Record, scale: f64, map: Option
             }
         }
     }
-    Some(IfcElement { id, ifc_type: rec.ty.clone(), name, footprints, base_z, height })
+    let (storey_name, storey_elevation) = elem_storey
+        .get(&id)
+        .and_then(|sid| storey_info.get(sid))
+        .map(|(n, e)| (Some(n.clone()), *e))
+        .unwrap_or((None, 0.0));
+    Some(IfcElement { id, ifc_type: rec.ty.clone(), name, footprints, base_z, height, storey_name, storey_elevation })
+}
+
+/// Footprint of an IfcFacetedBrep: walk Outer(IfcClosedShell) → IfcFace →
+/// IfcFaceOuterBound/InnerBound → IfcPolyLoop, collect all XY points, and return
+/// the convex hull + z-extent (same shape as `faceset_footprint`).
+fn faceted_brep_footprint(store: &Store, brep: u32, scale: f64) -> Option<(Vec<[f64; 2]>, f64, f64)> {
+    let rec = store.get(brep)?;
+    let shell = *rec.refs().first()?; // Outer: IfcClosedShell
+    let shell_rec = store.get(shell)?;
+    if shell_rec.ty != "IFCCLOSEDSHELL" {
+        return None;
+    }
+    let mut pts2d = Vec::new();
+    let mut zlo = f64::INFINITY;
+    let mut zhi = f64::NEG_INFINITY;
+    for face in shell_rec.refs() {
+        let Some(face_rec) = store.get(face) else { continue };
+        if face_rec.ty != "IFCFACE" {
+            continue;
+        }
+        for bound in face_rec.refs() {
+            let Some(bound_rec) = store.get(bound) else { continue };
+            if bound_rec.ty != "IFCFACEOUTERBOUND" && bound_rec.ty != "IFCFACEBOUND" {
+                continue;
+            }
+            if let Some(&loop_id) = bound_rec.refs().first() {
+                if let Some(pts) = polyloop_points(store, loop_id, scale) {
+                    for p in pts {
+                        pts2d.push([p[0], p[1]]);
+                        zlo = zlo.min(p[2]);
+                        zhi = zhi.max(p[2]);
+                    }
+                }
+            }
+        }
+    }
+    let hull = convex_hull(&pts2d);
+    if hull.len() < 3 {
+        None
+    } else {
+        Some((hull, zlo, zhi))
+    }
+}
+
+/// [x,y,z] points (metres) of an IfcPolyLoop; None for edge/vertex loops.
+fn polyloop_points(store: &Store, loop_id: u32, scale: f64) -> Option<Vec<[f64; 3]>> {
+    let rec = store.get(loop_id)?;
+    if rec.ty != "IFCPOLYLOOP" {
+        return None;
+    }
+    let pts: Vec<[f64; 3]> = rec.refs().iter().map(|&p| {
+        let c = cartesian_point(store, p);
+        [c[0] * scale, c[1] * scale, c[2] * scale]
+    }).collect();
+    if pts.len() < 3 {
+        None
+    } else {
+        Some(pts)
+    }
 }
 
 /// Accumulated translation of an IfcLocalPlacement chain (metres-unscaled local
@@ -431,6 +581,53 @@ END-ISO-10303-21;";
         // 2×2 m centered at origin, shifted by (5e5, 4e6).
         assert!((b[0] - 499999.0).abs() < 1e-6 && (b[2] - 500001.0).abs() < 1e-6, "x bounds {b:?}");
         assert!((b[1] - 3999999.0).abs() < 1e-6 && (b[3] - 4000001.0).abs() < 1e-6, "y bounds {b:?}");
+    }
+
+    #[test]
+    fn spatial_hierarchy_and_faceted_brep() {
+        // A wall as an IfcFacetedBrep, contained in a storey at elevation 3 m.
+        let ifc = "\
+ISO-10303-21;
+DATA;
+#1=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);
+#5=IFCCARTESIANPOINT((0.,0.,3.));
+#6=IFCAXIS2PLACEMENT3D(#5,$,$);
+#7=IFCLOCALPLACEMENT($,#6);
+#8=IFCBUILDINGSTOREY('g',$,'Level 1',$,$,#7,$,$,.ELEMENT.,3.0);
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCLOCALPLACEMENT($,#11);
+#20=IFCCARTESIANPOINT((0.,0.,0.));
+#21=IFCCARTESIANPOINT((4.,0.,0.));
+#22=IFCCARTESIANPOINT((4.,2.,0.));
+#23=IFCCARTESIANPOINT((0.,2.,0.));
+#24=IFCCARTESIANPOINT((0.,0.,3.));
+#30=IFCPOLYLOOP((#20,#21,#22,#23));
+#31=IFCFACEOUTERBOUND(#30,.T.);
+#32=IFCFACE((#31));
+#33=IFCPOLYLOOP((#20,#21,#24));
+#34=IFCFACEOUTERBOUND(#33,.T.);
+#35=IFCFACE((#34));
+#36=IFCCLOSEDSHELL((#32,#35));
+#37=IFCFACETEDBREP(#36);
+#40=IFCSHAPEREPRESENTATION(#99,'Body','Brep',(#37));
+#41=IFCPRODUCTDEFINITIONSHAPE($,$,(#40));
+#50=IFCWALL('w',$,'Wall-A',$,$,#12,#41,$);
+#60=IFCRELCONTAINEDINSPATIALSTRUCTURE('r',$,$,$,(#50),#8);
+ENDSEC;
+END-ISO-10303-21;";
+        let m = parse_ifc(ifc).unwrap();
+        assert_eq!(m.elements.len(), 1, "faceted-brep wall extracted");
+        let e = &m.elements[0];
+        // Footprint hull = 4x2 rectangle; z-extent 0..3 → height 3.
+        let b = m.bounds().unwrap();
+        assert!((b[2] - 4.0).abs() < 1e-9 && (b[3] - 2.0).abs() < 1e-9, "brep hull bounds {b:?}");
+        assert!((e.height - 3.0).abs() < 1e-9, "z-extent → height 3, got {}", e.height);
+        // Spatial hierarchy: element attached to "Level 1" at elevation 3 m.
+        assert_eq!(e.storey_name.as_deref(), Some("Level 1"));
+        assert!((e.storey_elevation - 3.0).abs() < 1e-9, "storey elev {}", e.storey_elevation);
+        assert_eq!(m.storeys.len(), 1);
+        assert_eq!(m.storeys[0].element_count, 1);
     }
 
     #[test]

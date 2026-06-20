@@ -14,37 +14,41 @@ pub struct Record {
     pub args: String,
 }
 
+/// All `#N` entity references in `s`, in order, skipping quoted-string contents.
+pub fn refs_in(s: &str) -> Vec<u32> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\'' {
+            i += 1;
+            while i < b.len() {
+                if b[i] == b'\'' {
+                    if i + 1 < b.len() && b[i + 1] == b'\'' { i += 2; continue; }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+        } else if b[i] == b'#' {
+            let st = i + 1;
+            let mut j = st;
+            while j < b.len() && b[j].is_ascii_digit() { j += 1; }
+            if j > st {
+                if let Ok(n) = s[st..j].parse::<u32>() { out.push(n); }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 impl Record {
     /// All `#N` entity references in argument order.
     pub fn refs(&self) -> Vec<u32> {
-        let b = self.args.as_bytes();
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < b.len() {
-            if b[i] == b'\'' {
-                // skip quoted string (IFC escapes '' )
-                i += 1;
-                while i < b.len() {
-                    if b[i] == b'\'' {
-                        if i + 1 < b.len() && b[i + 1] == b'\'' { i += 2; continue; }
-                        i += 1;
-                        break;
-                    }
-                    i += 1;
-                }
-            } else if b[i] == b'#' {
-                let s = i + 1;
-                let mut j = s;
-                while j < b.len() && b[j].is_ascii_digit() { j += 1; }
-                if j > s {
-                    if let Ok(n) = self.args[s..j].parse::<u32>() { out.push(n); }
-                }
-                i = j;
-            } else {
-                i += 1;
-            }
-        }
-        out
+        refs_in(&self.args)
     }
 
     /// Numeric literals in order, skipping quoted strings and `#N` refs (so the
