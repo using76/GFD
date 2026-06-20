@@ -104,24 +104,75 @@ impl SwSolver {
         (f, src_l, src_r)
     }
 
-    /// Spatial residual dU/dt for every cell (hyperbolic terms only).
+    /// Spatial residual dU/dt for every cell (hyperbolic terms only). For
+    /// `order >= 2` it uses MUSCL reconstruction of the free surface η = h + z_b
+    /// (and u, v, bed z) with minmod limiting — well-balanced (the centered bed
+    /// source exactly cancels the reconstructed-face pressure imbalance at rest).
     fn residual(&self, s: &SwState, rh: &mut [f64], rhu: &mut [f64], rhv: &mut [f64]) {
         let (nc, nr) = (self.grid.ncols, self.grid.nrows);
         let (dx, dy) = (self.grid.dx, self.grid.dy);
+        let n = s.n_cells();
         rh.iter_mut().for_each(|x| *x = 0.0);
         rhu.iter_mut().for_each(|x| *x = 0.0);
         rhv.iter_mut().for_each(|x| *x = 0.0);
 
+        let muscl = self.params.order >= 2;
+
+        // Cell primitives + free surface.
+        let mut up = vec![0.0; n];
+        let mut vp = vec![0.0; n];
+        let mut eta = vec![0.0; n];
+        for i in 0..n {
+            let (u, v) = velocity(s, i, &self.params);
+            up[i] = u;
+            vp[i] = v;
+            eta[i] = s.h[i].max(0.0) + s.z_b[i];
+        }
+        // minmod-limited slopes (per cell, per direction). Zero unless MUSCL, and
+        // zero on boundary cells (one-sided → drop to 1st order there).
+        let (mut sxe, mut sxu, mut sxv, mut sxz) = (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+        let (mut sye, mut syu, mut syv, mut syz) = (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+        if muscl {
+            for r in 0..nr {
+                for c in 1..nc.saturating_sub(1) {
+                    let i = self.grid.idx(c, r);
+                    let (l, rr) = (self.grid.idx(c - 1, r), self.grid.idx(c + 1, r));
+                    sxe[i] = minmod(eta[i] - eta[l], eta[rr] - eta[i]);
+                    sxu[i] = minmod(up[i] - up[l], up[rr] - up[i]);
+                    sxv[i] = minmod(vp[i] - vp[l], vp[rr] - vp[i]);
+                    sxz[i] = minmod(s.z_b[i] - s.z_b[l], s.z_b[rr] - s.z_b[i]);
+                }
+            }
+            for c in 0..nc {
+                for r in 1..nr.saturating_sub(1) {
+                    let i = self.grid.idx(c, r);
+                    let (b, t) = (self.grid.idx(c, r - 1), self.grid.idx(c, r + 1));
+                    sye[i] = minmod(eta[i] - eta[b], eta[t] - eta[i]);
+                    syu[i] = minmod(up[i] - up[b], up[t] - up[i]);
+                    syv[i] = minmod(vp[i] - vp[b], vp[t] - vp[i]);
+                    syz[i] = minmod(s.z_b[i] - s.z_b[b], s.z_b[t] - s.z_b[i]);
+                }
+            }
+        }
+        // Reconstructed face Cell of cell `i`, `side` = +1 (high face) / −1 (low).
+        let rx = |i: usize, side: f64| -> Cell {
+            let z = s.z_b[i] + side * 0.5 * sxz[i];
+            Cell { h: (eta[i] + side * 0.5 * sxe[i] - z).max(0.0), u: up[i] + side * 0.5 * sxu[i], v: vp[i] + side * 0.5 * sxv[i], zb: z }
+        };
+        let ry = |i: usize, side: f64| -> Cell {
+            let z = s.z_b[i] + side * 0.5 * syz[i];
+            Cell { h: (eta[i] + side * 0.5 * sye[i] - z).max(0.0), u: up[i] + side * 0.5 * syu[i], v: vp[i] + side * 0.5 * syv[i], zb: z }
+        };
+
         // ---- x-direction faces (normal = x; normal momentum = hu) ----
         for r in 0..nr {
             for c in 0..=nc {
-                // interface between cell (c-1,r) [left] and (c,r) [right]
                 let li = if c > 0 { Some(self.grid.idx(c - 1, r)) } else { None };
                 let ri = if c < nc { Some(self.grid.idx(c, r)) } else { None };
                 let (l, r_cell) = match (li, ri) {
-                    (Some(li), Some(ri)) => (self.cell(s, li), self.cell(s, ri)),
-                    (None, Some(ri)) => { let ic = self.cell(s, ri); (self.ghost(ic, self.bc.xmin, true), ic) }
-                    (Some(li), None) => { let ic = self.cell(s, li); (ic, self.ghost(ic, self.bc.xmax, true)) }
+                    (Some(li), Some(ri)) => (rx(li, 1.0), rx(ri, -1.0)),
+                    (None, Some(ri)) => { let ic = rx(ri, -1.0); (self.ghost(ic, self.bc.xmin, true), ic) }
+                    (Some(li), None) => { let ic = rx(li, 1.0); (ic, self.ghost(ic, self.bc.xmax, true)) }
                     (None, None) => continue,
                 };
                 let (f, src_l, src_r) = self.interface(l, r_cell, true);
@@ -144,13 +195,12 @@ impl SwSolver {
                 let li = if r > 0 { Some(self.grid.idx(c, r - 1)) } else { None };
                 let ri = if r < nr { Some(self.grid.idx(c, r)) } else { None };
                 let (l, r_cell) = match (li, ri) {
-                    (Some(li), Some(ri)) => (self.cell(s, li), self.cell(s, ri)),
-                    (None, Some(ri)) => { let ic = self.cell(s, ri); (self.ghost(ic, self.bc.ymin, false), ic) }
-                    (Some(li), None) => { let ic = self.cell(s, li); (ic, self.ghost(ic, self.bc.ymax, false)) }
+                    (Some(li), Some(ri)) => (ry(li, 1.0), ry(ri, -1.0)),
+                    (None, Some(ri)) => { let ic = ry(ri, -1.0); (self.ghost(ic, self.bc.ymin, false), ic) }
+                    (Some(li), None) => { let ic = ry(li, 1.0); (ic, self.ghost(ic, self.bc.ymax, false)) }
                     (None, None) => continue,
                 };
                 let (f, src_l, src_r) = self.interface(l, r_cell, false);
-                // For y-faces the HLLC normal momentum is hv; transverse is hu.
                 if let Some(li) = li {
                     rh[li] -= f[0] / dy;
                     rhv[li] -= (f[1] + src_l) / dy;
@@ -161,6 +211,21 @@ impl SwSolver {
                     rhv[ri] += (f[1] + src_r) / dy;
                     rhu[ri] += f[2] / dy;
                 }
+            }
+        }
+
+        // ---- MUSCL centered bed-slope source (well-balancing) ----
+        // The hydrostatic thrust of the bed sloping across the cell:
+        //   Sc = −g·h̄·(z_high − z_low)/d  per direction (h̄ = mean face depth).
+        // Zero on a flat bed (no spurious force), and exactly cancels the
+        // reconstructed-face pressure imbalance for still water (C-property).
+        if muscl {
+            let g = self.params.gravity;
+            for i in 0..n {
+                let (hl, hr) = (rx(i, -1.0).h, rx(i, 1.0).h);
+                rhu[i] -= g * 0.5 * (hl + hr) * sxz[i] / dx;
+                let (hb, ht) = (ry(i, -1.0).h, ry(i, 1.0).h);
+                rhv[i] -= g * 0.5 * (hb + ht) * syz[i] / dy;
             }
         }
     }
@@ -253,6 +318,19 @@ impl SwSolver {
     }
 }
 
+/// Minmod slope limiter: 0 if the one-sided differences disagree in sign, else
+/// the smaller-magnitude one. Total-variation diminishing.
+#[inline]
+fn minmod(a: f64, b: f64) -> f64 {
+    if a * b <= 0.0 {
+        0.0
+    } else if a.abs() < b.abs() {
+        a
+    } else {
+        b
+    }
+}
+
 struct Scratch {
     rh: Vec<f64>,
     rhu: Vec<f64>,
@@ -338,6 +416,58 @@ mod tests {
         let front_x = front as f64 * dx;
         assert!(front_x > dam as f64 * dx, "front did not advance");
         assert!(front_x <= tip + 5.0 * dx, "front {front_x} overran analytic tip {tip}");
+    }
+
+    #[test]
+    fn muscl_preserves_c_property() {
+        // MUSCL (order 2) must STILL keep still water flat over a bumpy bed —
+        // the centered bed source must cancel the reconstructed pressure imbalance.
+        let (nc, nr) = (40, 1);
+        let mut zb = flat(nc, nr);
+        for c in 0..nc {
+            zb[c] = 0.3 * (c as f64 * 0.4).sin().abs();
+        }
+        let s0 = SwState::lake_at_rest(zb, 0.6);
+        let grid = SwGrid::new(nc, nr, 1.0, 1.0);
+        let solver = SwSolver::new(grid, SwParams { manning_n: 0.0, order: 2, ..Default::default() }, SwBoundaries::default());
+        let mut s = s0.clone();
+        for _ in 0..50 {
+            solver.step(&mut s, 0.05);
+        }
+        for i in 0..s.n_cells() {
+            assert!((s.h[i] + s.z_b[i] - 0.6).abs() < 1e-10, "MUSCL eta drift at {i}: {}", s.h[i] + s.z_b[i]);
+            assert!(s.hu[i].abs() < 1e-9, "MUSCL spurious momentum at {i}");
+        }
+    }
+
+    #[test]
+    fn muscl_sharper_than_first_order_dam_break() {
+        // Order 2 should resolve the Ritter dam-front sharper → smaller dam-depth
+        // error than 1st order, and the front advances further (less diffusion).
+        let (nc, nr) = (400, 1);
+        let (dx, g, hl) = (1.0, 9.81, 10.0);
+        let dam = nc / 2;
+        let run = |order: u8| -> (f64, usize) {
+            let mut s = SwState::dry(flat(nc, nr));
+            for c in 0..dam { s.h[c] = hl; }
+            let solver = SwSolver::new(
+                SwGrid::new(nc, nr, dx, 1.0),
+                SwParams { gravity: g, manning_n: 0.0, order, ..Default::default() },
+                SwBoundaries { xmin: SwBc::Transmissive, xmax: SwBc::Transmissive, ..Default::default() },
+            );
+            solver.advance(&mut s, 4.0, 100000);
+            let mut front = dam;
+            for c in dam..nc { if s.h[c] > 0.05 { front = c; } }
+            (s.h[dam], front)
+        };
+        let (h1, f1) = run(1);
+        let (h2, f2) = run(2);
+        let exact = 4.0 / 9.0 * hl;
+        let (e1, e2) = ((h1 - exact).abs(), (h2 - exact).abs());
+        eprintln!("1st: h_dam={h1:.4} (err {e1:.4}) front={f1} | MUSCL: h_dam={h2:.4} (err {e2:.4}) front={f2}");
+        // MUSCL stays accurate at the dam and resolves the front at least as far.
+        assert!(e2 < 0.2, "MUSCL dam-depth error {e2} too large");
+        assert!(f2 >= f1, "MUSCL front {f2} should reach ≥ 1st-order front {f1}");
     }
 
     #[test]

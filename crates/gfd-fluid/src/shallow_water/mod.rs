@@ -80,13 +80,16 @@ pub struct SwParams {
     pub manning_n: f64,
     /// Wet/dry threshold [m]; cells with h ≤ h_dry are treated as dry (u = v = 0).
     pub h_dry: f64,
-    /// Courant number for the adaptive timestep (≤ 1 for the 1st-order scheme).
+    /// Courant number for the adaptive timestep (≤ 1).
     pub cfl: f64,
+    /// Spatial accuracy: 1 = Godunov (piecewise constant), 2 = MUSCL with minmod
+    /// surface (η) reconstruction (well-balanced, sharper fronts).
+    pub order: u8,
 }
 
 impl Default for SwParams {
     fn default() -> Self {
-        Self { gravity: 9.81, manning_n: 0.03, h_dry: 1.0e-4, cfl: 0.45 }
+        Self { gravity: 9.81, manning_n: 0.03, h_dry: 1.0e-4, cfl: 0.45, order: 1 }
     }
 }
 

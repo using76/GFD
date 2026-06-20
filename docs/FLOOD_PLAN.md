@@ -202,7 +202,9 @@ S_f (Manning 마찰) = [ 0 , -g n² u√(u²+v²)/h^{1/3} , -g n² v√(u²+v²)
 - [x] **Manning 마찰** 소스항 (semi-implicit, `friction`)
 - [x] **CFL 적응 dt** (`cfl_timestep`, smax=|u|+√(gh))
 - [x] 1차 Godunov + SSP-RK2 (시간 2차). Ritter 댐붕괴·질량보존 검증
-- [ ] **2차 MUSCL+minmod 공간 재구성** (잔여 — η 재구성 well-balanced 유지 필요)
+- [x] **2차 MUSCL+minmod 공간 재구성** (`SwParams.order=2`) — η(자유수면) 재구성으로
+  well-balanced 유지(C-property 1e-10), bed-기울기 중앙 소스(평지에서 0). Ritter
+  dam 깊이 오차 1차 0.100 → 2차 0.027로 개선
 
 ### Phase 7 — 홍수 경계조건·소스 ⬜
 - [ ] **유입 hydrograph** Q(t) inlet (시간보간 테이블)
@@ -294,7 +296,7 @@ docs/
 | 3 IFC Reader | ⬜ | 네이티브 IFC4 파서, 외피 추출, MapConversion 지오레퍼런싱, ExtrudedAreaSolid/Brep 형상 |
 | 4 DEM→Mesh | ⚠️ 부분 | **2D Track A 완료**: `Dem::to_bed_field`→SwGrid+z_b (NODATA→wall), end-to-end 테스트 `tests/flood_dem_to_swe.rs` / 3D Track B(하이트필드 STL→cut-cell) ⬜ |
 | 5 결합 | ⬜ | 풋프린트 추출 + Block/Hole/Roughness burn-in + SDF union |
-| 6 SWE 솔버 | ⚠️ 거의완료 | **HLLC + Audusse well-balanced + wetting/drying + positivity + Manning(semi-impl) + 적응 CFL + SSP-RK2 완료·검증** (lake-at-rest C-property 1e-10, Ritter 댐붕괴, 질량보존) / MUSCL 2차 공간정확도만 ⬜ |
+| 6 SWE 솔버 | ✅ 완료 | HLLC + Audusse well-balanced + wetting/drying + positivity + Manning(semi-impl) + 적응 CFL + SSP-RK2 + **MUSCL 2차(minmod η-재구성 + 중앙 bed 소스)**. lake-at-rest C-property 1e-10(1·2차), Ritter 댐붕괴(MUSCL 오차 0.027 vs 1차 0.100), 질량보존 |
 | 7 홍수 BC | ⬜ | hydrograph / outflow / rainfall / wall |
 | 8 하이브리드 | ⬜ | SWE→3D VOF one-way coupling |
 | 9 후처리/GUI | ⬜ | 침수심/도달시간/hazard + VTK/GeoTIFF + GUI 컬러맵 + flood.* RPC |
