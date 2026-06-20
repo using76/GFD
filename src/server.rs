@@ -7200,7 +7200,10 @@ fn handle_flood_run(state: &mut ServerState, id: u64, params: &Value) -> RpcResp
     let t_end = params.get("t_end").and_then(|v| v.as_f64()).unwrap_or(1.0);
     let steps = fs.solver.advance(&mut fs.state, t_end, max_steps);
     // Phase 7 sources (operator-split over t_end): rain, infiltration, inlets.
-    // For constant rates the lumped update is exact for the linear source ODE.
+    // For constant rates the lumped update is exact for the linear source ODE;
+    // the .max(0.0) clamp caps infiltration at the available depth (can't drain a
+    // dry cell). Sources are applied AFTER advection and may wet a previously-dry
+    // cell — recording its arrival_time below is correct (rain/inflow IS arrival).
     if fs.rain_rate != 0.0 || fs.infil_rate != 0.0 {
         let net = (fs.rain_rate - fs.infil_rate) * t_end;
         for i in 0..fs.state.h.len() {
@@ -7211,14 +7214,22 @@ fn handle_flood_run(state: &mut ServerState, id: u64, params: &Value) -> RpcResp
         }
     }
     let cell_area = fs.cellsize * fs.cellsize;
+    let t_now = fs.time;
     for inlet in &fs.inlets {
         if inlet.cells.is_empty() {
             continue;
         }
-        let q = inlet.discharge(fs.time); // discharge at the start of the step window
+        // Trapezoidal integration of the (possibly time-varying) hydrograph over
+        // [t, t+t_end] — exact for the piecewise-linear discharge.
+        let q = 0.5 * (inlet.discharge(t_now) + inlet.discharge(t_now + t_end));
         let dh = q * t_end / (inlet.cells.len() as f64 * cell_area);
         for &i in &inlet.cells {
-            if i < fs.state.h.len() {
+            if i >= fs.state.h.len() {
+                continue;
+            }
+            // Inlets, like rain, must not inject water into solid (masked) cells.
+            let solid = fs.solver.solid_mask.as_ref().is_some_and(|m| m.get(i).copied().unwrap_or(false));
+            if !solid {
                 fs.state.h[i] = (fs.state.h[i] + dh).max(0.0);
             }
         }
@@ -7313,13 +7324,15 @@ fn handle_flood_add_inlet(state: &mut ServerState, id: u64, params: &Value) -> R
     if cells.is_empty() {
         return RpcResponse::err(id, "inlet region contains no cells");
     }
-    let hydro: Vec<(f64, f64)> = params.get("hydrograph").and_then(|v| v.as_array())
+    let mut hydro: Vec<(f64, f64)> = params.get("hydrograph").and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|p| {
             let xy = p.as_array()?;
             Some((xy.first()?.as_f64()?, xy.get(1)?.as_f64()?))
         }).collect())
         .filter(|v: &Vec<(f64, f64)>| !v.is_empty())
         .unwrap_or_else(|| vec![(0.0, f("q", 0.0))]);
+    // discharge() assumes time-ascending points — sort so unordered input is safe.
+    hydro.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     let n_cells = cells.len();
     fs.inlets.push(FloodInlet { cells, hydro });
     RpcResponse::ok(id, serde_json::json!({ "inlets": fs.inlets.len(), "cells": n_cells }))
@@ -8152,6 +8165,25 @@ mod tests {
         let v1 = { let fs = state.flood.as_ref().unwrap(); fs.solver.total_volume(&fs.state) };
         // q=2 m³/s × 3 s = 6 m³ added (minus negligible outflow; walls default).
         assert!(v1 - v0 > 5.0, "inlet should add ~6 m³, got {}", v1 - v0);
+    }
+
+    #[test]
+    fn flood_inlet_hydrograph_trapezoidal_and_sorted() {
+        // A linearly ramping hydrograph given OUT OF ORDER must still inject the
+        // trapezoidal-integrated volume (sort + end-window sampling).
+        let asc = "ncols 8\nnrows 8\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n".to_string()
+            + &"0 0 0 0 0 0 0 0\n".repeat(8);
+        let mut state = ServerState::new();
+        handle_flood_load_dem(&mut state, 1, &serde_json::json!({ "asc": asc, "manning_n": 0.0, "xmin": "wall", "xmax": "wall", "ymin": "wall", "ymax": "wall" }));
+        // Q ramps 0→4 over [0,4] s, given reversed; ∫Q dt over [0,4] = ½·4·4 = 8 m³.
+        handle_flood_add_inlet(&mut state, 2, &serde_json::json!({
+            "x": 4.0, "y": 4.0, "radius": 1.5, "hydrograph": [[4.0, 4.0], [0.0, 0.0]]
+        }));
+        let v0 = { let fs = state.flood.as_ref().unwrap(); fs.solver.total_volume(&fs.state) };
+        // One run spanning the whole hydrograph → trapezoidal volume = 8 m³.
+        handle_flood_run(&mut state, 3, &serde_json::json!({ "t_end": 4.0 }));
+        let v1 = { let fs = state.flood.as_ref().unwrap(); fs.solver.total_volume(&fs.state) };
+        assert!((v1 - v0 - 8.0).abs() < 1e-6, "trapezoidal inlet volume should be 8 m³, got {}", v1 - v0);
     }
 
     #[test]
