@@ -43,6 +43,12 @@ pub struct SwSolver {
     pub grid: SwGrid,
     pub params: SwParams,
     pub bc: SwBoundaries,
+    /// Optional per-cell Manning n override (Phase 5 Roughness burn-in). When set,
+    /// `friction()` uses `manning_field[i]` instead of the scalar `params.manning_n`.
+    pub manning_field: Option<Vec<f64>>,
+    /// Optional per-cell solid mask (Phase 5 Hole burn-in): masked cells act as
+    /// internal reflective walls and are kept permanently dry.
+    pub solid_mask: Option<Vec<bool>>,
 }
 
 /// A cell's primitive snapshot used in flux evaluation.
@@ -56,7 +62,28 @@ struct Cell {
 
 impl SwSolver {
     pub fn new(grid: SwGrid, params: SwParams, bc: SwBoundaries) -> Self {
-        Self { grid, params, bc }
+        Self { grid, params, bc, manning_field: None, solid_mask: None }
+    }
+
+    /// True if cell `i` is a solid (internal-wall) cell.
+    #[inline]
+    fn masked(&self, i: usize) -> bool {
+        self.solid_mask.as_ref().is_some_and(|m| m.get(i).copied().unwrap_or(false))
+    }
+
+    /// Mark cell `i` as a solid internal wall (Hole burn-in), allocating the mask
+    /// lazily.
+    pub fn set_solid(&mut self, i: usize) {
+        let n = self.grid.ncols * self.grid.nrows;
+        self.solid_mask.get_or_insert_with(|| vec![false; n])[i] = true;
+    }
+
+    /// Set the Manning n of cell `i` (Roughness burn-in), allocating the field
+    /// lazily (seeded from the scalar `params.manning_n`).
+    pub fn set_manning(&mut self, i: usize, n: f64) {
+        let nc = self.grid.ncols * self.grid.nrows;
+        let base = self.params.manning_n;
+        self.manning_field.get_or_insert_with(|| vec![base; nc])[i] = n;
     }
 
     #[inline]
@@ -165,26 +192,39 @@ impl SwSolver {
         };
 
         // ---- x-direction faces (normal = x; normal momentum = hu) ----
+        // A solid (masked) cell acts as a reflective internal wall: the fluid
+        // neighbour sees a wall ghost and the masked cell receives no flux.
         for r in 0..nr {
             for c in 0..=nc {
                 let li = if c > 0 { Some(self.grid.idx(c - 1, r)) } else { None };
                 let ri = if c < nc { Some(self.grid.idx(c, r)) } else { None };
-                let (l, r_cell) = match (li, ri) {
-                    (Some(li), Some(ri)) => (rx(li, 1.0), rx(ri, -1.0)),
-                    (None, Some(ri)) => { let ic = rx(ri, -1.0); (self.ghost(ic, self.bc.xmin, true), ic) }
-                    (Some(li), None) => { let ic = rx(li, 1.0); (ic, self.ghost(ic, self.bc.xmax, true)) }
+                let ml = li.is_some_and(|i| self.masked(i));
+                let mr = ri.is_some_and(|i| self.masked(i));
+                let (l, r_cell, apply_l, apply_r) = match (li, ri) {
+                    (Some(li), Some(ri)) => {
+                        if ml && mr { continue; }
+                        if mr { let ic = rx(li, 1.0); (ic, self.ghost(ic, SwBc::Wall, true), true, false) }
+                        else if ml { let ic = rx(ri, -1.0); (self.ghost(ic, SwBc::Wall, true), ic, false, true) }
+                        else { (rx(li, 1.0), rx(ri, -1.0), true, true) }
+                    }
+                    (None, Some(ri)) => { if mr { continue; } let ic = rx(ri, -1.0); (self.ghost(ic, self.bc.xmin, true), ic, false, true) }
+                    (Some(li), None) => { if ml { continue; } let ic = rx(li, 1.0); (ic, self.ghost(ic, self.bc.xmax, true), true, false) }
                     (None, None) => continue,
                 };
                 let (f, src_l, src_r) = self.interface(l, r_cell, true);
-                if let Some(li) = li {
-                    rh[li] -= f[0] / dx;
-                    rhu[li] -= (f[1] + src_l) / dx;
-                    rhv[li] -= f[2] / dx;
+                if apply_l {
+                    if let Some(li) = li {
+                        rh[li] -= f[0] / dx;
+                        rhu[li] -= (f[1] + src_l) / dx;
+                        rhv[li] -= f[2] / dx;
+                    }
                 }
-                if let Some(ri) = ri {
-                    rh[ri] += f[0] / dx;
-                    rhu[ri] += (f[1] + src_r) / dx;
-                    rhv[ri] += f[2] / dx;
+                if apply_r {
+                    if let Some(ri) = ri {
+                        rh[ri] += f[0] / dx;
+                        rhu[ri] += (f[1] + src_r) / dx;
+                        rhv[ri] += f[2] / dx;
+                    }
                 }
             }
         }
@@ -194,22 +234,33 @@ impl SwSolver {
             for r in 0..=nr {
                 let li = if r > 0 { Some(self.grid.idx(c, r - 1)) } else { None };
                 let ri = if r < nr { Some(self.grid.idx(c, r)) } else { None };
-                let (l, r_cell) = match (li, ri) {
-                    (Some(li), Some(ri)) => (ry(li, 1.0), ry(ri, -1.0)),
-                    (None, Some(ri)) => { let ic = ry(ri, -1.0); (self.ghost(ic, self.bc.ymin, false), ic) }
-                    (Some(li), None) => { let ic = ry(li, 1.0); (ic, self.ghost(ic, self.bc.ymax, false)) }
+                let ml = li.is_some_and(|i| self.masked(i));
+                let mr = ri.is_some_and(|i| self.masked(i));
+                let (l, r_cell, apply_l, apply_r) = match (li, ri) {
+                    (Some(li), Some(ri)) => {
+                        if ml && mr { continue; }
+                        if mr { let ic = ry(li, 1.0); (ic, self.ghost(ic, SwBc::Wall, false), true, false) }
+                        else if ml { let ic = ry(ri, -1.0); (self.ghost(ic, SwBc::Wall, false), ic, false, true) }
+                        else { (ry(li, 1.0), ry(ri, -1.0), true, true) }
+                    }
+                    (None, Some(ri)) => { if mr { continue; } let ic = ry(ri, -1.0); (self.ghost(ic, self.bc.ymin, false), ic, false, true) }
+                    (Some(li), None) => { if ml { continue; } let ic = ry(li, 1.0); (ic, self.ghost(ic, self.bc.ymax, false), true, false) }
                     (None, None) => continue,
                 };
                 let (f, src_l, src_r) = self.interface(l, r_cell, false);
-                if let Some(li) = li {
-                    rh[li] -= f[0] / dy;
-                    rhv[li] -= (f[1] + src_l) / dy;
-                    rhu[li] -= f[2] / dy;
+                if apply_l {
+                    if let Some(li) = li {
+                        rh[li] -= f[0] / dy;
+                        rhv[li] -= (f[1] + src_l) / dy;
+                        rhu[li] -= f[2] / dy;
+                    }
                 }
-                if let Some(ri) = ri {
-                    rh[ri] += f[0] / dy;
-                    rhv[ri] += (f[1] + src_r) / dy;
-                    rhu[ri] += f[2] / dy;
+                if apply_r {
+                    if let Some(ri) = ri {
+                        rh[ri] += f[0] / dy;
+                        rhv[ri] += (f[1] + src_r) / dy;
+                        rhu[ri] += f[2] / dy;
+                    }
                 }
             }
         }
@@ -222,6 +273,9 @@ impl SwSolver {
         if muscl {
             let g = self.params.gravity;
             for i in 0..n {
+                if self.masked(i) {
+                    continue;
+                }
                 let (hl, hr) = (rx(i, -1.0).h, rx(i, 1.0).h);
                 rhu[i] -= g * 0.5 * (hl + hr) * sxz[i] / dx;
                 let (hb, ht) = (ry(i, -1.0).h, ry(i, 1.0).h);
@@ -241,10 +295,15 @@ impl SwSolver {
         self.positivity(out);
     }
 
-    /// Clamp depths ≥ 0 and zero momentum in dry cells.
+    /// Clamp depths ≥ 0 and zero momentum in dry cells; solid (masked) cells are
+    /// forced fully dry.
     fn positivity(&self, s: &mut SwState) {
         for i in 0..s.n_cells() {
-            if s.h[i] <= self.params.h_dry {
+            if self.masked(i) {
+                s.h[i] = 0.0;
+                s.hu[i] = 0.0;
+                s.hv[i] = 0.0;
+            } else if s.h[i] <= self.params.h_dry {
                 s.h[i] = s.h[i].max(0.0);
                 s.hu[i] = 0.0;
                 s.hv[i] = 0.0;
@@ -253,16 +312,21 @@ impl SwSolver {
     }
 
     /// Manning friction, semi-implicit: d(hu)/dt = −k·hu with
-    /// k = g n² |U| / h^{4/3}; solved as hu ← hu / (1 + dt·k).
+    /// k = g n² |U| / h^{4/3}; solved as hu ← hu / (1 + dt·k). Uses the per-cell
+    /// `manning_field` (Roughness burn-in) when present, else the scalar n.
     fn friction(&self, s: &mut SwState, dt: f64) {
-        let n = self.params.manning_n;
-        if n <= 0.0 {
+        let scalar_n = self.params.manning_n;
+        if scalar_n <= 0.0 && self.manning_field.is_none() {
             return;
         }
         let g = self.params.gravity;
         for i in 0..s.n_cells() {
             let h = s.h[i];
             if h <= self.params.h_dry {
+                continue;
+            }
+            let n = self.manning_field.as_ref().map_or(scalar_n, |m| m.get(i).copied().unwrap_or(scalar_n));
+            if n <= 0.0 {
                 continue;
             }
             let (u, v) = velocity(s, i, &self.params);
@@ -468,6 +532,74 @@ mod tests {
         // MUSCL stays accurate at the dam and resolves the front at least as far.
         assert!(e2 < 0.2, "MUSCL dam-depth error {e2} too large");
         assert!(f2 >= f1, "MUSCL front {f2} should reach ≥ 1st-order front {f1}");
+    }
+
+    #[test]
+    fn hole_mask_blocks_flow_and_stays_dry() {
+        // A 1D channel with a masked (solid) cell: water released on the left must
+        // NOT pass through the masked cell, which stays dry.
+        let (nc, nr) = (20, 1);
+        let mut s = SwState::dry(flat(nc, nr));
+        for c in 0..5 { s.h[c] = 2.0; }
+        let mut solver = SwSolver::new(
+            SwGrid::new(nc, nr, 1.0, 1.0),
+            SwParams { manning_n: 0.0, ..Default::default() },
+            SwBoundaries { xmin: SwBc::Wall, xmax: SwBc::Wall, ..Default::default() },
+        );
+        solver.set_solid(10); // wall at cell 10
+        solver.advance(&mut s, 5.0, 100000);
+        assert!(s.h.iter().all(|&h| h >= 0.0 && h.is_finite()));
+        assert!(s.h[10] < 1e-9, "masked cell must stay dry, got {}", s.h[10]);
+        // Nothing should be downstream of the wall (cells 11..) — fully dry.
+        for c in 11..nc {
+            assert!(s.h[c] < 1e-6, "water leaked past the wall at {c}: {}", s.h[c]);
+        }
+    }
+
+    #[test]
+    fn lake_at_rest_with_solid_mask() {
+        // Still water with an internal wall stays flat (C-property preserved).
+        let (nc, nr) = (20, 1);
+        let s0 = SwState::lake_at_rest(flat(nc, nr), 1.0);
+        let mut solver = SwSolver::new(SwGrid::new(nc, nr, 1.0, 1.0), SwParams { manning_n: 0.0, ..Default::default() }, SwBoundaries::default());
+        solver.set_solid(7);
+        solver.set_solid(8);
+        let mut s = s0.clone();
+        for _ in 0..40 { solver.step(&mut s, 0.05); }
+        for i in 0..s.n_cells() {
+            if solver.masked(i) {
+                assert!(s.h[i] < 1e-12, "masked cell wet at {i}");
+            } else {
+                assert!((s.h[i] - 1.0).abs() < 1e-9, "level drift at {i}: {}", s.h[i]);
+                assert!(s.hu[i].abs() < 1e-9, "spurious momentum at {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn roughness_damps_flow() {
+        // Higher per-cell Manning n in a downstream strip slows the front: the
+        // rough run advances its wet front less far than the smooth run.
+        let (nc, nr) = (120, 1);
+        let front = |rough: bool| -> usize {
+            let mut s = SwState::dry(flat(nc, nr));
+            for c in 0..20 { s.h[c] = 3.0; }
+            let mut solver = SwSolver::new(
+                SwGrid::new(nc, nr, 1.0, 1.0),
+                SwParams { manning_n: 0.02, ..Default::default() },
+                SwBoundaries { xmin: SwBc::Wall, xmax: SwBc::Transmissive, ..Default::default() },
+            );
+            if rough {
+                for c in 40..nc { solver.set_manning(c, 0.5); } // very rough downstream
+            }
+            solver.advance(&mut s, 6.0, 100000);
+            let mut f = 0;
+            for c in 0..nc { if s.h[c] > 0.02 { f = c; } }
+            f
+        };
+        let smooth = front(false);
+        let rough = front(true);
+        assert!(rough < smooth, "rough front {rough} should lag smooth front {smooth}");
     }
 
     #[test]

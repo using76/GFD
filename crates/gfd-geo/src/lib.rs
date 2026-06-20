@@ -11,6 +11,7 @@
 //! being lowered into a `f32` `TriMesh`/STL, or sub-decimeter resolution is lost.
 
 pub mod dem;
+pub mod geotiff;
 pub mod ifc;
 pub mod sdf;
 
